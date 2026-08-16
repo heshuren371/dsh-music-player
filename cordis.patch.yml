@@ -1,0 +1,8 @@
+# @local/dsh-music-player bundle patch — 挂载「音乐」标签页。
+# 宿主注入 webServer（注册 /dsh-music 路由：目录扫描 + 元数据 + Range 流式播放），
+# 客户端在 conversation.view 槽位注册「音乐」标签（order 20，位于「轨迹」之后）。
+# 零核心改动：卸载即从装配图摘除，路由与标签页一并清理。
+
+- insert:
+    - id: music-player
+      name: '@local/dsh-music-player'
