@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-music-player",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "DSH Web 本地音乐播放器：会话视图「音乐」标签页，选择本地目录、扫描常见音频格式（mp3/flac/m4a/ogg/wav...），歌曲名/歌手/时长列表，单曲循环与列表循环播放。",
   "license": "MIT",
   "author": "heshuren371",
