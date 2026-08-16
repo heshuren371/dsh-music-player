@@ -31,13 +31,13 @@ npm install
 在 DSH 会话中让 Agent 调用：
 
 ```
-dev_install_package(dir="https://github.com/heshuren371/dsh-music-player", profile="web")
+dev_install_package(dir="https://github.com/heshuren371/dsh-music-player/tree/main", profile="web")
 ```
 
 **方式二：手动装配**
 
 1. 在 `~/.dsh/profiles/web/package.json` 的 `dependencies` 中加入：
-   `"@local/dsh-music-player": "link:<本仓库绝对路径>"`
+   `"@local/dsh-music-player": "link:https://github.com/heshuren371/dsh-music-player/tree/main"`
 2. 同文件 `bundles` 数组加入 `"@local/dsh-music-player"`
 3. 在 `~/.dsh/profiles/web/node_modules/` 建立指向本仓库的软链接
 4. 重启 `dsh web`
