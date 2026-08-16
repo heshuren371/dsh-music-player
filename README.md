@@ -6,10 +6,11 @@ A local music player plugin for the DeepSeek Harness Web GUI — adds a **音乐
 
 ## 功能 / Features
 
-- 📁 选择本地目录（macOS 原生目录选择器），递归扫描常见音频格式：**flac / mp3 / m4a / aac / ogg / opus / wav**
+- 📁 选择本地目录（原生目录选择器，**macOS / Windows / Linux 均支持**；也可点标题栏 ⌨ 按钮手动粘贴路径，如 `D:\Music`），递归扫描常见音频格式：**flac / mp3 / m4a / aac / ogg / opus / wav**
 - 🎵 列表展示：歌曲名、歌手（内嵌标签解析，缺省回退「歌手 - 歌名」文件名约定）、时长
 - 🔁 播放模式：单曲循环 / 列表循环（无随机播放、无歌词页——刻意保持简单）
-- 🎚️ macOS Music 风格进度条：填充式进度、rAF 逐帧平滑走动、悬停加粗变色、拖拽松手才 seek
+- 🎚️ macOS Music 风格进度条：填充式进度、rAF 逐帧平滑走动、悬停加粗变色、拖拽松手才 seek、滚轮 ±5s（Shift ±1s）、音量条滚轮 ±5%
+- 🖱️ 歌曲列表独立内滚（顶栏与播放条固定），滚轮全程可用
 - ⏯️ 切换标签页音乐不中断（`<audio>` 元素驻留模块级单例）
 - 💾 目录选择持久化（`lib/state.json`），重启自动恢复并后台扫描
 - 🎨 全量使用 DSH 设计变量（`--dsw-alias-*`），明暗主题自适应
@@ -28,18 +29,20 @@ npm install
 
 **方式一：dsh-super-injector（推荐，免重启）**
 
-在 DSH 会话中让 Agent 调用：
+先克隆到本地，然后在 DSH 会话中让 Agent 调用（`dir` 为**本地克隆路径**）：
 
 ```
-dev_install_package(dir="https://github.com/heshuren371/dsh-music-player/tree/main", profile="web")
+git clone https://github.com/heshuren371/dsh-music-player.git
+# 在 DSH 会话中：
+dev_install_package(dir="<本地克隆绝对路径，如 ~/dev/dsh-music-player>", profile="web")
 ```
 
 **方式二：手动装配**
 
 1. 在 `~/.dsh/profiles/web/package.json` 的 `dependencies` 中加入：
-   `"@local/dsh-music-player": "link:https://github.com/heshuren371/dsh-music-player/tree/main"`
+   `"@local/dsh-music-player": "link:<本地克隆绝对路径>"`（link 协议只支持本地路径）
 2. 同文件 `bundles` 数组加入 `"@local/dsh-music-player"`
-3. 在 `~/.dsh/profiles/web/node_modules/` 建立指向本仓库的软链接
+3. 在 `~/.dsh/profiles/web/node_modules/` 建立指向本地克隆目录的软链接（Windows 用目录联接 `mklink /J`）
 4. 重启 `dsh web`
 
 刷新 http://127.0.0.1:3080 ，打开任意会话即可看到「音乐」标签。
