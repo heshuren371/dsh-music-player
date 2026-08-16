@@ -31,7 +31,7 @@ npm install
 在 DSH 会话中让 Agent 调用：
 
 ```
-dev_install_package(dir="<本仓库绝对路径>", profile="web")
+dev_install_package(dir="https://github.com/heshuren371/dsh-music-player", profile="web")
 ```
 
 **方式二：手动装配**
