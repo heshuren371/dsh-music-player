@@ -22,35 +22,130 @@ A local music player plugin for the DeepSeek Harness Web GUI — adds a **音乐
 - 🌊 Range 流式传输（稳定 ID 寻址 + 越界 403），大文件拖动进度条秒跳
 - 🧩 标准 bundle 插件：进插件清单、可热重载、卸载即净
 
-## 安装 / Install
+---
+
+## 安装教程（详细版）
+
+### 第 0 步：确认前置条件
+
+| 依赖 | 检查命令 | 说明 |
+| --- | --- | --- |
+| DSH 已安装并能打开 Web 界面 | 浏览器能访问 <http://127.0.0.1:3080> | 还没装 DSH 的话先装：`npm i -g @deepseek-ai/dsh`，然后 `dsh web` |
+| git | `git --version` | 用来克隆仓库 |
+| Node.js ≥ 22 | `node -v` | 与 DSH 运行要求一致 |
+
+> 下文默认你的 DSH profile 是 **web**（默认就是）。插件文件在磁盘上的位置**任意**，但克隆之后**不要移动或删除**它——profile 通过链接指向这个位置，移动后插件会失效。
+
+### 第 1 步：克隆并安装依赖
 
 ```bash
+# 选一个你喜欢的位置，例如：
 git clone https://github.com/heshuren371/dsh-music-player.git
 cd dsh-music-player
 npm install
 ```
 
-然后装配到 DSH web profile（二选一）：
+`npm install` 会安装唯一的运行时依赖 `music-metadata`（解析歌曲名/歌手/时长用）。看到 `node_modules/` 目录出现即成功。
 
-**方式一：dsh-super-injector（推荐，免重启）**
+### 第 2 步：装配到 DSH（二选一）
 
-先克隆到本地，然后在 DSH 会话中让 Agent 调用（`dir` 为**本地克隆路径**）：
+#### 方式 A：让 DSH 的 Agent 替你装（推荐，免重启）
+
+前提：你的 DSH 里装有 [dsh-super-injector](https://github.com/deepseek-harness/dsh-external)（提供 `dev_*` 装配工具的环境）。
+
+在 DSH 对话框里直接对 Agent 说（把路径换成你**第 1 步的实际克隆路径**）：
 
 ```
-git clone https://github.com/heshuren371/dsh-music-player.git
-# 在 DSH 会话中：
-dev_install_package(dir="<本地克隆绝对路径，如 ~/dev/dsh-music-player>", profile="web")
+调用 dev_install_package，dir 填 /你的/实际路径/dsh-music-player，profile 填 web
 ```
 
-**方式二：手动装配**
+macOS / Linux 路径示例：`/home/you/dev/dsh-music-player`
+Windows 路径示例：`C:\Users\you\dev\dsh-music-player`
 
-1. 在 `~/.dsh/profiles/web/package.json` 的 `dependencies` 中加入：
-   `"@local/dsh-music-player": "link:<本地克隆绝对路径>"`（link 协议只支持本地路径）
-2. 同文件 `bundles` 数组加入 `"@local/dsh-music-player"`
-3. 在 `~/.dsh/profiles/web/node_modules/` 建立指向本地克隆目录的软链接（Windows 用目录联接 `mklink /J`）
-4. 重启 `dsh web`
+Agent 会完成：写 profile 依赖 → 建链接 → 热加载。**刷新浏览器页面**即可看到「音乐」标签。
 
-刷新 http://127.0.0.1:3080 ，打开任意会话即可看到「音乐」标签。
+#### 方式 B：手动装配（任何环境都行，需重启一次）
+
+1. 打开 profile 配置文件：
+   - macOS / Linux：`~/.dsh/profiles/web/package.json`
+   - Windows：`C:\Users\你的用户名\.dsh\profiles\web\package.json`
+
+2. 在 `dependencies` 里加一行（路径是第 1 步的克隆路径；JSON 里 Windows 路径的反斜杠要写成 `\\` 或改用 `/`）：
+
+   ```json
+   "dependencies": {
+     "@local/dsh-music-player": "link:/home/you/dev/dsh-music-player"
+   }
+   ```
+
+3. 同一个文件里，把包名加进 bundles 列表（在 `dsh.profile.bundles` 数组中）：
+
+   ```json
+   "dsh": { "profile": { "bundles": ["@local/dsh-music-player"] } }
+   ```
+
+4. 建立链接（让 profile 的 node_modules 能找到插件）：
+
+   ```bash
+   # macOS / Linux：
+   ln -s /home/you/dev/dsh-music-player ~/.dsh/profiles/web/node_modules/@local/dsh-music-player
+
+   # Windows（管理员 cmd，用目录联接）：
+   mklink /J "C:\Users\你的用户名\.dsh\profiles\web\node_modules\@local\dsh-music-player" "C:\Users\you\dev\dsh-music-player"
+   ```
+
+5. 重启 `dsh web`。
+
+### 第 3 步：验证安装
+
+1. 浏览器**刷新** <http://127.0.0.1:3080>
+2. 打开任意会话，顶部标签应是：**对话 / 轨迹 / 音乐**
+3. 点「音乐」→「选择目录」，选中你放歌的文件夹即可
+
+看不到「音乐」标签？按顺序排查：① 浏览器有没有刷新；② profile package.json 里 `bundles` 数组有没有包名；③ 链接是否建好（`ls ~/.dsh/profiles/web/node_modules/@local/dsh-music-player` 能列出文件）；④ 克隆目录里有没有 `npm install`。
+
+---
+
+## 更新命令
+
+```bash
+cd /你的/克隆路径/dsh-music-player
+git pull
+npm install        # 依赖有变化时才真正需要，执行了也无害
+```
+
+然后让改动生效（二选一）：
+
+- **免重启（有 super-injector）**：在 DSH 对话里说 `调用 dev_reload_package，packageName 填 dsh-music-player`，然后刷新浏览器页面
+- **重启**：重启 `dsh web`
+
+---
+
+## 卸载命令
+
+### 有 super-injector（先热卸载）
+
+1. 在 DSH 对话里说：`调用 dev_uninject_plugin，match 填 dsh-music-player` —— 立即生效，标签页消失
+2. 再做一次「手动卸载」的第 1、2 步清理配置，防止重启后装回
+
+### 手动卸载（彻底清理）
+
+1. 打开 `~/.dsh/profiles/web/package.json`（Windows 见上文路径），**删除两行**：
+   - `dependencies` 里的 `"@local/dsh-music-player": "link:..."`
+   - `dsh.profile.bundles` 数组里的 `"@local/dsh-music-player"`
+2. 删除链接：
+   ```bash
+   # macOS / Linux：
+   rm ~/.dsh/profiles/web/node_modules/@local/dsh-music-player
+   # Windows（cmd）：
+   rmdir "C:\Users\你的用户名\.dsh\profiles\web\node_modules\@local\dsh-music-player"
+   ```
+3. 重启 `dsh web`
+4. （可选）删除克隆目录。克隆目录里的 `lib/state.json` 记录着你选择的音乐目录，删除即彻底清空痕迹
+
+> 卸载不会动你的任何音乐文件——插件从头到尾只读。
+
+---
 
 ## HTTP API
 
