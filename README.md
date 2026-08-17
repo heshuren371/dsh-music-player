@@ -10,6 +10,7 @@ A local music player plugin for the DeepSeek Harness Web GUI — adds a **音乐
 - 🎵 列表展示：歌曲名、歌手（内嵌标签解析，缺省回退「歌手 - 歌名」文件名约定）、时长
 - 🔁 播放模式：单曲循环 / 列表循环（无随机播放、无歌词页——刻意保持简单）
 - 🔀 列头排序：歌名 / 歌手 / 时长，升降序切换，刷新后记忆；**播放顺序 = 可见列表顺序**（排序/搜索后，「下一首」就是你看到的下一行）
+- ➖ 行首删除：每首歌最前面的「−」按钮，点击后弹确认框，同意后**同时删除本地文件（永久删除，不可恢复）**
 - 🔍 搜索过滤：歌名 / 歌手 / 文件名，n/N 计数
 - 🖼️ 专辑封面：底部播放条缩略图（内嵌封面提取，无封面回退音符图标）
 - 🎛️ MediaSession：系统媒体键（播放/暂停/上一首/下一首/seek）、macOS 控制中心显示歌名/歌手/封面
@@ -35,7 +36,7 @@ dsh plugin --profile web add github:heshuren371/dsh-music-player
 重启 `dsh web`，刷新浏览器——会话顶部标签环出现「音乐」即成功。
 
 - 这一条命令完成全部装配：下载插件、安装依赖（music-metadata）、把插件注册进 profile 的 bundles 装配层——**无需克隆仓库、无需手动改 JSON、无需建软链**
-- 想锁定版本：`github:heshuren371/dsh-music-player#v0.3.2`
+- 想锁定版本：`github:heshuren371/dsh-music-player#v0.3.3`
 - 还没装 DSH：`npm i -g @deepseek-ai/dsh`，然后 `dsh web`
 
 ## 更新 / Update
@@ -97,6 +98,7 @@ dsh plugin --profile web add link:./dsh-music-player
 | `/dsh-music/api/pick` | POST | 弹原生目录选择器，选定后扫描 |
 | `/dsh-music/api/stream?p=<id>` | GET | 按稳定 ID（相对路径）流式传输（Range / 206，越界 403） |
 | `/dsh-music/api/cover?p=<id>` | GET | 内嵌专辑封面（内存缓存，无封面 404） |
+| `/dsh-music/api/delete` | POST | `{ "id": "<曲目 id>" }` 删除曲目（**含本地文件**，仅限当前库内、越界拒绝），返回更新后的库 |
 
 ## 结构 / Structure
 
