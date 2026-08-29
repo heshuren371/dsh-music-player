@@ -1,0 +1,101 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Yan-Zero/dsh-std/main/packages/manifest/schema/dsh-plugin-0.15.schema.json",
+  "manifestVersion": "0.15",
+  "id": "local.dsh-music-player",
+  "name": "DSH Music Player（本地音乐播放器）",
+  "version": "0.3.3",
+  "facets": {
+    "host": {
+      "entry": "lib/index.js",
+      "apiVersion": "v1alpha1"
+    }
+  },
+  "requires": {
+    "contracts": [
+      {
+        "apiVersion": "webserver.dsh/v1alpha1",
+        "kind": "HttpPrefixRoutes",
+        "optional": true
+      },
+      {
+        "apiVersion": "browser.ui.dsh/v1alpha1",
+        "kind": "ContributionHost",
+        "optional": true
+      }
+    ]
+  },
+  "permissions": [
+    {
+      "name": "fs.read",
+      "scope": "用户选择的本地音乐目录（递归扫描与流式读取音频文件）",
+      "reason": "扫描目录、读取元数据、Range 流式播放"
+    },
+    {
+      "name": "fs.delete",
+      "scope": "当前音乐目录内、且在播放列表中的音频文件",
+      "reason": "用户在应用内确认后的曲目删除"
+    },
+    {
+      "name": "storage.local",
+      "scope": "$DSH_HOME/storages/dsh-music-player.json + 浏览器 localStorage（dsh-music:* 前缀）",
+      "reason": "记住音乐目录、最后播放曲目与进度、音量/循环/排序偏好"
+    }
+  ],
+  "contributes": {
+    "commands": [],
+    "x-dev.dsh-std.extensions": [
+      {
+        "id": "local.dsh-music-player.browser",
+        "apiVersion": "browser.ui.dsh/v1alpha1",
+        "kind": "LocalModule",
+        "name": "browser",
+        "spec": {
+          "module": "lib/client.js",
+          "requirements": []
+        }
+      },
+      {
+        "id": "local.dsh-music-player.music-view",
+        "apiVersion": "browser.ui.dsh/v1alpha1",
+        "kind": "ConversationViewSlot",
+        "name": "music",
+        "spec": {
+          "order": 20,
+          "label": "音乐",
+          "note": "conversation.view 标签页；标准 surface definition 待上游定义"
+        }
+      },
+      {
+        "id": "local.dsh-music-player.routes",
+        "apiVersion": "webserver.dsh/v1alpha1",
+        "kind": "HttpPrefixRoutes",
+        "name": "dsh-music",
+        "spec": {
+          "prefix": "/dsh-music",
+          "endpoints": [
+            "GET /api/library",
+            "POST /api/refresh",
+            "POST /api/dir",
+            "GET /api/cover",
+            "POST /api/pick",
+            "GET /api/stream",
+            "POST /api/delete"
+          ]
+        }
+      }
+    ]
+  },
+  "license": "MIT",
+  "source": {
+    "repository": "https://github.com/heshuren371/dsh-music-player"
+  },
+  "x-dsh-transition": {
+    "activation": "当前 entry 为 Cordis 插件形状（exports { apply, inject, name }），待 adapter-dsh 的 Cordis activation kind 落地后对齐",
+    "clientInject": [
+      "@deepseek-ai/dsh-client-runtime",
+      "@deepseek-ai/dsh-client-locale",
+      "@deepseek-ai/dsh-client-ui-conversation"
+    ],
+    "bundlePatch": "cordis.patch.yml"
+  }
+}
