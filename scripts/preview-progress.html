@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>dsh-music 进度条预览</title>
+<style>
+  /* Approximates the DSH dark theme so the plugin CSS renders as it does in the
+     real shell (these variables come from the host page there). */
+  :root{
+    --dsw-alias-label-primary:#e9e9ec; --dsw-alias-label-secondary:#c8c8cf; --dsw-alias-label-tertiary:#96969e; --dsw-alias-label-caption:#6f6f77;
+    --dsw-alias-border-l1:#2a2a2f; --dsw-alias-border-l2:#3c3c43; --dsw-alias-bg-layer-1:#1b1b1f; --dsw-alias-bg-layer-2:#232328; --dsw-alias-fill-l1:#26262b;
+    --dsw-alias-interactive-bg-hover:#2e2e35; --dsw-alias-state-business-primary:#4c8dff; --dsw-specific-sidebar-fill:#202025;
+    --ds-ease-in-out:cubic-bezier(.4,0,.2,1); --dsw-font-xs-13:13px/1.4 -apple-system,system-ui,sans-serif;
+  }
+  html,body{margin:0;height:100%;background:#1b1b1f;color:#ddd;font:13px/1.5 -apple-system,system-ui,sans-serif}
+  #scroll{height:70vh;min-height:420px;display:flex;flex-direction:column}
+  #report{padding:10px 14px;font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre-wrap;color:#9fe6a0}
+  #report b{color:#ffd479}
+</style>
+</head>
+<body>
+<div id="scroll" data-conversation-scroll><div id="host" style="height:100%"></div></div>
+<div id="report">booting…</div>
+
+<script src="/node_modules/react/umd/react.development.js"></script>
+<script src="/node_modules/react-dom/umd/react-dom.development.js"></script>
+<script>
+  // Count how often the track table rebuilds its <tbody> (the perf regression).
+  window.__tbodyRenders = 0;
+  const originalCreateElement = React.createElement;
+  React.createElement = function (type, ...rest) {
+    if (type === 'tbody') window.__tbodyRenders += 1;
+    return originalCreateElement.call(this, type, ...rest);
+  };
+  window.__ModuleLoader__ = { load: (mod) => { window.__factory = mod.factory; } };
+  // Start from a clean slate: the player restores the last position on mount.
+  localStorage.removeItem('dsh-music:prefs');
+</script>
+<script src="/lib/client.js"></script>
+<script>
+(async () => {
+  const report = [];
+  try {
+  const log = (label, ok, detail) => report.push((ok ? 'PASS ' : 'FAIL ') + label + (detail === undefined ? '' : ' | ' + detail));
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // The plugin streams from /dsh-music/api/stream; point the element at the
+  // harness WAV so real seeking/playback can be exercised.
+  const RealAudio = window.Audio;
+  window.Audio = class extends RealAudio {
+    set src(value) { super.src = String(value).startsWith('/dsh-music/api/stream') ? '/tone.wav' : value; }
+    get src() { return super.src; }
+  };
+
+  const tracks = [
+    { index: 0, id: 'tone.wav', name: 'tone.wav', title: '测试音', artist: '生成器', duration: 120, mime: 'audio/wav' },
+    { index: 1, id: 'tone2.wav', name: 'tone2.wav', title: '测试音 2', artist: '生成器', duration: 120, mime: 'audio/wav' },
+  ];
+  window.fetch = async () => ({ ok: true, json: async () => ({ dir: '/music', tracks, scanning: false, scanParsed: 2, scanTotal: 2, truncated: false, scannedAt: 1 }) });
+
+  const plugin = window.__factory((name) => {
+    if (name === 'react') return React;
+    throw new Error('require: ' + name);
+  });
+  let ViewComponent = null;
+  const ctx = {
+    effect: (fn) => fn(),
+    locale: {
+      register: () => {},
+      bind: () => (key) => {
+        const dict = { stats: (n) => n + ' 首', 'scan.progress': (a, b) => a + '/' + b, 'confirm.delete': (t) => '删除 ' + t };
+        return dict[key] ?? key;
+      },
+    },
+    slots: { inject: (name, fn) => fn(), register: (meta, component) => { ViewComponent = component; return () => {}; } },
+  };
+  plugin.apply(ctx);
+
+  const host = document.getElementById('host');
+  const root = ReactDOM.createRoot(host);
+  const reportEl = document.getElementById('report');
+  const flush = () => { reportEl.textContent = report.join('\n'); };
+  root.render(React.createElement(ViewComponent));
+  await sleep(400);
+  report.push('· mounted'); flush();
+
+  const rows = host.querySelectorAll('.dshm-row');
+  log('view renders 2 rows', rows.length === 2, 'rows=' + rows.length);
+
+  const slider = host.querySelector('.dshm-progress .dshm-slider');
+  const clock = host.querySelector('.dshm-progress .dshm-time');
+  const fill = () => Number.parseFloat(slider.style.getPropertyValue('--p'));
+
+  // ── 1. the slider box must stay transparent around the 4px track ─────────
+  // (the longhand background rewrite once left Chrome's UA `background-color:
+  //  field` visible as a block behind the track)
+  const cs = getComputedStyle(slider);
+  log('slider box has no background fill', cs.backgroundColor === 'rgba(0, 0, 0, 0)', 'background-color=' + cs.backgroundColor);
+  log('track uses the original single-layer gradient', cs.backgroundSize === '100% 4px' && cs.backgroundImage.includes('linear-gradient'), 'size=' + cs.backgroundSize);
+  window.__probe = { slider, clock, fill, host };
+  window.__result = report;
+  document.getElementById('report').textContent = report.join('\n');
+
+  // ── 2. wait for the harness's real click: autoplay needs user activation ──
+  const player = window.__dshMusicPlayer;
+  for (let i = 0; i < 100 && !player.getState().playing; i += 1) await sleep(100);
+  log('trusted click started real playback', player.getState().playing === true, 'playing=' + player.getState().playing);
+  await sleep(300);
+
+  // ── 3. React must deliver native input events on a range slider ──────────
+  const setNativeValue = (v) => Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(slider, v);
+  const beforeSeek = player.now();
+  setNativeValue(60);
+  slider.dispatchEvent(new Event('input', { bubbles: true }));
+  await sleep(150);
+  log('native input event reaches React onChange', Math.abs(fill() - 50) < 1.5 && clock.textContent === '1:00',
+    '--p=' + fill().toFixed(2) + ' clock=' + clock.textContent + ' (was ' + beforeSeek.toFixed(2) + 's)');
+  log('seek moved the audio clock', Math.abs(player.now() - 60) < 1.5, 'audio clock=' + player.now().toFixed(2));
+
+  window.__probe = { slider, clock, fill, host, setNativeValue };
+  window.__result = report;
+  document.getElementById('report').textContent = report.join('\n');
+  } catch (error) {
+    report.push('ERROR ' + (error && error.stack ? error.stack : String(error)));
+    window.__result = report;
+  }
+  window.__ready = true;
+})();
+</script>
+</body>
+</html>
