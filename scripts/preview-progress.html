@@ -54,7 +54,7 @@
 
   const tracks = [
     { index: 0, id: 'tone.wav', name: 'tone.wav', title: '测试音', artist: '生成器', duration: 120, mime: 'audio/wav' },
-    { index: 1, id: 'tone2.wav', name: 'tone2.wav', title: '测试音 2', artist: '生成器', duration: 120, mime: 'audio/wav' },
+    { index: 1, id: 'tone2.wav', name: 'tone2.wav', title: '无歌手测试', artist: null, duration: 120, mime: 'audio/wav' },
   ];
   window.fetch = async () => ({ ok: true, json: async () => ({ dir: '/music', tracks, scanning: false, scanParsed: 2, scanTotal: 2, truncated: false, scannedAt: 1 }) });
 
