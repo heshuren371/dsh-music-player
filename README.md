@@ -1,6 +1,6 @@
 # dsh-music-player
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）Web 界面的本地音乐播放器插件。在会话视图标签环（对话 / 轨迹 / …）中注册「音乐」标签页（位于「轨迹」之后），UI 参考 macOS 自带 Music 应用。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）Web 界面的本地音乐播放器插件。在会话视图标签环（对话 / 轨迹 / …）中注册「音乐」标签页，UI 参考 macOS 自带 Music 应用。
 
 A local music player plugin for the DeepSeek Harness Web GUI — adds a **音乐 (Music)** tab to the conversation view ring, styled after the macOS Music app.
 
@@ -20,7 +20,7 @@ A local music player plugin for the DeepSeek Harness Web GUI — adds a **音乐
 - ⏯️ 切换标签页音乐不中断（`<audio>` 元素驻留全局单例，HMR 也不双开）
 - 💾 状态持久化：目录（服务端 `$DSH_HOME/storages/dsh-music-player.json`，兼容旧的包内 `lib/state.json`）+ 音量 / 循环模式 / 排序 / 最后播放曲目与进度（localStorage），刷新后曲目以暂停态 cue 在原位置
 - 🎨 全量使用 DSH 设计变量（`--dsw-alias-*`），明暗主题自适应
-- 🌊 Range 流式传输（稳定 ID 寻址 + 越界 403），大文件拖动进度条秒跳
+- 🌊 Range 流式传输，大文件拖动进度条秒跳
 - 🔒 仅接受回环同源请求：跨站简单请求 / DNS rebinding 一律 403；封面仅放行栅格格式（`image/svg+xml` 等一律 404）并按字节数封顶缓存
 - 🧩 标准 bundle 插件：进插件清单、可热重载、卸载即净
 
