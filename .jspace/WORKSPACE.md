@@ -19,8 +19,14 @@
 - ✓10 播放顺序修复并发布 v0.3.2：visibleRows 成为渲染与播放推进的唯一顺序源，已推 GitHub（main + tag） — verified by: Node stub tests, 9 cases across sort asc/desc, filter, prev 3s rule, ended, toggle — all pass; tarball diff across all 6 packaged files
 - ✓11 删除功能完成并发布 v0.3.3：行首 − 按钮 + 确认框，确认后删除本地文件；服务端越界/重复删/非法 JSON 均防护 — verified by: server smoke 10 cases + client stub 10 cases + order regression 3 cases, all pass; tarball diff across all 6 packaged files
 
+- ✓12 代码审计与修复（工作树，未提交）：安全 5 项（封面 mime 白名单 + 8MB/32MB 双限 + nosniff；回环 Host/同源栅栏阻止跨站 POST 与 DNS rebinding；畸形 URI 400；`~` 展开；不再泄漏 cwd）、逻辑 4 项（刷新扫描期间列表不消失并按 id 重映射、loadedmetadata 竞态不再劫持新曲、插件卸载后自动续播定时器失效、换库清 pendingDelete/coverKnown）、性能 3 项（同目录刷新复用 + 取消扫描；封面缓存按字节封顶；卸载取消在飞扫描） — verified by: 10 套 npm test 全绿（含新增 6 套）+ pre/post A/B（刷新×4 CPU 3.71x→1.07x；144MB 封面驻留 150MB→36MB；卸载残留 CPU 224-304ms→6-62ms）+ 隔离 DSH_HOME 真实 `dsh web` 实例端到端 7 项全过
+- ✓13 测试可复现：package.json 增加 `npm test` 与 devDependencies（jsdom/react/react-dom），package-lock 同步（原先测试依赖仅为跨仓库软链，`npm ci` 后无法运行） — verified by: npm install --package-lock-only 一致性校验 + node scripts/run-all.mjs
+
+- ✓14 死代码清理：移除库接口中从未被消费的 `tracks[].index`/`mime` 字段（每次轮询都计算+序列化）；删除测试里只写不读的 `routeDisposer`、无用的 `options` 参数，接口占位参数改 `_meta/_name`；preview-server 无请求路径的 `.css/.json` MIME 项删除；test-resume 由「只打印」改为断言（此前恒 exit 0，等于死测试）。tsc --noUnusedLocals/--noUnusedParameters 与 CSS/locale/icon 全量引用扫描均无命中 — verified by: tsc unused 扫描 0 命中，npm test 10/10 全绿
+
 ## Open
 - ?03 ~/.npm 缓存含 root 属主文件，npm pack 默认缓存 EPERM — settled by: sudo chown 后 npm pack 默认缓存成功
+- ?04 平台级：插件前缀路由不经过 /api browser-trust fence（已在本插件内自建同款回环/同源栅栏）— 其他 prefix 插件仍暴露于跨站/rebinding，需上游统一处理
 
 ## Next
-交付总结
+验收后提交/发版（当前改动未 commit）；客户端改动需 `dsh web` 重启或 HMR 才会进入浏览器

@@ -55,8 +55,14 @@ const ctx = {
   effect: (fn) => fn(),
   // Faithful to the real locale runtime: t(key) without params returns the raw
   // dict value — including function formatters like stats/scan.progress.
-  locale: { register: () => {}, bind: () => (key) => { const dict = { 'stats': (n) => n + ' 首', 'scan.progress': (a, b) => a + '/' + b, 'confirm.delete': (t2) => '删除 ' + t2, 'view.music': '音乐', 'action.chooseDir': '选择目录' }; return dict[key] ?? key; } },
-  slots: { inject: (name, fn) => fn(), register: (meta, component) => { ViewComponent = component; return () => {}; } },
+  locale: {
+    register: () => {},
+    bind: () => (key) => {
+      const dict = { stats: (n) => n + ' 首', 'scan.progress': (a, b) => a + '/' + b, 'confirm.delete': (title) => '删除 ' + title, 'view.music': '音乐', 'action.chooseDir': '选择目录' };
+      return dict[key] ?? key;
+    },
+  },
+  slots: { inject: (_name, fn) => fn(), register: (_meta, component) => { ViewComponent = component; return () => {}; } },
 };
 plugin.apply(ctx);
 if (ViewComponent === null) throw new Error('music view not registered');
@@ -65,40 +71,45 @@ const container = document.createElement('div');
 document.body.appendChild(container);
 const root = createRoot(container);
 await act(async () => { root.render(React.createElement(ViewComponent)); });
-await act(async () => { await new Promise(r => setTimeout(r, 300)); });
+await act(async () => { await new Promise((r) => setTimeout(r, 300)); });
+
+let failures = 0;
+const check = (label, ok, detail) => { if (!ok) failures += 1; console.log((ok ? 'PASS ' : 'FAIL ') + label + (detail === undefined ? '' : ' | ' + detail)); };
 
 const audio = audioInstances[0];
 if (!audio) { console.log('FATAL: no audio instance'); process.exit(1); }
 const rows = container.querySelectorAll('.dshm-row');
-console.log('rows rendered:', rows.length);
+check('two rows rendered', rows.length === 2, 'rows=' + rows.length);
 if (rows.length < 2) { console.log('FATAL: tracks not rendered'); process.exit(1); }
 
-// play track 0
+// A1: clicking a row starts playback of that row's track.
 await act(async () => { rows[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
-console.log('A1. play count after click:', audio.playCount, '| src has a.mp3:', audio.src.includes('a.mp3'));
+check('A1 click plays a.mp3', audio.playCount === 1 && audio.src.includes('a.mp3'), 'playCount=' + audio.playCount + ' src=' + audio.src);
 
-// mid-play cut at 120s: must resume the SAME track
+// A2: mid-play cut at 120s -> resume the SAME track from the cut position.
 audio.currentTime = 120; audio.duration = 300;
 await act(async () => { audio.dispatchEvent(new dom.window.Event('error')); });
-await act(async () => { await new Promise(r => setTimeout(r, 700)); });
-console.log('A2. after cut: playCount =', audio.playCount, '(expect 2 = resumed)', '| still a.mp3:', audio.src.includes('a.mp3'));
+await act(async () => { await new Promise((r) => setTimeout(r, 700)); });
+check('A2 mid-play cut resumes a.mp3', audio.playCount === 2 && audio.src.includes('a.mp3'), 'playCount=' + audio.playCount);
 
-// second cut at same spot: one more resume allowed
+// A3: a second cut at the same spot -> one more resume allowed.
 audio.currentTime = 122; audio.duration = 300;
 await act(async () => { audio.dispatchEvent(new dom.window.Event('error')); });
-await act(async () => { await new Promise(r => setTimeout(r, 700)); });
-console.log('A3. second cut: playCount =', audio.playCount, '(expect 3)', '| still a.mp3:', audio.src.includes('a.mp3'));
+await act(async () => { await new Promise((r) => setTimeout(r, 700)); });
+check('A3 second cut resumes once more', audio.playCount === 3 && audio.src.includes('a.mp3'), 'playCount=' + audio.playCount);
 
-// third cut at same spot: retries exhausted -> falls through to skip path ->
-// with loop mode and 2 tracks, errorStreak(3) >= rows(2) so it stops with error
+// A4: third cut -> retries exhausted; loop mode with 2 tracks, errorStreak(3)
+// >= rows(2) so the give-up path skips to b.mp3 instead of stopping on a.mp3.
 audio.currentTime = 124; audio.duration = 300;
 await act(async () => { audio.dispatchEvent(new dom.window.Event('error')); });
-await act(async () => { await new Promise(r => setTimeout(r, 900)); });
-console.log('A4. third cut: playCount =', audio.playCount, '(expect 4 = gave up resuming, skipped to b.mp3)', '| src has b.mp3:', audio.src.includes('b.mp3'));
+await act(async () => { await new Promise((r) => setTimeout(r, 900)); });
+check('A4 third cut gives up and skips to b.mp3', audio.playCount === 4 && audio.src.includes('b.mp3'), 'playCount=' + audio.playCount + ' src=' + audio.src);
 
-// load-time error (position 0): must skip to the next track
+// B1: a load-time error (position 0) must still skip rather than resume.
 audio.currentTime = 0;
 await act(async () => { audio.dispatchEvent(new dom.window.Event('error')); });
-await act(async () => { await new Promise(r => setTimeout(r, 900)); });
-console.log('B1. pos-0 error on b.mp3: wrapped to a.mp3 (skipped again):', audio.src.includes('a.mp3'), '| playCount =', audio.playCount, '(expect 5)');
-process.exit(0);
+await act(async () => { await new Promise((r) => setTimeout(r, 900)); });
+check('B1 position-0 error skips to a.mp3', audio.playCount === 5 && audio.src.includes('a.mp3'), 'playCount=' + audio.playCount + ' src=' + audio.src);
+
+console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)');
+process.exit(failures === 0 ? 0 : 1);

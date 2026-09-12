@@ -6,7 +6,7 @@ A local music player plugin for the DeepSeek Harness Web GUI — adds a **音乐
 
 ## 功能 / Features
 
-- 📁 选择本地目录（原生目录选择器，**macOS / Windows / Linux 均支持**；也可点标题栏 ⌨ 按钮手动粘贴路径，如 `D:\Music`），递归扫描常见音频格式：**flac / mp3 / m4a / aac / ogg / opus / wav**
+- 📁 选择本地目录（原生目录选择器，**macOS / Windows / Linux 均支持**；也可点标题栏 ⌨ 按钮手动粘贴路径，如 `D:\Music` 或 `~/Music`），递归扫描常见音频格式：**flac / mp3 / m4a / aac / ogg / opus / wav**
 - 🎵 列表展示：歌曲名、歌手（内嵌标签解析，缺省回退「歌手 - 歌名」文件名约定）、时长
 - 🔁 播放模式：单曲循环 / 列表循环（无随机播放、无歌词页——刻意保持简单）
 - 🔀 列头排序：歌名 / 歌手 / 时长，升降序切换，刷新后记忆；**播放顺序 = 可见列表顺序**（排序/搜索后，「下一首」就是你看到的下一行）
@@ -18,9 +18,10 @@ A local music player plugin for the DeepSeek Harness Web GUI — adds a **音乐
 - 🎚️ macOS Music 风格进度条：填充式进度、rAF 逐帧平滑走动、悬停加粗变色、拖拽松手才 seek、滚轮 ±5s（Shift ±1s）、音量条滚轮 ±5%
 - 🖱️ 歌曲列表独立内滚（顶栏与播放条固定），滚轮全程可用
 - ⏯️ 切换标签页音乐不中断（`<audio>` 元素驻留全局单例，HMR 也不双开）
-- 💾 状态持久化：目录（服务端 `lib/state.json`）+ 音量 / 循环模式 / 排序 / 最后播放曲目与进度（localStorage），刷新后曲目以暂停态 cue 在原位置
+- 💾 状态持久化：目录（服务端 `$DSH_HOME/storages/dsh-music-player.json`，兼容旧的包内 `lib/state.json`）+ 音量 / 循环模式 / 排序 / 最后播放曲目与进度（localStorage），刷新后曲目以暂停态 cue 在原位置
 - 🎨 全量使用 DSH 设计变量（`--dsw-alias-*`），明暗主题自适应
 - 🌊 Range 流式传输（稳定 ID 寻址 + 越界 403），大文件拖动进度条秒跳
+- 🔒 仅接受回环同源请求：跨站简单请求 / DNS rebinding 一律 403；封面仅放行栅格格式（`image/svg+xml` 等一律 404）并按字节数封顶缓存
 - 🧩 标准 bundle 插件：进插件清单、可热重载、卸载即净
 
 ---
@@ -54,7 +55,7 @@ dsh plugin --profile web add github:heshuren371/dsh-music-player
 dsh plugin --profile web remove @local/dsh-music-player
 ```
 
-重启 `dsh web` 即彻底移除（装配层自动清理）。卸载不会动你的任何音乐文件——插件从头到尾只读。
+重启 `dsh web` 即彻底移除（装配层自动清理）。卸载不会动你的任何音乐文件——只有你在删除确认条里点「删除」才会真正删除本地文件。
 
 ---
 
@@ -82,7 +83,7 @@ dsh plugin --profile web add link:./dsh-music-player
 3. profile 的 `package.json` 里 `dsh.profile.bundles` 数组有没有包名（`dsh plugin add` 会自动写入，正常不需要手改）
 4. （仅 link 方式）克隆目录里有没有 `node_modules/`
 
-> 已经用旧的手动方式（改 JSON + 软链）装过？可以保留不动，也可以 `dsh plugin --profile web remove @local/dsh-music-player` 后用上面的快速安装重装。克隆目录里的 `lib/state.json` 记录着你选择的音乐目录，删除克隆目录即清空最后痕迹。
+> 已经用旧的手动方式（改 JSON + 软链）装过？可以保留不动，也可以 `dsh plugin --profile web remove @local/dsh-music-player` 后用上面的快速安装重装。当前选择目录在 `$DSH_HOME/storages/dsh-music-player.json`（旧版本在克隆目录的 `lib/state.json`，首次启动自动迁移）。
 
 ---
 
@@ -99,6 +100,8 @@ dsh plugin --profile web add link:./dsh-music-player
 | `/dsh-music/api/stream?p=<id>` | GET | 按稳定 ID（相对路径）流式传输（Range / 206，越界 403） |
 | `/dsh-music/api/cover?p=<id>` | GET | 内嵌专辑封面（内存缓存，无封面 404） |
 | `/dsh-music/api/delete` | POST | `{ "id": "<曲目 id>" }` 删除曲目（**含本地文件**，仅限当前库内、越界拒绝），返回更新后的库 |
+
+> 所有路由仅接受回环（`127.0.0.1` / `::1` / `localhost`）Host 且同源的请求：跨站简单 POST 与 DNS rebinding 返回 403，非浏览器客户端（curl / 测试，Host 为回环）不受影响。
 
 ## 结构 / Structure
 
