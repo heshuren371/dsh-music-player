@@ -42,7 +42,7 @@ dsh plugin --profile web add github:heshuren371/dsh-music-player
 重启 `dsh web`，刷新浏览器——会话顶部标签环出现「音乐」即成功。
 
 - 这一条命令完成全部装配：下载插件、安装依赖（music-metadata）、把插件注册进 profile 的 bundles 装配层——**无需克隆仓库、无需手动改 JSON、无需建软链**
-- 想锁定版本：`github:heshuren371/dsh-music-player#v0.6.3`
+- 想锁定版本：`github:heshuren371/dsh-music-player#v0.6.4`
 - 还没装 DSH：`npm i -g @deepseek-ai/dsh`，然后 `dsh web`
 
 ## 更新 / Update
