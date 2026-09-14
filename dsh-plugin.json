@@ -3,7 +3,7 @@
   "manifestVersion": "0.15",
   "id": "local.dsh-music-player",
   "name": "DSH Music Player（本地音乐播放器）",
-  "version": "0.3.3",
+  "version": "0.6.2",
   "facets": {
     "host": {
       "entry": "lib/index.js",
@@ -31,9 +31,19 @@
       "reason": "扫描目录、读取元数据、Range 流式播放"
     },
     {
+      "name": "fs.write",
+      "scope": "当前音乐目录内、且在播放列表中的音频文件",
+      "reason": "写入匹配到的原名/歌手/专辑/封面标签，并按「歌手 - 原名」重命名文件"
+    },
+    {
       "name": "fs.delete",
       "scope": "当前音乐目录内、且在播放列表中的音频文件",
       "reason": "用户在应用内确认后的曲目删除"
+    },
+    {
+      "name": "net.fetch",
+      "scope": "c.y.qq.com / itunes.apple.com / music.163.com / musicbrainz.org（搜索）与 mzstatic.com / *.gtimg.cn / *.music.126.net / coverartarchive.org（封面）",
+      "reason": "多源在线补全歌曲原名 / 歌手 / 封面（只读搜索）"
     },
     {
       "name": "storage.local",
@@ -77,6 +87,9 @@
             "POST /api/refresh",
             "POST /api/dir",
             "GET /api/cover",
+            "GET /api/match",
+            "GET /api/art",
+            "POST /api/apply",
             "POST /api/pick",
             "GET /api/stream",
             "POST /api/delete"

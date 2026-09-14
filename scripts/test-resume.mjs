@@ -1,5 +1,10 @@
-// Regression test: mid-play stream cut must RESUME the same track (max 2x);
-// a load-time error (position 0) must still SKIP to the next track.
+// Regression test for mid-track failure recovery:
+//   A. a transient cut retries once at the same position;
+//   B. repeated failure at the same spot = a locally damaged file: step forward
+//      over the bad region (1.5s, then 6s) instead of dropping the whole track;
+//   C. once the forward budget is spent, give up -> error + auto-skip;
+//   D. a load-time failure (position 0) still skips, and moving 5s past a
+//      failure restores the retry budget for a later, independent bad spot.
 import { JSDOM } from 'jsdom';
 import React from 'react';
 import { createRoot } from 'react-dom/client';
@@ -33,12 +38,11 @@ const FakeAudio = class extends dom.window.EventTarget {
   setAttribute(name, value) { if (name === 'src') this.src = value; }
 };
 Object.defineProperty(dom.window, 'Audio', { value: FakeAudio, configurable: true, writable: true });
-globalThis.Audio = FakeAudio; // window.eval executes in the Node realm — globals must be here
+globalThis.Audio = FakeAudio;
 
 let pluginFactory = null;
 dom.window.__ModuleLoader__ = { load: ({ factory }) => { pluginFactory = factory; } };
-const clientJs = await fs.readFile(new URL('../lib/client.js', import.meta.url), 'utf8');
-dom.window.eval(clientJs);
+dom.window.eval(await fs.readFile(new URL('../lib/client.js', import.meta.url), 'utf8'));
 if (pluginFactory === null) throw new Error('factory not captured');
 
 const tracks = [
@@ -53,8 +57,6 @@ const plugin = pluginFactory((name) => { if (name === 'react') return React; thr
 let ViewComponent = null;
 const ctx = {
   effect: (fn) => fn(),
-  // Faithful to the real locale runtime: t(key) without params returns the raw
-  // dict value — including function formatters like stats/scan.progress.
   locale: {
     register: () => {},
     bind: () => (key) => {
@@ -75,41 +77,61 @@ await act(async () => { await new Promise((r) => setTimeout(r, 300)); });
 
 let failures = 0;
 const check = (label, ok, detail) => { if (!ok) failures += 1; console.log((ok ? 'PASS ' : 'FAIL ') + label + (detail === undefined ? '' : ' | ' + detail)); };
-
+const settle = async (ms) => act(async () => { await new Promise((r) => setTimeout(r, ms)); });
 const audio = audioInstances[0];
 if (!audio) { console.log('FATAL: no audio instance'); process.exit(1); }
 const rows = container.querySelectorAll('.dshm-row');
 check('two rows rendered', rows.length === 2, 'rows=' + rows.length);
 if (rows.length < 2) { console.log('FATAL: tracks not rendered'); process.exit(1); }
 
-// A1: clicking a row starts playback of that row's track.
+const failAt = async (at) => {
+  audio.currentTime = at;
+  await act(async () => { audio.dispatchEvent(new dom.window.Event('error')); });
+  await settle(700);
+  audio.duration = 300;
+  await act(async () => { audio.dispatchEvent(new dom.window.Event('loadedmetadata')); });
+  await settle(50);
+};
+
 await act(async () => { rows[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
-check('A1 click plays a.mp3', audio.playCount === 1 && audio.src.includes('a.mp3'), 'playCount=' + audio.playCount + ' src=' + audio.src);
+check('A1 click plays a.mp3', audio.playCount === 1 && audio.src.includes('a.mp3'), 'playCount=' + audio.playCount);
 
-// A2: mid-play cut at 120s -> resume the SAME track from the cut position.
-audio.currentTime = 120; audio.duration = 300;
+await failAt(120);
+check('A2 cut retries at the same position', audio.playCount === 2 && audio.src.includes('a.mp3') && Math.abs(audio.currentTime - 120) < 0.01, 'playCount=' + audio.playCount + ' t=' + audio.currentTime);
+
+audio.currentTime = 120;
 await act(async () => { audio.dispatchEvent(new dom.window.Event('error')); });
-await act(async () => { await new Promise((r) => setTimeout(r, 700)); });
-check('A2 mid-play cut resumes a.mp3', audio.playCount === 2 && audio.src.includes('a.mp3'), 'playCount=' + audio.playCount);
+await settle(700);
+audio.duration = 300;
+await act(async () => { audio.dispatchEvent(new dom.window.Event('loadedmetadata')); });
+await settle(50);
+check('A3 repeated damage jumps 1.5s forward', audio.playCount === 3 && audio.src.includes('a.mp3') && Math.abs(audio.currentTime - 121.5) < 0.01, 'playCount=' + audio.playCount + ' t=' + audio.currentTime);
 
-// A3: a second cut at the same spot -> one more resume allowed.
-audio.currentTime = 122; audio.duration = 300;
+audio.currentTime = 121.5;
 await act(async () => { audio.dispatchEvent(new dom.window.Event('error')); });
-await act(async () => { await new Promise((r) => setTimeout(r, 700)); });
-check('A3 second cut resumes once more', audio.playCount === 3 && audio.src.includes('a.mp3'), 'playCount=' + audio.playCount);
+await settle(700);
+audio.duration = 300;
+await act(async () => { audio.dispatchEvent(new dom.window.Event('loadedmetadata')); });
+await settle(50);
+check('A4 second damage jumps 6s forward', audio.playCount === 4 && audio.src.includes('a.mp3') && Math.abs(audio.currentTime - 127.5) < 0.01, 'playCount=' + audio.playCount + ' t=' + audio.currentTime);
 
-// A4: third cut -> retries exhausted; loop mode with 2 tracks, errorStreak(3)
-// >= rows(2) so the give-up path skips to b.mp3 instead of stopping on a.mp3.
-audio.currentTime = 124; audio.duration = 300;
+audio.currentTime = 127.5;
 await act(async () => { audio.dispatchEvent(new dom.window.Event('error')); });
-await act(async () => { await new Promise((r) => setTimeout(r, 900)); });
-check('A4 third cut gives up and skips to b.mp3', audio.playCount === 4 && audio.src.includes('b.mp3'), 'playCount=' + audio.playCount + ' src=' + audio.src);
+check('A5 exhausted budget surfaces the error', audio.playCount === 4, 'playCount=' + audio.playCount);
+await settle(900);
+check('A5 then skips to b.mp3', audio.playCount === 5 && audio.src.includes('b.mp3'), 'playCount=' + audio.playCount + ' src=' + audio.src);
 
-// B1: a load-time error (position 0) must still skip rather than resume.
 audio.currentTime = 0;
 await act(async () => { audio.dispatchEvent(new dom.window.Event('error')); });
-await act(async () => { await new Promise((r) => setTimeout(r, 900)); });
-check('B1 position-0 error skips to a.mp3', audio.playCount === 5 && audio.src.includes('a.mp3'), 'playCount=' + audio.playCount + ' src=' + audio.src);
+await settle(900);
+check('B1 position-0 error skips back to a.mp3', audio.playCount === 6 && audio.src.includes('a.mp3'), 'playCount=' + audio.playCount + ' src=' + audio.src);
+
+await failAt(50);
+check('C1 first failure at 50 retries in place', audio.playCount === 7 && Math.abs(audio.currentTime - 50) < 0.01, 'playCount=' + audio.playCount + ' t=' + audio.currentTime);
+audio.currentTime = 60;
+await act(async () => { audio.dispatchEvent(new dom.window.Event('timeupdate')); });
+await failAt(60);
+check('C2 a later independent bad spot retries again', audio.playCount === 8 && audio.src.includes('a.mp3') && Math.abs(audio.currentTime - 60) < 0.01, 'playCount=' + audio.playCount + ' t=' + audio.currentTime);
 
 console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)');
 process.exit(failures === 0 ? 0 : 1);

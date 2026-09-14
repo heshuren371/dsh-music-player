@@ -15,6 +15,10 @@ const suites = [
   { name: 'restore race', file: 'scripts/test-restore-race.mjs', node: [] },
   { name: 'teardown', file: 'scripts/test-teardown.mjs', node: [] },
   { name: 'delete flow', file: 'scripts/test-delete.mjs', node: [] },
+  { name: 'online metadata match (host)', file: 'scripts/test-match.mjs', node: [] },
+  { name: 'apply tags + rename (host)', file: 'scripts/test-apply.mjs', node: [] },
+  { name: 'online metadata match (client)', file: 'scripts/test-match-client.mjs', node: [] },
+  { name: 'host hot reload', file: 'scripts/test-hot-reload.mjs', node: [] },
 ];
 let failed = 0;
 for (const suite of suites) {
