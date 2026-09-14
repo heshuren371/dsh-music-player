@@ -81,8 +81,9 @@ dom.window.fetch = mockFetch;
 
 const plugin = pluginFactory((name) => { if (name === 'react') return React; throw new Error('require: ' + name); });
 let ViewComponent = null;
+const cleanups = [];
 const ctx = {
-  effect: (fn) => fn(),
+  effect: (fn) => { const cleanup = fn(); if (typeof cleanup === "function") cleanups.push(cleanup); },
   locale: {
     register: () => {},
     bind: () => (key) => {
@@ -158,6 +159,23 @@ check('batch results reflected in the list', Array.from(rows()).some((row) => ti
 check('already-correct track was not rewritten or renamed', !batch.some((call) => call.id.includes('Alpha Real')), JSON.stringify(batch.map((c) => c.id)));
 check('low-confidence track was skipped without touching the file', !batch.some((call) => call.id === 'd.mp3') && titleOf(rows()[3]) === 'Delta' && meta()['d.mp3'] === undefined, JSON.stringify(batch.map((c) => c.id)) + ' | ' + titleOf(rows()[3]));
 check('progress reset after finishing', container.querySelector('.dshm-complete') !== null && container.querySelector('.dshm-completeStop') === null);
+
+// ── Unload during a batch ────────────────────────────────────────────────────
+// Regression: halt() used to leave completing=true, so the loop kept hitting
+// /api/match + /api/apply every 600ms after the plugin was torn down.
+tracks.push({ id: 'f.mp3', name: 'f.mp3', title: 'Zeta', artist: null, duration: 300, tagged: false });
+await act(async () => { container.querySelector('button[aria-label="action.refresh"]').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(250);
+await act(async () => { container.querySelector('.dshm-complete').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(50);
+await act(async () => { container.querySelector('.dshm-completeGo').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(150);
+check('batch is running before unload', container.querySelector('.dshm-completeStop') !== null);
+await act(async () => { for (const cleanup of cleanups) cleanup(); });
+await settle(700);
+const afterUnload = applyCalls.length;
+await settle(1500);
+check('unload stops the batch loop', applyCalls.length === afterUnload && container.querySelector('.dshm-complete') !== null, 'applies=' + afterUnload + '->' + applyCalls.length);
 
 console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)');
 process.exit(failures === 0 ? 0 : 1);

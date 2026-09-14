@@ -25,6 +25,8 @@ A local music player plugin for the DeepSeek Harness Web GUI — adds a **音乐
 - 🎨 全量使用 DSH 设计变量（`--dsw-alias-*`），明暗主题自适应
 - 🌊 Range 流式传输，大文件拖动进度条秒跳
 - 🔒 仅接受回环同源请求：跨站简单请求 / DNS rebinding 一律 403；封面仅放行栅格格式（`image/svg+xml` 等一律 404）并按字节数封顶缓存
+- ⚡ **性能**：库轮询复用同一份 payload（不再每次重建 5000 个对象）；标签写入放进 worker 线程——53MB 文件实测主线程阻塞 **90ms → 1ms**；单个数据源连续失败 2 次自动熔断 60s，批量补全不再被挂掉的源拖死；匹配并发上限 2
+- 🛡️ **安全**：`/api/apply` 串行锁消除「探测目标名 → rename」竞态；文件名过滤 Windows 保留设备名与结尾点/空格；封面代理白名单 + 逐跳校验重定向；越界路径、跨站请求、SSRF 均有回归测试覆盖
 - 🧩 标准 bundle 插件：进插件清单、可热重载、卸载即净
 
 ---
@@ -40,7 +42,7 @@ dsh plugin --profile web add github:heshuren371/dsh-music-player
 重启 `dsh web`，刷新浏览器——会话顶部标签环出现「音乐」即成功。
 
 - 这一条命令完成全部装配：下载插件、安装依赖（music-metadata）、把插件注册进 profile 的 bundles 装配层——**无需克隆仓库、无需手动改 JSON、无需建软链**
-- 想锁定版本：`github:heshuren371/dsh-music-player#v0.6.2`
+- 想锁定版本：`github:heshuren371/dsh-music-player#v0.6.3`
 - 还没装 DSH：`npm i -g @deepseek-ai/dsh`，然后 `dsh web`
 
 ## 更新 / Update

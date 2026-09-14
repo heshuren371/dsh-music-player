@@ -36,6 +36,8 @@ await fs.writeFile(path.join(music, 'Solo Song.wav'), wav());
 const realFetch = globalThis.fetch;
 const qqQueries = [];
 const mbQueries = [];
+const neteaseCalls = [];
+let neteaseDown = false;
 const upstreamHosts = [];
 const jpeg = [0xff, 0xd8, 0xff, 0xe0, 1, 2, 3];
 const image = () => new Response(new Uint8Array(jpeg), { status: 200, headers: { 'content-type': 'image/jpeg' } });
@@ -78,6 +80,8 @@ globalThis.fetch = async (input, init) => {
   }
   if (url.startsWith('https://music.163.com/')) {
     const term = new URLSearchParams(String(init?.body ?? '')).get('s') ?? '';
+    neteaseCalls.push(term);
+    if (neteaseDown) throw new Error('netease down');
     const songs = term.includes('晴天')
       ? [{ id: 9, name: '晴天', ar: [{ name: 'RyaVocal' }], al: { name: '晴天', picUrl: 'http://p1.music.126.net/cover.jpg' }, dt: 1000 }]
       : [];
@@ -159,6 +163,17 @@ check('duration conflict without a known artist → auto=false', solo.body.auto 
 // Low confidence must not be auto-writable.
 const unknown = await json(base + '/api/match?p=Unknown.wav');
 check('Unknown: no confident match → auto=false', unknown.body.auto === false && unknown.body.best?.auto === false, JSON.stringify({ auto: unknown.body.auto, score: unknown.body.best?.score }));
+
+// A dead source must be tripped out of the fan-out instead of costing a
+// timeout on every single track of a batch. Fresh q= probes bypass the cache.
+neteaseDown = true;
+await json(base + '/api/match?p=Unknown.wav&q=probe-one');
+await json(base + '/api/match?p=Unknown.wav&q=probe-two');
+const callsBeforeThird = neteaseCalls.length;
+const third = await json(base + '/api/match?p=Unknown.wav&q=probe-three');
+const probes = neteaseCalls.filter((t) => t.startsWith('probe-'));
+check('dead source called twice, then tripped out of the fan-out', neteaseCalls.length === callsBeforeThird && probes.length === 2, 'probes=' + JSON.stringify(probes));
+check('match still answers after a source trips', third.status === 200, 'status=' + third.status);
 
 // Artwork proxy allowlist + redirect validation.
 const qqArt = await realFetch(base + '/api/art?u=' + encodeURIComponent('https://y.gtimg.cn/music/photo_new/T002R300x300M000MID1.jpg'));

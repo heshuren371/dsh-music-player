@@ -49,6 +49,8 @@ check('unknown route → old message', first.status === 404 && first.body.error 
 const hostPath = path.join(plugin, 'lib', 'host.js');
 const source = await fs.readFile(hostPath, 'utf8');
 await fs.writeFile(hostPath, source.replace('unknown dsh-music endpoint', 'hot-reloaded endpoint'), 'utf8');
+// The loader rate-limits reloads so rapid saves cannot balloon the ESM registry.
+await new Promise((resolve) => setTimeout(resolve, 1100));
 
 const second = await json(base + '/api/nope');
 check('next request picks up the edited host without apply() again', second.status === 404 && second.body.error === 'hot-reloaded endpoint', JSON.stringify(second.body));
