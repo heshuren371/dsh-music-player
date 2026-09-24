@@ -3,7 +3,7 @@
   "manifestVersion": "0.15",
   "id": "local.dsh-music-player",
   "name": "DSH Music Player（本地音乐播放器）",
-  "version": "0.7.4",
+  "version": "0.8.3",
   "facets": {
     "host": {
       "entry": "lib/index.js",

@@ -25,6 +25,8 @@ A local music player plugin for DeepSeek Harness — **one package for both the 
 - 🎨 **官方图标**：播放 / 暂停 / 文件夹 / 刷新 / 编辑 / 删除 / 关闭 / 星标改用 DSH 内置 `ic_ds_*` 图标；上一首 / 下一首 / 循环 / 音量 / 音符没有对应官方图标，保持原自绘 SVG 不变
 - ⏳ 扫描进度实时回报（正在扫描… n/m），超 5000 截断有提示
 - 🎚️ macOS Music 风格进度条：填充式进度、rAF 逐帧平滑走动、悬停加粗变色、拖拽松手才 seek、滚轮 ±5s（Shift ±1s）、音量条滚轮 ±5%
+- 🖥️ **全屏播放器（macOS Music 风格，点底部封面弹出）**：左侧大封面 + **封面取色模糊背景**；歌名/歌手**跑马灯**；下面一行是 **⭐ 收藏 + ⋯**（对齐 macOS Music 的两枚圆形按钮，⋯ = 当前曲目在线补全）；再往下是**细轨进度条（上方）＋「已播 / -剩余」时间（下方左右分列）**，再往下是传输键（**上一首 / 播放 / 下一首 三键居中**，**循环键单独落在「-剩余」时间正下方**）；右侧是 **「接下来播放」队列**（缩略封面 + 歌名 + 歌手—专辑，当前曲高亮，点行即播）与「一键补全 / 刷新」两个 pill；顶部左收起、右是**喇叭图标 + 长条音量**。**暂不做歌词**，Esc 或收起键关闭，进入删除确认时自动收起
+- 🎛️ **播放键 / 音量条 / 进度条按 macOS Music 重做**（两处页面同步）：播放暂停是实心三角与双竖条（不是 DSH 的圆圈套三角）；滑杆是细轨 + 中性色填充，**圆钮默认隐藏、悬停或拖拽才出现**；右侧时间统一显示 **-剩余**；全屏播放器的进度条与封面**同宽**且时间换行到条下方，底部条进度条铺满中间列、时间仍内联
 - 📜 **歌名/歌手跑马灯**：底部播放条的歌名与歌手在**放不下时**才从右往左循环滚动（放得下完全不动），速度按内容宽度换算（固定 px/s）、悬停暂停、尊重 `prefers-reduced-motion`；不滚动时不复制第二份文本，避免读屏重复
 - 🖱️ 歌曲列表独立内滚（顶栏与播放条固定），滚轮全程可用
 - ⏯️ 切换标签页音乐不中断（`<audio>` 元素驻留全局单例，HMR 也不双开）
@@ -189,7 +191,11 @@ Desktop 与 Web 复用同一份客户端 bundle，差异只在宿主传输。下
 | Media Session API（`MediaMetadata` / `setActionHandler` / `setPositionState`） | macOS 控制中心 / 锁屏「正在播放」与系统媒体键 |
 | Web Notifications API（Electron 转原生通知） | Desktop 失焦换曲提示，带封面 icon |
 | CSS `backdrop-filter` + `color-mix(in srgb, …)` + `position: sticky` | 透明毛玻璃（与 DSH `ui-dockkit` / `--dsw-mask-blur` 同配方） |
-| DSH 平台种子模块 `@deepseek-ai/dsh-client-ui-primitives`（`PLATFORM_MODULES`，含 `ui-slots`/`ui-dockkit`） | 官方 `Tooltip` / `Input` 与官方产品图标；CSS Module 随 shell 加载，插件零额外样式 |
+| DSH 平台种子模块 `@deepseek-ai/dsh-client-ui-primitives`（`PLATFORM_MODULES`，含 `ui-slots`/`ui-dockkit`） | 官方 `Tooltip` / `Input` 与官方产品图标（全屏播放器用到 `IconChevronDownOutlineRegular` / `IconEllipsisOutlineRegular`）；CSS Module 随 shell 加载，插件零额外样式 |
+| 图标优先级：官方 → macOS 原生风格自绘 | DSH 图标集**没有** star / shuffle / 上一首 / 下一首 / 循环 / 音量，这几枚按要求补 Apple 风格自绘（不是内嵌 SF Symbols：SF Symbols 受 Apple 授权约束、也不是可嵌入的 web 字体；要 1:1 的 SF 形状，把 SVG path 给我即可替换） |
+| CSS `filter: blur()` 放大封面 + 半透明薄纱 | 全屏播放器的「封面取色背景」（Apple Music 同款观感），不额外请求图片 |
+| CSS Grid 两栏布局 | 全屏播放器左（播放区）/ 右（队列） |
+| `localStorage`（`dsh-music:fav`） | ☆ 收藏（DSH 无收藏能力，插件自带本地记录） |
 | CSS `@keyframes` + `ResizeObserver` 驱动的条件跑马灯 | 只在文本溢出时循环滚动（`translateX(calc(-50% - gap/2))` 无缝衔接），悬停 `animation-play-state: paused` |
 | React `createPortal`（Tooltip 的 `portal: true`） | 把 `position: fixed` 的气泡挂到 `document.body`，绕开 `backdrop-filter` 祖先造成的 fixed 包含块裁剪 |
 | Web Notification API → Electron 原生通知 | 换曲横幅（系统通知中心）；macOS 会忽略自定义 `icon` |

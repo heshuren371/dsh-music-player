@@ -109,11 +109,15 @@ const ICON_SCHEMES = {
     play: 'IconPlayOutlineRegular', pause: 'IconPauseOutlineRegular', folder: 'IconFolderOpenRegular',
     refresh: 'IconRefreshOutlineRegular', edit: 'IconEditOutlineRegular', sparkle: 'IconSparkleRegular',
     trash: 'IconTrashOutlineRegular', close: 'IconCloseOutlineRegular',
+    chevronDown: 'IconChevronDownOutlineRegular', ellipsis: 'IconEllipsisOutlineRegular',
+    queue: 'IconQueueOutlineRegular',
   },
   legacy: {
     play: 'IconPlayOutline16', pause: 'IconPauseOutline16', folder: 'IconFolderOpen16',
     refresh: 'IconRefreshOutline16', edit: 'IconEditOutline16', sparkle: 'IconSparkle16',
     trash: 'IconTrashOutline16', close: 'IconCloseOutline16',
+    chevronDown: 'IconChevronDownOutline16', ellipsis: 'IconEllipsisOutline16',
+    queue: 'IconQueueOutline16',
   },
 };
 /** 官方 Input 组件的桩件：wrap(className) + icon + input 三层，和真实现同构。 */
@@ -202,7 +206,7 @@ const iconNames = new Set(Array.from(container.querySelectorAll('[data-icon]')).
 const R = ICON_SCHEMES.regular;
 check('official 0.1.7 Regular icons render in the toolbar', iconNames.has(R.refresh) && iconNames.has(R.folder) && iconNames.has(R.edit), Array.from(iconNames).join(','));
 check('the row delete button uses the official trash icon', iconNames.has(R.trash), Array.from(iconNames).join(','));
-check('play/pause resolve to the official icon, not the drawn fallback', iconNames.has(R.play) || iconNames.has(R.pause), Array.from(iconNames).join(','));
+check('play/pause use the macOS-native glyph, not the DSH circled icon', container.querySelector('.dshm-tbtn--play svg path[d^="M5.6 3.05"]') !== null && !iconNames.has(R.play) && !iconNames.has(R.pause), container.querySelector('.dshm-tbtn--play svg path')?.getAttribute('d')?.slice(0, 30) ?? 'missing');
 check('an icon with no official counterpart keeps the drawn SVG', container.querySelectorAll('svg').length > 0);
 
 // ── 官方悬停提示 ────────────────────────────────────────────────────────────
@@ -255,6 +259,67 @@ check('notification is silent (music is already playing)', notifications[0].opti
 await act(async () => { container.querySelector('.dshm-tbtn--play').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
 await settle(100);
 check('re-playing the same track does not spam the notification centre', notifications.length === 1, 'count=' + notifications.length);
+
+// ── 全屏播放器（Apple Music 风格，点底部封面弹出） ────────────────────────
+check('bottom-bar cover is the player entry point', container.querySelector('.dshm-nowCoverBtn') !== null);
+await act(async () => { container.querySelector('.dshm-nowCoverBtn').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(80);
+const overlay = container.querySelector('.dshm-player');
+check('clicking the cover opens the full player', overlay !== null);
+check('full player shows big artwork + the playing title', overlay?.querySelector('.dshm-playerArt') !== null && String(overlay?.querySelector('.dshm-playerTitle')?.textContent ?? '').includes('Alpha'), overlay?.querySelector('.dshm-playerTitle')?.textContent ?? 'missing');
+check('full player uses official DSH icons where they exist (chevron / ellipsis)', overlay?.querySelector('[data-icon="IconChevronDownOutlineRegular"]') !== null && overlay?.querySelector('[data-icon="IconEllipsisOutlineRegular"]') !== null, Array.from(overlay?.querySelectorAll('[data-icon]') ?? []).map((el) => el.getAttribute('data-icon')).join(','));
+check('full player has transport, progress and volume', overlay?.querySelectorAll('.dshm-playerTransportBtn').length === 4 && overlay?.querySelector('.dshm-playerProgress') !== null && overlay?.querySelector('.dshm-volume') !== null);
+check('prev/play/next sit in the centred group (loop moved out)', (() => {
+  const center = overlay?.querySelector('.dshm-playerTransportCenter');
+  const end = overlay?.querySelector('.dshm-playerTransportSide--end');
+  return center?.querySelectorAll('.dshm-playerTransportBtn').length === 3 && end?.querySelectorAll('.dshm-playerTransportBtn').length === 1;
+})(), String(overlay?.querySelector('.dshm-playerTransportCenter')?.querySelectorAll('.dshm-playerTransportBtn').length));
+check('the loop button is the row after -remaining (right-aligned cell)', (() => {
+  const row = overlay?.querySelector('.dshm-timeRow');
+  const remaining = row?.querySelector('.dshm-time--end');
+  const loop = overlay?.querySelector('.dshm-playerTransportSide--end .dshm-playerTransportBtn');
+  return remaining !== null && loop !== null && row.compareDocumentPosition(loop) === 4;
+})(), 'timeRow→loop sibling order');
+check('the speaker glyph is drawn (macOS style, not the old one)', String(overlay?.querySelector('.dshm-playerVolume .dshm-volIcon svg')?.innerHTML ?? '').includes('c.47.47 1.27.14 1.27-.53'), 'speaker svg present');
+check('full player title/artist use the marquee', overlay?.querySelector('.dshm-playerTitle.dshm-marquee') !== null && overlay?.querySelector('.dshm-playerArtist.dshm-marquee') !== null);
+check('full player keeps the macOS Music ⭐ + ⋯ pair next to the title', (() => {
+  const meta = overlay?.querySelector('.dshm-playerMeta');
+  const rounds = Array.from(meta?.querySelectorAll('.dshm-playerRound') ?? []);
+  const first = rounds[0];
+  return rounds.length === 2 && (first?.querySelector('svg') !== null) && (rounds[1]?.querySelector('[data-icon="IconEllipsisOutlineRegular"]') !== null);
+})(), String(overlay?.querySelectorAll('.dshm-playerMeta .dshm-playerRound').length));
+check('full player progress is stacked: track on top, elapsed / -remaining below', (() => {
+  const wrap = overlay?.querySelector('.dshm-playerProgress');
+  const row = wrap?.querySelector('.dshm-timeRow');
+  const labels = Array.from(row?.querySelectorAll('.dshm-time') ?? []).map((el) => el.textContent);
+  return wrap?.querySelector('input.dshm-slider') !== null && row !== null && labels.length === 2 && String(labels[1]).startsWith('-');
+})(), Array.from(overlay?.querySelectorAll('.dshm-playerProgress .dshm-time') ?? []).map((el) => el.textContent).join(' / '));
+check('full player volume has the speaker glyph + slider', overlay?.querySelector('.dshm-playerVolume .dshm-volIcon') !== null && overlay?.querySelector('.dshm-playerVolume input.dshm-volume--wide') !== null);
+check('"一键补全" is back in the pills row next to refresh', (() => {
+  const pills = Array.from(overlay?.querySelectorAll('.dshm-playerPills .dshm-pill') ?? []);
+  return pills.length === 2 && String(pills[0].textContent).includes('action.completeAll') && String(pills[1].textContent).includes('action.refresh');
+})(), String(overlay?.querySelectorAll('.dshm-playerPills .dshm-pill').length));
+check('full player lists the upcoming queue', (overlay?.querySelectorAll('.dshm-queueRow').length ?? 0) >= 1, String(overlay?.querySelectorAll('.dshm-queueRow').length));
+check('full player carries the frosted artwork backdrop', overlay?.querySelector('.dshm-playerArt-bg') !== null && overlay?.querySelector('.dshm-playerScrim') !== null);
+
+// 收藏（DSH 无星标图标 → 插件自绘，状态存 localStorage）
+const favButton = overlay.querySelectorAll('.dshm-playerMeta .dshm-playerRound')[0];
+await act(async () => { favButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(50);
+check('favorite toggles and persists', JSON.parse(localStorage.getItem('dsh-music:fav') ?? '[]').includes('a.mp3'), localStorage.getItem('dsh-music:fav'));
+
+// 队列行「⋯」菜单
+await act(async () => { overlay.querySelector('.dshm-queueMore').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(50);
+check('queue row ⋯ opens a two-item action menu', overlay.querySelectorAll('.dshm-queueMenuItem').length === 2, String(overlay.querySelectorAll('.dshm-queueMenuItem').length));
+await act(async () => { overlay.querySelector('.dshm-playerBody').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(30);
+check('clicking the surface dismisses the ⋯ menu', overlay.querySelectorAll('.dshm-queueMenuItem').length === 0);
+
+// 收起
+await act(async () => { overlay.querySelector('.dshm-playerTop .dshm-playerRound').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(50);
+check('collapse button closes the full player', container.querySelector('.dshm-player') === null);
 
 // 窗口在前台（聚焦 + 可见）时换曲也必须提示 —— 这是用户报的「通知栏没适配」场景。
 windowFocused = true;
