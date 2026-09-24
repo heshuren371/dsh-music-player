@@ -30,6 +30,9 @@ const audio = wav();
 await fs.writeFile(path.join(music, 'song.wav'), audio);
 await fs.mkdir(path.join(music, 'sub'));
 await fs.writeFile(path.join(music, 'sub', 'nested.wav'), audio);
+// Apple DRM package: must be skipped as a whole (not walked into) and counted.
+await fs.mkdir(path.join(music, 'movie.movpkg', 'Data'), { recursive: true });
+await fs.writeFile(path.join(music, 'movie.movpkg', 'Data', 'seg.frag'), 'not audio');
 
 let handler = null;
 const ctx = {
@@ -59,6 +62,7 @@ for (let i = 0; i < 40; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 100));
 }
 check('library scan finds both tracks', library !== null && library.tracks.length === 2, 'tracks=' + (library?.tracks?.length ?? 'none'));
+check('movpkg package is skipped and counted, not scanned', library !== null && library.skippedPackages === 1, 'skippedPackages=' + library?.skippedPackages);
 
 // full body
 const full = await fetch(base + '/api/stream?p=song.wav');

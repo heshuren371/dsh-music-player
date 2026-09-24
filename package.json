@@ -1,7 +1,7 @@
 {
   "name": "@local/dsh-music-player",
-  "version": "0.6.4",
-  "description": "DSH Web 本地音乐播放器：会话视图「音乐」标签页，选择本地目录、扫描常见音频格式（mp3/flac/m4a/ogg/wav...），歌曲名/歌手/时长列表，单曲循环与列表循环播放。",
+  "version": "0.7.4",
+  "description": "DSH 本地音乐播放器（Web + Desktop 双端）：会话视图「音乐」标签页，选择本地目录、扫描常见音频格式（mp3/flac/m4a/ogg/wav...），歌曲名/歌手/时长列表，单曲循环与列表循环播放。",
   "license": "MIT",
   "author": "heshuren371",
   "repository": {
@@ -26,6 +26,7 @@
   "files": [
     "lib/index.js",
     "lib/host.js",
+    "lib/http-bridge.js",
     "lib/tagwriter.js",
     "lib/client.js",
     "dsh-plugin.json",

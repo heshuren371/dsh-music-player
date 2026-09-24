@@ -136,6 +136,7 @@ check('scan finds six tracks', library !== null, 'tracks=' + (library?.tracks?.l
 const qing = await json(base + '/api/match?p=' + encodeURIComponent('周杰伦 - 晴天.wav'));
 const bestQing = qing.body.best;
 check('晴天: high-confidence match', bestQing !== null && bestQing.score >= 0.78 && bestQing.auto === true, JSON.stringify({ score: bestQing?.score, auto: bestQing?.auto }));
+check('晴天: cover uses the high-res asset', bestQing?.cover === 'https://y.gtimg.cn/music/photo_new/T002R500x500M000MID1.jpg', 'cover=' + bestQing?.cover);
 check('晴天: chose the original artist/album', bestQing?.title === '晴天' && bestQing?.artist === '周杰伦' && bestQing?.album === '叶惠美', JSON.stringify(bestQing && { t: bestQing.title, a: bestQing.artist, al: bestQing.album }));
 check('晴天: QQ + iTunes agreements merged into one candidate', Array.isArray(bestQing?.sources) && bestQing.sources.includes('qq') && bestQing.sources.includes('itunes'), JSON.stringify(bestQing?.sources));
 const live = (qing.body.candidates ?? []).find((c) => /live/i.test(c.title));

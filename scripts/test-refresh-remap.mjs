@@ -49,7 +49,7 @@ const payload = () => {
   return { dir: '/music', tracks: [B, A], scanning: false, scanParsed: 2, scanTotal: 2, truncated: false, scannedAt: 2 };
 };
 const mockFetch = async (url) => {
-  if (String(url).includes('/api/refresh')) { phase = 'scanning'; return { ok: true, json: async () => payload() }; }
+  if (String(url).includes('/api/dsh-music/refresh')) { phase = 'scanning'; return { ok: true, json: async () => payload() }; }
   return { ok: true, json: async () => payload() };
 };
 globalThis.fetch = mockFetch;

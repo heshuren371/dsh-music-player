@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const suites = [
+  { name: 'desktop /api fetch routes', file: 'scripts/test-desktop-routes.mjs', node: [] },
   { name: 'stream / range / traversal', file: 'scripts/test-stream.mjs', node: [] },
   { name: 'security / limits', file: 'scripts/test-security.mjs', node: [] },
   { name: 'perf / memory / fd', file: 'scripts/test-perf.mjs', node: ['--expose-gc'] },
@@ -18,6 +19,7 @@ const suites = [
   { name: 'online metadata match (host)', file: 'scripts/test-match.mjs', node: [] },
   { name: 'apply tags + rename (host)', file: 'scripts/test-apply.mjs', node: [] },
   { name: 'online metadata match (client)', file: 'scripts/test-match-client.mjs', node: [] },
+  { name: 'client shell: icons / tooltips / OS media', file: 'scripts/test-client-shell.mjs', node: [] },
   { name: 'host hot reload', file: 'scripts/test-hot-reload.mjs', node: [] },
 ];
 let failed = 0;

@@ -45,7 +45,7 @@ const B = { index: 1, id: 'b.mp3', name: 'b.mp3', title: 'Beta', artist: 'y', du
 const deleteCalls = [];
 const mockFetch = async (url, options) => {
   const target = String(url);
-  if (target.includes('/api/delete')) {
+  if (target.includes('/api/dsh-music/delete')) {
     deleteCalls.push(JSON.parse(options.body));
     return { ok: true, json: async () => ({ dir: '/music', tracks: [B], scanning: false, scanParsed: 1, scanTotal: 1, truncated: false, scannedAt: 2 }) };
   }

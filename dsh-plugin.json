@@ -3,7 +3,7 @@
   "manifestVersion": "0.15",
   "id": "local.dsh-music-player",
   "name": "DSH Music Player（本地音乐播放器）",
-  "version": "0.6.4",
+  "version": "0.7.4",
   "facets": {
     "host": {
       "entry": "lib/index.js",
@@ -46,6 +46,11 @@
       "reason": "多源在线补全歌曲原名 / 歌手 / 封面（只读搜索）"
     },
     {
+      "name": "transport.api",
+      "scope": "connection.fetch（/api/dsh-music/*，Web 与 DSH Desktop 共用）",
+      "reason": "Desktop 不开监听端口、且桌面装配里没有 webServer 服务，宿主端点必须挂在 connection 的 /api 精确 Fetch 路由上"
+    },
+    {
       "name": "storage.local",
       "scope": "$DSH_HOME/storages/dsh-music-player.json + 浏览器 localStorage（dsh-music:* 前缀）",
       "reason": "记住音乐目录、最后播放曲目与进度、音量/循环/排序偏好"
@@ -81,18 +86,20 @@
         "kind": "HttpPrefixRoutes",
         "name": "dsh-music",
         "spec": {
-          "prefix": "/dsh-music",
+          "prefix": "/api/dsh-music",
+          "transport": "connection.fetch",
+          "legacyPrefix": "/dsh-music",
           "endpoints": [
-            "GET /api/library",
-            "POST /api/refresh",
-            "POST /api/dir",
-            "GET /api/cover",
-            "GET /api/match",
-            "GET /api/art",
-            "POST /api/apply",
-            "POST /api/pick",
-            "GET /api/stream",
-            "POST /api/delete"
+            "GET|HEAD /library",
+            "POST /refresh",
+            "POST /dir",
+            "GET|HEAD /cover",
+            "GET|HEAD /match",
+            "GET|HEAD /art",
+            "POST /apply",
+            "POST /pick",
+            "GET|HEAD /stream",
+            "POST /delete"
           ]
         }
       }
@@ -103,7 +110,11 @@
     "repository": "https://github.com/heshuren371/dsh-music-player"
   },
   "x-dsh-transition": {
-    "activation": "当前 entry 为 Cordis 插件形状（exports { apply, inject, name }），待 adapter-dsh 的 Cordis activation kind 落地后对齐",
+    "platform": "Web 与 DSH Desktop 复用同一个 client bundle：客户端模块系统只接受 dsh.client.platform === 'web'（0.1.6 / 0.1.7 的 resolveMeta 都写死这一条），desktop 也走这条平台字，不存在 platform: 'desktop'。",
+    "activation": "当前 entry 为 Cordis 插件形状（exports { apply, inject, name }）。静态 inject 故意留空，改由 ctx.inject(['connection'] / ['webServer']) 运行时绑定，两代 Desktop 宿主各自命中：0.1.7 起 Desktop 用 runProfile 起完整 Web 运行时（有 webServer，也有 connection），0.1.6 形态的 desktop-host 禁用了 webserver 行（只有 connection）。静态注入 webServer 会让插件在 0.1.6 形态的桌面端永不激活。",
+    "uiPrimitives": "官方 Tooltip / Input / 产品图标来自平台种子模块 @deepseek-ai/dsh-client-ui-primitives。图标导出名跨版本变过：0.1.6 是 IconXxx16，0.1.7 起是 IconXxxRegular|Medium；插件按候选名依次探测，全部落空才回退自绘 SVG。Tooltip 必须 portal:true —— 气泡是 position:fixed，毛玻璃的 backdrop-filter 会让祖先成为 fixed 包含块，不 portal 就会被 overflow:hidden 裁掉。",
+    "macosNotification": "渲染进程 Web Notification（Electron 转系统通知）：换曲即发、silent、同曲去重。macOS 通知横幅只用 App 图标，自定义 icon 被忽略。",
+    "macosNowPlaying": "状态栏/控制中心『正在播放』走 MediaSession。Electron 确实会把标题/歌手/专辑/封面交给 macOS（Electron Framework 引用了 _MPMediaItemPropertyTitle / _MPMediaItemPropertyArtwork / _OBJC_CLASS_$_MPMediaItemArtwork / _OBJC_CLASS_$_MPNowPlayingInfoCenter）。封面此前缺失的原因是 Chromium 的 MediaImage scheme 白名单：只收 http/https/data/blob，页面相对路径在 Desktop 上解析成 dsh-app://app/... 被整条丢弃。现改用 window.dshDesktopBoot.ready() 返回的回环 streamBaseUrl 拼绝对地址，并走免会话 cookie 的旧 /dsh-music/api 前缀端点（系统取图由浏览器内部发起，不保证带 cookie）。",
     "clientInject": [
       "@deepseek-ai/dsh-client-runtime",
       "@deepseek-ai/dsh-client-locale",

@@ -44,7 +44,7 @@ let tracks = [
   // batch must still rename it instead of treating it as done.
   { id: 'e.mp3', name: 'e.mp3', title: 'Epsilon', artist: 'Real E', duration: 300, tagged: true },
 ];
-const library = (scannedAt) => ({ dir: '/music', tracks, scanning: false, scanParsed: tracks.length, scanTotal: tracks.length, truncated: false, scannedAt });
+const library = (scannedAt) => ({ dir: '/music', tracks, scanning: false, scanParsed: tracks.length, scanTotal: tracks.length, truncated: false, skippedPackages: 1, scannedAt });
 const TITLES = { a: 'Alpha Real', b: 'Beta Real', c: 'Gamma Real', d: 'Delta Maybe' };
 const ARTISTS = { a: 'Real X', b: 'Real Y', c: 'Real Z', d: 'Real D' };
 const stemOf = (id) => id.replace(/\.[^.]+$/, '');
@@ -53,7 +53,7 @@ const applyCalls = [];
 const mockFetch = async (url, options) => {
   const target = String(url);
   const parsed = new URL(target, 'http://127.0.0.1');
-  if (target.includes('/api/match')) {
+  if (target.includes('/api/dsh-music/match')) {
     matchCalls.push(target);
     const id = parsed.searchParams.get('p');
     const stem = stemOf(id);
@@ -66,7 +66,7 @@ const mockFetch = async (url, options) => {
     const candidate = { id: 1, title, artist, album: 'Album', cover: 'https://is1-ssl.mzstatic.com/image/thumb/Music/300x300bb.jpg', duration: 301, score: confident ? 0.95 : 0.4, auto: confident, source: 'qq', sources: ['qq', 'itunes'] };
     return { ok: true, json: async () => ({ term: title, best: candidate, auto: confident, candidates: [candidate] }) };
   }
-  if (target.includes('/api/apply')) {
+  if (target.includes('/api/dsh-music/apply')) {
     const body = JSON.parse(options.body);
     applyCalls.push(body);
     const index = tracks.findIndex((track) => track.id === body.id);
@@ -87,7 +87,7 @@ const ctx = {
   locale: {
     register: () => {},
     bind: () => (key) => {
-      const dict = { stats: (n) => n + ' songs', 'scan.progress': (a, b) => a + '/' + b, 'confirm.delete': (title) => 'delete ' + title + '?', 'complete.progress': (d, tt) => d + '/' + tt, 'confirm.complete': (n) => 'complete ' + n };
+      const dict = { stats: (n) => n + ' songs', 'scan.progress': (a, b) => a + '/' + b, 'confirm.delete': (title) => 'delete ' + title + '?', 'complete.progress': (d, tt) => d + '/' + tt, 'confirm.complete': (n) => 'complete ' + n, 'stats.drm': (n) => n + ' drm skipped' };
       return dict[key] ?? key;
     },
   },
@@ -108,6 +108,7 @@ const titleOf = (row) => row.querySelector('.dshm-cellTitle').textContent;
 const meta = () => JSON.parse(localStorage.getItem('dsh-music:meta') ?? '{}');
 
 check('five rows rendered with a cover cell', rows().length === 5 && rows()[0].querySelector('.dshm-colCover') !== null, 'rows=' + rows().length);
+check('DRM-skipped package count is shown', container.querySelector('.dshm-header .dshm-stats')?.textContent.includes('1 drm skipped'), container.querySelector('.dshm-header .dshm-stats')?.textContent);
 
 // ── Per-row apply (writes file) ──────────────────────────────────────────────
 await act(async () => { rows()[0].querySelector('.dshm-match').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
@@ -136,7 +137,7 @@ await act(async () => { container.querySelector('.dshm-cand').dispatchEvent(new 
 await settle(80);
 check('display-only apply sends no /api/apply', applyCalls.length === 1, 'calls=' + applyCalls.length);
 check('display-only apply keeps a local override', meta()['b.mp3']?.title === 'Beta Real' && titleOf(rows()[1]) === 'Beta Real', JSON.stringify(meta()));
-check('row cover falls back to the proxied artwork', String(rows()[1].querySelector('.dshm-rowCover')?.getAttribute('src')).startsWith('/dsh-music/api/art?u='), String(rows()[1].querySelector('.dshm-rowCover')?.getAttribute('src')));
+check('row cover falls back to the proxied artwork', String(rows()[1].querySelector('.dshm-rowCover')?.getAttribute('src')).startsWith('/api/dsh-music/art?u='), String(rows()[1].querySelector('.dshm-rowCover')?.getAttribute('src')));
 
 await act(async () => { rows()[1].querySelector('.dshm-match').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
 await settle(80);

@@ -28,6 +28,8 @@ await fs.writeFile(path.join(music, 'song.wav'), (() => {
 await fs.mkdir(path.join(plugin, 'lib'), { recursive: true });
 await fs.copyFile(path.join(root, 'lib', 'index.js'), path.join(plugin, 'lib', 'index.js'));
 await fs.copyFile(path.join(root, 'lib', 'host.js'), path.join(plugin, 'lib', 'host.js'));
+// host.js 现在通过 ./http-bridge.js 做 Fetch ⇄ node:http 适配，拷贝树里也要带上。
+await fs.copyFile(path.join(root, 'lib', 'http-bridge.js'), path.join(plugin, 'lib', 'http-bridge.js'));
 await fs.symlink(path.join(root, 'node_modules'), path.join(plugin, 'node_modules'), 'dir');
 
 let handler = null;

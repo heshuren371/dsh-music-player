@@ -31,7 +31,9 @@ const mod = await import(hostUrl.href);
 let failures = 0;
 const check = (label, ok, detail) => { if (!ok) failures += 1; console.log((ok ? 'PASS ' : 'FAIL ') + label + (detail === undefined ? '' : ' | ' + detail)); };
 
-check('exports Cordis plugin identity', mod.name === 'music-player' && Array.isArray(mod.inject) && mod.inject.includes('webServer') && typeof mod.apply === 'function', 'name=' + mod.name + ' inject=' + JSON.stringify(mod.inject));
+// 静态 inject 必须留空：DSH Desktop 的装配里没有 webServer 服务，静态注入
+// 会让插件在桌面端永不激活。宿主服务改为 apply() 内 ctx.inject([...]) 运行时绑定。
+check('exports Cordis plugin identity', mod.name === 'music-player' && Array.isArray(mod.inject) && mod.inject.length === 0 && typeof mod.apply === 'function', 'name=' + mod.name + ' inject=' + JSON.stringify(mod.inject));
 
 const rejections = [];
 process.on('unhandledRejection', (reason) => rejections.push(reason));
