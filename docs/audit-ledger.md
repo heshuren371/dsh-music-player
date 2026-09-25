@@ -678,3 +678,69 @@ process.stdout|process.stderr       第三方 logger（pino/winston/bunyan/…�
   `redactSrc()` 把 `t=<token>` 替换为 `t=***`；`test-audit.mjs` 的凭据扫描仍全绿。
 - `lifecycle.zh.md:29/:107`：新定时器 `unseekableTimer` 在 `halt()` 里先 `clearTimeout`
   再置 null，且 `scheduleUnseekableHeal` 在 `disposed` 后直接返回 —— **清句柄与阻止再武装分开做**（§2.10）。
+
+---
+
+## 5.18 第 14 轮 —— Desktop MV 仍拖不动：自愈修错了对象
+
+**用户第二份真机日志（比第一份更有信息量）**：
+```
+seekable=1(0.0..0.0) src=rel err=0 base=token ep=/api/dsh-music
+url=dsh-app://app/api/dsh-music/stream?p=ONE%20OK%20ROCK%20-%20We%20Are.mov&v=1790345439794
+```
+四次 seek，`url` **一次都没变**。
+
+### 5.18.1 第 13 轮的修复**是有效的**，故障点已经移了
+
+`base=token` —— `/session` 的回环回落**确实生效**，token 基址已经拿到（第 13 轮 §5.17 的目标达成）。
+但 `url` 是 `dsh-app://app/api/dsh-music/stream?p=…`：**相对路径**被页面解析后的结果。
+⇒ **挂源发生在基址到达之前**，之后基址到了、源却没被换掉。
+
+三个未等基址的挂源点（第 12/13 轮只修了其中一部分）：
+`recoverAt()`（播放中断后的恢复）、改名重映射、以及**自愈本身**。
+
+### 5.18.2 根因：自愈按 `track.kind` 猜修法，而该模式是 WASM 旁路
+
+`ONE OK ROCK - We Are.mov` 走的是 **WASM 旁路**：画面由 WASM 解码，**媒体元素播的是
+`/stream?p=<视频文件>`（音轨）**，而 `track.kind` 仍是 `"video"`。
+
+第 13 轮的自愈写的是：
+```js
+const next = track.kind === "video" ? await prepareVideo(track) : streamUrl(track);
+```
+对这条路径它会去 `prepareVideo()` —— 问 `/api/mv` 拿**转码缓存键**，可能等几分钟。
+于是自愈**永远卡在等待里**，源从未被换掉 —— 与「四次 seek，`url` 完全没变」精确吻合。
+
+**修法：按「当前这条源是什么类型」重建，而不是按 `track.kind` 猜。**
+```js
+const wasMvCache = src.includes("/mvfile") || src.includes("&k=");
+const next = wasMvCache ? await prepareVideo(track) : streamUrl(track);
+if (next === null) { scheduleUnseekableHeal(1200); return; }   // 还没就绪：窗口内再试
+```
+
+### 5.18.3 一并修的
+
+- `recoverAt()` 与改名重映射：两处 `audio.src = streamUrl(...)` 原来**没有** `await ensureStreamBase()`
+  （§2.16「降级成不可 seek 的源比等待更糟」）。
+- **挂源时的诊断**：新增 `logAttach()` —— 挂**非 token** 源时记一行
+  （`attach kind=… base=… ep=… url=…`），正常路径不刷屏。第 13 轮只在 seek 时记录，
+  所以「挂源那一刻基址是什么状态」看不到；这条日志下一次能直接把问题钉死。
+
+### 5.18.4 门禁扩到 18 条
+
+- **场景 E（真机形态）**：视频轨 + 基址迟到 → 必须先真的挂上相对源，再自愈成 token 地址。
+  E1 报出的正是 `/api/dsh-music/mvfile?k=…`。
+- **结构断言 F1**：自愈必须按**源的类型**决定修法，**不得**出现
+  `track.kind === "video" ? await prepareVideo`。负向对照：把代码退回那个写法 → F1 红。
+- 对照②（关掉自愈）→ D2 + E2 红。
+
+### 5.18.5 我自己在本轮的错
+
+- **改 `recoverAt`/改名重映射时漏了 async IIFE 的闭合括号** → 13 个语法/类型错误。
+  又一次被**基线 0 的棘轮**当场抓住。
+- 场景 E 的**等待时长**第一次给少了（16s 才够），说明时间窗类夹具必须比被测窗口留足余量。
+
+### 5.18.6 验证
+
+- `test-mv-seek.mjs` → 18 条全过；两组负向对照确认变红
+- `ALL 25 SUITES PASS` · typecheck 0（基线 0）· build-fresh 一致 · check-strict 通过 · manifest PASS

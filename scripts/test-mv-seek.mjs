@@ -202,5 +202,34 @@ const badRel = (arr) => arr.filter((s) => !s.startsWith('http'));
   check('D3: the heal is bounded (no re-attach storm)', srcs.length <= 4, 'srcs=' + srcs.length);
 }
 
+// ── E. 视频轨 + 基址迟到 → 必须自愈成 token 地址（**真机故障的形态**）──────────
+// 用户日志：base=token（基址其实拿到了）但 url 是相对的 `/api/dsh-music/stream?p=…`，
+// 且 seekable=[0,0]。也就是说**挂源发生在基址到达之前**，而自愈从来没把它换掉。
+// 视频轨的修法必须按「这条源是什么类型」重建：MV 转码缓存（/mvfile 或 &k=）要重新问
+// /api/mv 拿缓存键；而 WASM 旁路的 `/stream?p=<视频文件>` 只需重建 streamUrl。
+{
+  const { srcs } = await bootAndCue(VIDEO.id, { failSessionForMs: 7500, unseekable: true, waitMs: 16000 });
+  check('E1: video track first got a relative (unseekable) source',
+    srcs.some((s) => !s.startsWith('http')), srcs.join(' '));
+  check('E2: the video source was healed into a token URL (not left relative)',
+    srcs.some((s) => isToken(s)), srcs.join(' '));
+}
+
+// ── F. 结构断言：自愈必须按**源的类型**决定怎么修，不能按 track.kind 猜 ────────
+// 第一版写的是 `track.kind === "video" ? await prepareVideo(track) : streamUrl(track)`。
+// 对 `.mov` 的 WASM 旁路（元素播 `/stream?p=<视频文件>`，kind 仍是 video）它会去等一次
+// 可能几分钟的转码 ⇒ 自愈永远卡住、源从未被换掉（用户看到的 url 从头到尾没变）。
+// 这条断言钉住「按源判断」这个形状。回退 → 必红。
+{
+  const clientSrc = await fs.readFile(new URL('../src/client.ts', import.meta.url), 'utf8');
+  const healStart = clientSrc.indexOf('const healUnseekableSource = () => {');
+  const healEnd = clientSrc.indexOf('const scheduleUnseekableHeal = (', healStart);
+  const healBody = healStart < 0 ? '' : clientSrc.slice(healStart, healEnd < 0 ? undefined : healEnd);
+  check('F1: heal picks the repair by SOURCE kind, not by track.kind',
+    healBody.length > 0 && /wasMvCache/.test(healBody) && /src\.includes\("\/mvfile"\)|src\.includes\("&k="\)/.test(healBody)
+      && !/track\.kind === "video" \? await prepareVideo/.test(healBody),
+    healStart < 0 ? 'heal not found' : 'heal still branches on track.kind (WASM-bypass video would hang)');
+}
+
 console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)');
 process.exit(failures === 0 ? 0 : 1);
