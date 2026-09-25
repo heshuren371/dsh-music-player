@@ -250,6 +250,13 @@ check('playbackState reflects playback', mediaSession.playbackState === 'playing
 check('setPositionState was fed a legal (duration, position, rate)', mediaSession.positionStates.length >= 1 && mediaSession.positionStates.every((s) => s === undefined || (s.duration > 0 && s.position >= 0 && s.position <= s.duration)), JSON.stringify(mediaSession.positionStates));
 check('media-key handlers are registered', ['play', 'pause', 'previoustrack', 'nexttrack', 'seekto'].every((n) => mediaSession.actionHandlers.includes(n)), mediaSession.actionHandlers.join(','));
 
+// 正在播放的指示：Apple Music 的 .playing-bars —— 该行封面叠三根跳动条，
+// 悬停换成播放/暂停图标（--playButtonOpacity）
+const activeCover = container.querySelector('.dshm-row--active .dshm-coverWrap');
+check('the playing row overlays the animated equalizer bars', activeCover?.querySelectorAll('.dshm-coverBars i').length === 3 && activeCover.querySelector('.dshm-coverHover') !== null);
+check('only the playing row gets the overlay', container.querySelectorAll('.dshm-coverWrap').length === 1, String(container.querySelectorAll('.dshm-coverWrap').length));
+check('while playing the hover glyph is the pause icon (two bars)', String(container.querySelector('.dshm-coverHover svg')?.innerHTML ?? '').includes('<rect'), 'pause glyph');
+
 check('desktop + unfocused window raises a native notification', notifications.length === 1 && notifications[0].title === 'Alpha', JSON.stringify(notifications.map((n) => n.title)));
 check('notification body carries artist context', notifications[0].options.body === 'Artist X', JSON.stringify(notifications[0]?.options));
 check('notification icon is the absolute artwork URL', String(notifications[0].options.icon).startsWith(SYSTEM_ART_BASE), String(notifications[0].options.icon));
@@ -268,7 +275,7 @@ const overlay = container.querySelector('.dshm-player');
 check('clicking the cover opens the full player', overlay !== null);
 check('full player shows big artwork + the playing title', overlay?.querySelector('.dshm-playerArt') !== null && String(overlay?.querySelector('.dshm-playerTitle')?.textContent ?? '').includes('Alpha'), overlay?.querySelector('.dshm-playerTitle')?.textContent ?? 'missing');
 check('full player uses official DSH icons where they exist (chevron / ellipsis)', overlay?.querySelector('[data-icon="IconChevronDownOutlineRegular"]') !== null && overlay?.querySelector('[data-icon="IconEllipsisOutlineRegular"]') !== null, Array.from(overlay?.querySelectorAll('[data-icon]') ?? []).map((el) => el.getAttribute('data-icon')).join(','));
-check('full player has transport, progress and volume', overlay?.querySelectorAll('.dshm-playerTransportBtn').length === 4 && overlay?.querySelector('.dshm-playerProgress') !== null && overlay?.querySelector('.dshm-volume') !== null);
+check('full player has transport, progress and volume', overlay?.querySelectorAll('.dshm-playerTransportBtn').length === 4 && overlay?.querySelector('.dshm-progress--stacked') !== null && overlay?.querySelector('.dshm-volume') !== null);
 check('prev/play/next sit in the centred group (loop moved out)', (() => {
   const center = overlay?.querySelector('.dshm-playerTransportCenter');
   const end = overlay?.querySelector('.dshm-playerTransportSide--end');
@@ -289,12 +296,41 @@ check('full player keeps the macOS Music ⭐ + ⋯ pair next to the title', (() 
   return rounds.length === 2 && (first?.querySelector('svg') !== null) && (rounds[1]?.querySelector('[data-icon="IconEllipsisOutlineRegular"]') !== null);
 })(), String(overlay?.querySelectorAll('.dshm-playerMeta .dshm-playerRound').length));
 check('full player progress is stacked: track on top, elapsed / -remaining below', (() => {
-  const wrap = overlay?.querySelector('.dshm-playerProgress');
+  const wrap = overlay?.querySelector('.dshm-progress--stacked');
   const row = wrap?.querySelector('.dshm-timeRow');
   const labels = Array.from(row?.querySelectorAll('.dshm-time') ?? []).map((el) => el.textContent);
-  return wrap?.querySelector('input.dshm-slider') !== null && row !== null && labels.length === 2 && String(labels[1]).startsWith('-');
-})(), Array.from(overlay?.querySelectorAll('.dshm-playerProgress .dshm-time') ?? []).map((el) => el.textContent).join(' / '));
-check('full player volume has the speaker glyph + slider', overlay?.querySelector('.dshm-playerVolume .dshm-volIcon') !== null && overlay?.querySelector('.dshm-playerVolume input.dshm-volume--wide') !== null);
+  return wrap?.querySelector('.dshm-progressTrack input.dshm-slider') !== null && row !== null && labels.length === 2 && String(labels[1]).startsWith('-');
+})(), Array.from(overlay?.querySelectorAll('.dshm-progress--stacked .dshm-time') ?? []).map((el) => el.textContent).join(' / '));
+check('stacked time row really spans the track (elapsed left / -remaining right)', (() => {
+  const wrap = overlay?.querySelector('.dshm-progress--stacked');
+  const row = wrap?.querySelector('.dshm-timeRow');
+  return wrap !== null && row !== null
+    && wrap.classList.contains('dshm-progress')
+    && (container.ownerDocument.querySelector('style[data-plugin="@local/dsh-music-player"]')?.textContent ?? '').includes('.dshm-progress.dshm-progress--stacked{flex-direction:column;gap:6px;align-items:stretch}')
+    && (container.ownerDocument.querySelector('style[data-plugin="@local/dsh-music-player"]')?.textContent ?? '').includes('.dshm-progress--stacked .dshm-timeRow{width:100%}');
+})(), 'align-items must outrank .dshm-progress{align-items:center}');
+check('the seek bar is driven by its own pointer hit area', (() => {
+  const track = overlay?.querySelector('.dshm-progress--stacked .dshm-progressTrack');
+  return track !== null && String(track.querySelector('input.dshm-slider')?.className ?? '').includes('dshm-slider');
+})(), 'progressTrack present');
+
+// 圆钮：macOS 原生白色圆钮（进度条悬停才现、音量条常显）
+const pluginCss = document.querySelector('style[data-plugin="@local/dsh-music-player"]')?.textContent ?? '';
+check('slider knob is the macOS white capsule (ellipse, not a circle)', pluginCss.includes('width:20px;height:14px;border-radius:999px;background:#ffffff') && pluginCss.includes('box-shadow:0 .5px 2px rgba(0,0,0,.28)'), 'knob rule');
+check('the seek slider itself ignores pointer events (hit area owns them)', pluginCss.includes('.dshm-progress .dshm-slider{pointer-events:none'), 'pointer-events rule');
+
+// 动效 / 材质：曲线、关键帧、Apple 的 saturate 毛玻璃、减少动效开关
+check('motion tokens carry the Apple Music easing curves', pluginCss.includes('--dshm-ease:cubic-bezier(.215,.61,.355,1)') && pluginCss.includes('--dshm-ease-snap:cubic-bezier(.23,1,.32,1)') && pluginCss.includes('--dshm-ease-spring:cubic-bezier(.76,.665,.37,1.35)'), 'easing tokens');
+check('player overlay animates in and out (modalZoomIn/Out style)', pluginCss.includes('@keyframes dshm-playerIn') && pluginCss.includes('@keyframes dshm-playerOut') && pluginCss.includes('.dshm-player--closing{animation:dshm-playerOut .2s var(--dshm-ease)'), 'player motion');
+check('artwork crossfades in on every track change', pluginCss.includes('@keyframes dshm-artIn') && pluginCss.includes('.dshm-playerArt,.dshm-playerArtFallback{animation:dshm-artIn'), 'artwork motion');
+check('frosted surfaces use Apple material saturation (saturate(180%))', pluginCss.includes('saturate(180%) blur(6px)') && pluginCss.includes('saturate(180%) blur(48px)'), 'material');
+check('press feedback is a scale(.92) like the Apple UI', pluginCss.includes('.dshm-playerRound:active:not(:disabled)') && pluginCss.includes('transform:scale(.92)'), 'press');
+check('prefers-reduced-motion disables the new animations', pluginCss.includes('@media (prefers-reduced-motion:reduce)') && /@media \(prefers-reduced-motion:reduce\)\{[^}]*\.dshm-player,\.dshm-player--closing/.test(pluginCss), 'reduced motion');
+check('the now-playing indicator reuses Apple\'s playing-bars idea', pluginCss.includes('@keyframes dshm-eq') && pluginCss.includes('.dshm-coverBars i{') && pluginCss.includes('.dshm-row:hover .dshm-coverBars,.dshm-queueRow:hover .dshm-coverBars{opacity:0}'), 'equalizer');
+check('macOS overlay scrollbars (hidden until hover)', pluginCss.includes('.dshm-tableWrap::-webkit-scrollbar') && pluginCss.includes('.dshm-playerQueue:hover::-webkit-scrollbar-thumb'), 'scrollbars');
+check('keyboard focus ring is the Apple 3-4px halo', pluginCss.includes(':focus-visible{outline:none;box-shadow:0 0 0 3px color-mix'), 'focus halo');
+check('list rows use the 12px list-row radius token', pluginCss.includes('border-radius:12px'), 'row radius');
+check('progress knob is hidden until hover, volume knob is always visible', pluginCss.includes('.dshm-slider::-webkit-slider-thumb') && pluginCss.includes('transform:scale(0)') && pluginCss.includes('.dshm-volume::-webkit-slider-thumb'), 'reveal rules');
 check('"一键补全" is back in the pills row next to refresh', (() => {
   const pills = Array.from(overlay?.querySelectorAll('.dshm-playerPills .dshm-pill') ?? []);
   return pills.length === 2 && String(pills[0].textContent).includes('action.completeAll') && String(pills[1].textContent).includes('action.refresh');
@@ -317,8 +353,11 @@ await settle(30);
 check('clicking the surface dismisses the ⋯ menu', overlay.querySelectorAll('.dshm-queueMenuItem').length === 0);
 
 // 收起
+// 收起：先播 200ms 退出动画，再卸载（Apple Music 弹层的 zoom-out）
 await act(async () => { overlay.querySelector('.dshm-playerTop .dshm-playerRound').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
-await settle(50);
+await settle(60);
+check('collapse plays the exit animation before unmounting', container.querySelector('.dshm-player--closing') !== null);
+await settle(260);
 check('collapse button closes the full player', container.querySelector('.dshm-player') === null);
 
 // 窗口在前台（聚焦 + 可见）时换曲也必须提示 —— 这是用户报的「通知栏没适配」场景。

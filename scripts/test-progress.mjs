@@ -148,7 +148,29 @@ await fire(slider, new dom.window.MouseEvent('pointerup', { bubbles: true }));
 check('B4 release commits the dragged position', Math.abs(audio.currentTime - 150) < 0.001, 'currentTime=' + audio.currentTime);
 check('B5 fill stays on the committed value', Math.abs(fill() - 50) < 0.01, '--p=' + fill().toFixed(2));
 
-// ── C. non-pointer changes (keyboard / wheel) seek immediately ──────────────
+// ── C0. 命中区自己换算落点：点哪儿跳哪儿，拖动只画界面、松手才 seek ────────
+const track = container.querySelector('.dshm-progressTrack');
+if (!track) { console.log('FATAL: no .dshm-progressTrack'); process.exit(1); }
+// jsdom 不做布局，手工给命中区一个 400px 宽的矩形（模拟真实进度条）
+const trackRect = { left: 100, top: 0, right: 500, bottom: 18, width: 400, height: 18, x: 100, y: 0 };
+track.getBoundingClientRect = () => trackRect;
+slider.getBoundingClientRect = () => trackRect;
+track.getBoundingClientRect = () => trackRect;
+const pointer = (type, clientX) => new dom.window.MouseEvent(type, { bubbles: true, button: 0, clientX });
+audio.currentTime = 0;
+await fire(track, pointer('pointerdown', 300)); // 正中 = 50%
+check('C0a pointerdown only paints the UI (no audio seek mid-drag)', Math.abs(fill() - 50) < 0.01 && audio.currentTime === 0, '--p=' + fill().toFixed(2) + ' currentTime=' + audio.currentTime);
+await fire(track, pointer('pointermove', 460)); // 90%
+check('C0b dragging paints the fill but does not touch the audio', Math.abs(fill() - 90) < 0.01 && audio.currentTime === 0, '--p=' + fill().toFixed(2) + ' currentTime=' + audio.currentTime);
+await fire(track, pointer('pointermove', 260)); // 40%
+check('C0c fast back-and-forth dragging stays UI-only', Math.abs(fill() - 40) < 0.01 && audio.currentTime === 0, '--p=' + fill().toFixed(2));
+await fire(track, pointer('pointerup', 260));
+check('C0d release commits the final position once', Math.abs(audio.currentTime - 120) < 0.001, 'currentTime=' + audio.currentTime);
+check('C0e dragging class is cleared on release', container.querySelector('.dshm-progress--dragging') === null);
+// 单击（按下即抬起）= 立刻快进到该点
+await fire(track, pointer('pointerdown', 400)); // 75%
+await fire(track, pointer('pointerup', 400));
+check('C0f a single click fast-forwards to that position', Math.abs(audio.currentTime - 225) < 0.001 && Math.abs(fill() - 75) < 0.01, 'currentTime=' + audio.currentTime + ' --p=' + fill().toFixed(2));
 setValue(30);
 await fire(slider, new dom.window.Event('input', { bubbles: true }));
 check('C1 keyboard-style input seeks at once', Math.abs(audio.currentTime - 30) < 0.001, 'currentTime=' + audio.currentTime);
