@@ -6,7 +6,7 @@ on:
   pull_request:
   workflow_dispatch:
 
-# 门禁与本地一致：`node scripts/run-all.mjs`（24 套）+ manifest 校验 + 空白/冲突标记。
+# 门禁与本地一致：产物新鲜度 + 类型棘轮 + 25 套回归 + manifest 校验 + 空白/冲突标记。
 # 任何一条红了就不要再合 —— 见 AGENTS.md §3 与 §6.2（禁止为了让门禁变绿而放宽断言）。
 concurrency:
   group: ci-${{ github.ref }}
@@ -15,30 +15,38 @@ concurrency:
 jobs:
   gates:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4   # 版本取自 package.json 的 packageManager
 
       - uses: actions/setup-node@v4
         with:
           # 与 package.json 的 engines.node（^22.19.0 || >=24.0.0）对齐
           node-version: '24'
-          cache: npm
+          cache: pnpm
 
-      - name: Install (exact lockfile)
-        run: npm ci
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (ratchet — 只许变少)
+        run: pnpm run typecheck
 
       - name: Syntax check every runtime entry
         run: |
           for f in lib/*.js scripts/*.mjs; do node --check "$f"; done
 
-      - name: Regression suites (24)
+      # ⚠️ 这里**故意不先 build**。`npm test` 的第一步是 scripts/check-build-fresh.mjs，
+      # 它把 src/ 编译到临时目录再和提交进来的 lib/ 逐字节比对。若 CI 先跑
+      # `pnpm run build`，lib/ 会被就地覆盖，那条门禁就变成恒真、失去判别力。
+      - name: Regression suites + build freshness (25)
         run: npm test
 
       - name: Manifest schema check (pinned dsh-std Community v0.15)
         run: |
           set +e
-          out=$(npm run --silent check:manifest 2>&1)
+          out=$(node scripts/check-manifest.mjs 2>&1)
           status=$?
           set -e
           echo "$out"
@@ -51,7 +59,7 @@ jobs:
 
       - name: Whitespace and conflict markers
         run: |
-          if git grep -nI -E '^(<<<<<<< |=======$|>>>>>>> )' -- . ':!package-lock.json'; then
+          if git grep -nI -E '^(<<<<<<< |=======$|>>>>>>> )' -- . ':!pnpm-lock.yaml'; then
             echo "::error::发现冲突标记残留"
             exit 1
           fi

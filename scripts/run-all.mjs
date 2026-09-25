@@ -20,6 +20,7 @@ const suites = [
   { name: 'entry fallback (positive identification)', file: 'scripts/test-entry-fallback.mjs', node: [] },
   { name: 'teardown wins over in-flight hot reload', file: 'scripts/test-teardown-race.mjs', node: [] },
   { name: 'token lifetime (survives host reload)', file: 'scripts/test-token-lifetime.mjs', node: [] },
+  { name: 'MV seek (absolute token source)', file: 'scripts/test-mv-seek.mjs', node: [] },
   { name: 'MV teardown (in-flight ffmpeg child)', file: 'scripts/test-mv-teardown.mjs', node: [] },
   { name: 'delete flow', file: 'scripts/test-delete.mjs', node: [] },
   { name: 'online metadata match (host)', file: 'scripts/test-match.mjs', node: [] },

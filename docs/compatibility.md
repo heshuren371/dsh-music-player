@@ -67,7 +67,16 @@
 | `mediabunny` | MV 容器 / 编码探测 | 该曲目按 direct play 处理；探测失败则不播 MV |
 | `@libav.js/variant-webcodecs`、`libavjs-webcodecs-polyfill` | 无 ffmpeg 时的浏览器内转码兜底 | 退回「提示安装 ffmpeg」 |
 
-全部是运行时依赖。**没有** `install` / `prepare` / `postinstall` / `prepublish` 等生命周期脚本——`package.json` 的 `scripts` 只声明 `test` 与 `check:manifest`。（`scripts/` 下的 `.mjs` 是开发者手动执行的回归与预览工具，不会被宿主自动执行。）
+全部是运行时依赖。**没有** `install` / `prepare` / `postinstall` / `prepublish` 等生命周期脚本——`package.json` 的 `scripts` 只声明 `build` / `dev` / `typecheck` / `test` / `check:manifest`，**没有一个是 npm 生命周期钩子**。（`scripts/` 下的 `.mjs` 是开发者手动执行的回归与预览工具，不会被宿主自动执行。）
+
+### 5.1 开发依赖与编译产物
+
+| 项 | 说明 |
+| --- | --- |
+| `typescript`（devDependency） | `src/*.ts` → `lib/*.js`。**运行时不加载它**，它只在构建与类型检查时用 |
+| `@types/node` / `@types/react` / `@types/react-dom`（devDependency） | 仅类型声明，不产生运行时代码 |
+| `lib/*.js` | **提交进仓库的编译产物**。`dsh plugin add` 只克隆 + 装依赖、不跑构建，所以产物必须在仓库里；由 `scripts/check-build-fresh.mjs` 保证它与 `src/` 一致 |
+| 锁文件 | `pnpm-lock.yaml`（`packageManager: pnpm@11.7.0`）—— 与 `dsh plugin` 内部使用的包管理器一致 |
 
 ## 6. 权限 ↔ 代码信号 ↔ 触发条件
 

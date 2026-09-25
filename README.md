@@ -2,6 +2,8 @@
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）的本地音乐播放器插件，**Web 与 Desktop 同一份包**。在会话视图标签环里加一个「音乐」标签页，交互与视觉参考 macOS 的 Music 应用。
 
+**TypeScript 源码 → 提交编译产物**：`src/*.ts` 是唯一真源，`lib/*.js` 是 `tsc` 产物（**也提交进仓库**，因为 `dsh plugin add` 不跑构建）。有门禁保证二者一致。
+
 A local music player plugin for DeepSeek Harness — one package for both the Web GUI and DSH Desktop.
 
 ---
@@ -124,12 +126,15 @@ dsh plugin --profile web remove @local/dsh-music-player
 ## 结构 / Structure
 
 ```
-lib/index.js       插件入口（薄壳）：注册 /api/dsh-music/* Fetch 路由 + host.js 热重载
-lib/http-bridge.js Fetch ⇄ node:http 适配层（含流式背压与 HEAD 语义）
-lib/host.js        宿主：目录扫描 + 标签解析 + Range 流媒体 + 多源匹配 / 封面代理 + 写入与重命名
-lib/client.js      客户端：conversation.view 槽位注册「音乐」视图（React）
-lib/tagwriter.js   标签写入 worker 入口（node-taglib-sharp）
-scripts/           24 套回归 + 静态审计 + 预览工具（开发者手动执行，宿主不会自动跑）
+src/*.ts           源码（唯一真源）
+  index.ts         插件入口（薄壳）：注册 /api/dsh-music/* Fetch 路由 + host 热重载
+  http-bridge.ts   Fetch ⇄ node:http 适配层（含流式背压与 HEAD 语义）
+  host.ts          宿主：目录扫描 + 标签解析 + Range 流媒体 + 多源匹配 / 封面代理 + 写入与重命名
+  client.ts        客户端：conversation.view 槽位注册「音乐」视图（React）
+  tagwriter.ts     标签写入 worker 入口（node-taglib-sharp）
+lib/*.js           上面 5 个文件的 tsc 产物（提交进仓库；DSH 加载的就是这里）
+tsconfig.json      编译与类型档位（见 AGENTS.md §2.15）
+scripts/           25 套回归 + 静态审计 + 类型棘轮 + 产物新鲜度 + 预览工具
 ```
 
 ---
@@ -144,18 +149,25 @@ cd .. && dsh plugin --profile web add link:./dsh-music-player
 
 - `npm install` 必须做（`link` 不会自动装依赖）
 - 装配后**不要移动或删除克隆目录**，profile 通过链接指向它
-- 改动生效路径：`lib/client.js` → 刷新页面；`lib/host.js` → **也是刷新页面**（入口薄壳按 mtime 重载）；**只有改 `lib/index.js` 才需要重启进程**
+- **改代码改的是 `src/*.ts`，不是 `lib/*.js`**（后者是产物，会被下次构建覆盖）。开一个 watch 让它随存随编译：
+
+  ```bash
+  pnpm run dev     # = tsc --watch：保存 src/*.ts 即重新编译 lib/*.js
+  ```
+
+- 改动生效路径：`src/client.ts` → 刷新页面；`src/host.ts` → **也是刷新页面**（入口薄壳按 `lib/host.js` 的 mtime 重载，watch 已经把它更新了）；**只有改 `src/index.ts` 才需要重启进程**
 - Desktop 端做 link 开发要走开发模式构建（`pnpm run dev:desktop`，带 `--allow-linked-profile`）；正式版应用会拒绝 profile 外的链接包
 
 ## 测试 / Tests
 
 ```bash
-npm test               # 24 套回归（等价于 node scripts/run-all.mjs）
-npm run check:manifest # dsh-plugin.json 对 pinned dsh-std Community v0.15 校验
-git diff --check       # 空白 / 冲突标记
+pnpm run build         # src/*.ts → lib/*.js
+pnpm run typecheck     # 类型棘轮：错误数只许变少（当前基线 243）
+npm test               # 产物新鲜度 + 25 套回归
+pnpm run check:manifest # dsh-plugin.json 对 pinned dsh-std Community v0.15 校验
 ```
 
-CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑前两项。
+CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑同一组。**CI 故意不先 build** —— 新鲜度门禁只在 `lib/` 未被就地覆盖时才有判别力。
 
 除了功能与安全套件，还有几处专门防「**写了但不生效**」的静默失效：
 
@@ -170,6 +182,9 @@ CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑前两项。
 | `test-token-lifetime.mjs` | 能力 token 必须是**进程级**：`createHost()` 重跑不得轮换，否则音频全 403 |
 | `test-entry-fallback.mjs` | 入口回落必须**正向识别**（不是「404 即信号」）且降级对用户可见 |
 | `test-security.mjs` | 越界路径、跨站请求、SSRF、封面 MIME 白名单、token 分签与栅栏收窄 |
+| `test-mv-seek.mjs` | **MV 进度条必须能快进**：媒体源必须是 token 直连的**绝对地址**。相对地址在 Desktop 上经 Electron 转发会丢 Range/206，症状就是一拖就从头 |
+| `check-build-fresh.mjs` | `lib/*.js` 必须逐字节等于 `src/*.ts` 的编译结果（防「改了 src 忘了 build」） |
+| `typecheck-ratchet.mjs` | 类型错误数只许变少不许变多 |
 
 > ⚠️ **没有布局测量能力。** 客户端套件全部跑 jsdom，涉及「位置 / 宽度 / 是否溢出」的结论是靠**伪造 `scrollWidth`/`clientWidth`** 得出的。凡涉及真实盒模型的判断请标注为**未验证**。（早期 README 曾声称有 headless Chromium + CDP 门禁，那是不实主张。）
 

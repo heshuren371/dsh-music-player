@@ -100,7 +100,13 @@ for (let k = js.indexOf('{', apiStart); k < js.length; k++) {
   else if (js[k] === '}') { depth--; if (!depth) { apiEnd = k; break; } }
 }
 const apiBlock = js.slice(apiStart, apiEnd);
-const methods = [...apiBlock.matchAll(/^        ([a-zA-Z][\w]*):/gm)].map((m) => m[1]);
+// 缩进**不可作数**：源码是 8 空格，tsc 重新排版后是 16 空格；写死字面缩进会让这条
+// 断言在「改了构建方式」时静默返回 0 个方法（本该报警的地方反而变绿）。
+// 做法：取该块里**最外层**（缩进最小）的键，这才是 api0 自己的方法名；用正则写死
+// 缩进或直接匹配任意缩进都会把 set({...})、fetch 选项这些嵌套键一起吞进来。
+const apiKeyLines = [...apiBlock.matchAll(/^(\s+)([a-zA-Z_$][\w$]*):/gm)].map((m) => ({ indent: m[1].length, name: m[2] }));
+const apiKeyIndent = apiKeyLines.length === 0 ? 0 : Math.min(...apiKeyLines.map((k) => k.indent));
+const methods = [...new Set(apiKeyLines.filter((k) => k.indent === apiKeyIndent).map((k) => k.name))];
 // 注意用「属性引用」而不是「调用」判定：subscribe/getState 是传给 useSyncExternalStore 的。
 const deadMethods = methods.filter((m) => count(js, 'player.' + m) === 0 && count(js, 'api0.' + m) === 0);
 check('every player API method has a call site', methods.length > 10 && deadMethods.length === 0, deadMethods.join(', ') || methods.length + ' methods, all used');

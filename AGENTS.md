@@ -174,17 +174,49 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 
 > 第 10 轮的线上故障就是这一条被违反：token 原本是 `createHost()` 里的 `randomUUID()`，开发期每次保存 `lib/host.js` 都轮换一次。
 
+### 2.15 TypeScript：真源、产物与类型棘轮（第 11 轮沉淀）
+
+**真源与产物**
+
+- **唯一真源是 `src/*.ts`**。`lib/*.js` 是 `tsc` 产物 —— **禁止直接改 `lib/`**：下次构建会覆盖它，而门禁 `scripts/check-build-fresh.mjs` 会把「手改了产物」判红。
+- **产物也提交进仓库**。`dsh plugin add github:` 只克隆 + 装依赖、**不跑构建**，所以 `lib/` 必须在仓库里。这也是本仓库显式不声明 `prepare` 等生命周期脚本的原因（见 `docs/compatibility.md §5`）。
+- 代价是「改了 src 忘了 build」会发旧行为出去 ⇒ 由新鲜度门禁兜住（编译到临时目录，逐字节比对）。
+- 改完跑 `pnpm run build`；开发时挂 `pnpm run dev`（= `tsc --watch`），保存即重编，`lib/host.js` 的 mtime 一变热重载就生效。
+
+**类型档位是棘轮，不是一步到位**
+
+| 编译器选项 | 当前 | 理由 |
+| --- | --- | --- |
+| `strictNullChecks` | **开** | 零额外代价（实测：关掉它一处错误都不少），而且它正是能防住本仓库两个真实线上故障的那一项 —— token 缓存可能为 null（音频全 403）、媒体基址未就绪（MV 拼出相对地址、丢 Range、进度条一拖就回 0） |
+| `noImplicitAny` | **暂关** | TS 7 默认开启；本仓库 6133 行历史 JS 有 455 处隐式 any，一次性补完的回归风险不值得 |
+| `noImplicitThis` / `strictBindCallApply` / `useUnknownInCatchVariables` / `noFallthroughCasesInSwitch` / `alwaysStrict` | **开** | 都是零/极低代价项 |
+
+- 剩余类型错误由 `npm run typecheck`（`scripts/typecheck-ratchet.mjs`）守住：基线在 `scripts/typecheck-baseline.json`，**只许变少**。修掉一批就跑 `--update` 收紧棘轮。
+- **禁止为了让棘轮变绿而放宽 `tsconfig.json` 的档位或上调基线**（与 §6.2「禁止放宽断言」同理）。要过门禁只有一条路：把类型补对。
+
+**`client.ts` 必须保持零 import**
+
+客户端 bundle 由宿主在浏览器里 `eval`（`window.__ModuleLoader__`），**它的 import 无法解析**。所以：
+- 不得为了共用类型而在 `client.ts` 里写 `import`（包括 `import type`，除非确认编译后完全擦除且宿主不在意 —— 现在的答案是**不冒这个风险**）；
+- 类型只能就地声明在 `client.ts` 内；宿主侧的共享类型同理就地声明，不要新建一个只有 host 会 import 的模块。
+
+**门禁不得依赖字面缩进**
+
+第 11 轮的教训：`test-audit.mjs` 用 `/^        ([a-zA-Z][\w]*):/gm`（写死 8 空格）找 player API 方法，tsc 重新排版成 16 空格后这条断言**静默返回 0 个方法**——本该报警的地方反而变绿。改成「取该块里缩进最小的键」后恢复。**写静态断言时要按结构推导，不要按空白字符写死。**
+
 ## 3. 可跑门禁
 
 改完**必须**跑，全绿才算完成：
 
 ```bash
-node scripts/run-all.mjs      # 24 套回归；npm test 等价
-npm run check:manifest        # dsh-plugin.json 对 pinned Community v0.15 校验
+pnpm run build                # src/*.ts → lib/*.js（改了 src 必须跑）
+pnpm run typecheck            # 类型棘轮：错误数只许变少（基线 243）
+npm test                      # 产物新鲜度 + 25 套回归（= check-build-fresh && run-all）
+pnpm run check:manifest       # dsh-plugin.json 对 pinned Community v0.15 校验
 git diff --check              # 空白/冲突标记
 ```
 
-`.github/workflows/ci.yml` 在每次 push / PR 上跑同一组门禁（`npm ci` → 全部 `lib/*.js` 与 `scripts/*.mjs` 的 `node --check` → `npm test` → manifest 校验 → 冲突标记扫描）。**CI 绿不等于 manifest 校验过**：CI 里没有 vendor 基线，`check:manifest` 会走 SKIP 分支并打 `::warning::` —— SKIP 不是通过（见上）。
+`.github/workflows/ci.yml` 在每次 push / PR 上跑同一组门禁（`pnpm install --frozen-lockfile` → `typecheck` → 全部 `lib/*.js` 与 `scripts/*.mjs` 的 `node --check` → `npm test` → manifest 校验 → 冲突标记扫描）。**CI 故意不先 build**：新鲜度门禁只在 `lib/` 未被就地覆盖时才有判别力。**CI 绿不等于 manifest 校验过**：CI 里没有 vendor 基线，`check:manifest` 会走 SKIP 分支并打 `::warning::` —— SKIP 不是通过（见上）。
 
 - **只要动了 `dsh-plugin.json` 或 manifest 相关字段，`check:manifest` 是必跑项。** 它用固定 revision 的 `@dsh-std/manifest` 校验，不是照 `main` 分支。基线找不到时它以 **SKIP** 退出（exit 0 + 明确警告），**那不是通过**——用 `DSH_STD_MANIFEST=/path/to/@dsh-std/manifest/lib/index.js` 指过去。
 - 新增功能**必须**在 `scripts/run-all.mjs` 的 `suites` 里注册回归套件；没注册等于没有门禁。
@@ -192,7 +224,7 @@ git diff --check              # 空白/冲突标记
 
 ## 4. 本仓库既有约定
 
-- **改动生效路径**：`lib/client.js` → 刷新浏览器页面；`lib/host.js` → 入口薄壳按 mtime 热重载，刷新页面即生效；**只有改 `lib/index.js` 才需要重启 `dsh web`**。
+- **改动生效路径**：改的是 `src/*.ts`（`lib/*.js` 是产物，见 §2.15）。挂 `pnpm run dev` 让保存即重编，然后：`src/client.ts` → 刷新页面；`src/host.ts` → **也是刷新页面**（入口薄壳按 `lib/host.js` 的 mtime 重载）；**只有改 `src/index.ts` 才需要重启进程**。
 - **测试防线（逐条标注真实状态，第 2 轮核实）**：
 
   | # | 防线 | 真实状态 |
@@ -202,7 +234,7 @@ git diff --check              # 空白/冲突标记
   | ③ | 「布局结论一律用真实 Chromium 量盒模型（headless Chrome + CDP）」 | ❌ **不存在**。该主张已从 README 删除（原在 `README.md:270`；现改为显式「本仓库没有布局测量能力」的警告），`scripts/` 下无任何浏览器启动器；8 个客户端套件全部走 jsdom，布局类结论实际靠**伪造 `scrollWidth`/`clientWidth`** 得出。见 `A2-02` |
 
   → **③ 是 README 的错误主张**。本仓库当前**没有**布局测量能力；涉及「位置/宽度/是否溢出」的判断要么补一个真实 Chromium 门禁，要么明确标注为**未验证**。不得再引用这条防线。
-- **不留死代码**：⚠️ 本仓库**没有** `typescript` 依赖、**没有** `tsconfig.json`，`tsc --noUnusedLocals --noUnusedParameters` **无法执行**（见 `A2-15`）。当前可用替代：`scripts/test-audit.mjs` 的死方法 / 死字典键 / 死 CSS class 检查。若要用 `tsc`，需先加 devDependency 与 `tsconfig.json`。
+- **不留死代码**：本仓库**已有** `typescript`（devDependency）与 `tsconfig.json`（见 §2.15），但**当前没开 `noUnusedLocals` / `noUnusedParameters`** —— 开了会立刻多出上百处历史告警。眼下可用的是 `scripts/test-audit.mjs` 的死方法 / 死字典键 / 死 CSS class 检查；把它们**分批清到零之后**再打开这两个开关，才会是有意义的信号。（`A2-15` 原记录「无 typescript / 无 tsconfig」已被第 11 轮推翻。）
 - 文案与注释以中文为主；新增 UI 文案必须同时补中英字典键。
 - 交付说明里**区分「已验证」与「未验证」**：写清用什么命令、在哪个运行时、什么结果；别把「没跑」写成「通过」。
 
@@ -337,6 +369,8 @@ git diff --check              # 空白/冲突标记
 | `AGENTS.md`（本文件） | 改代码的人与 agent | 规范基线、不可协商的规则（§2）、可跑门禁（§3）、既有约定（§4）、审计与迭代协议（§6） | 台账正文（已移出） |
 | `docs/audit-ledger.md` | 审计者 | 逐轮台账全文（证据、复现、符合项清单、编号裁定） | 规则本身 |
 | `dsh-plugin.json` `x-dsh-transition` | 跨版本核对者 | 接缝的实测记录。**升级 DSH 后按运行中的应用核对，不要按本地 checkout。** | —— |
+| `src/*.ts` → `lib/*.js` | 改代码的人 | 源码在 `src/`，产物在 `lib/`；两者都提交，由 `check-build-fresh.mjs` 保证一致。见 §2.15 | 手改 `lib/` |
+| `tsconfig.json` + `scripts/typecheck-baseline.json` | 改代码的人 | 类型档位与棘轮基线。**禁止为了让门禁变绿而放宽档位或上调基线** | —— |
 
 ### 7.2 分层规则（改文档前先读）
 

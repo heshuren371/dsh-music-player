@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "rootDir": "src",
+    "outDir": "lib",
+    "declaration": false,
+    "sourceMap": false,
+    "removeComments": false,
+    "newLine": "lf",
+
+    /* 严格程度是**分层推进**的，不是一次到位。当前档位：
+     * - strictNullChecks：开。这一项正是能防住本仓库两个真实线上故障的类型检查
+     *   （token 缓存可能为 null → 音频全 403；媒体基址未就绪 → MV 拼出相对地址、
+     *   在 Desktop 上丢 Range、进度条一拖就回 0）。
+     * - noImplicitAny：暂关。TS 7 默认开启，而本仓库 6133 行历史 JS 里有 455 处
+     *   隐式 any；在功能回归风险不可控的前提下一次性补完不划算。
+     * 剩余类型错误由 `npm run typecheck` 的**棘轮**（scripts/typecheck-ratchet.mjs）
+     * 守住：只许变少、不许变多。见 AGENTS.md §2.15。 */
+    "strictNullChecks": true,
+    "noImplicitAny": false,
+    "noImplicitThis": true,
+    "strictBindCallApply": true,
+    "useUnknownInCatchVariables": true,
+    "noFallthroughCasesInSwitch": true,
+    "alwaysStrict": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "skipLibCheck": true,
+    "types": ["node"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false
+  },
+  "include": ["src/**/*.ts"]
+}

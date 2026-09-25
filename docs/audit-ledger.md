@@ -456,3 +456,32 @@ process.stdout|process.stderr       第三方 logger（pino/winston/bunyan/…�
 **负向对照**：把 token 退回实例级 → 两条断言 FAIL（`…->dec2ffd6…`），exit 1。
 
 **运维要求**：`lib/index.js` 改过（第 8 轮的 `FETCH_ROUTES` / `disposed`），**必须重启 DSH 应用**；`lib/client.js` 与 `lib/host.js` 改过，**必须刷新页面**（或重启应用）。
+
+---
+
+## 5.15 第 11 轮 —— TypeScript 迁移 + MV 快进修复
+
+### 5.15.1 MV 进度条一拖就从头（线上故障）
+
+**定位**：`mvCacheUrl()` 在 `systemStreamBase` 为空时退回**相对**地址 `/api/dsh-music/mvfile?k=…`，而 Desktop 上相对地址经 Electron `forwardWebRequest` **会丢 Range/206** → `<video>` 判定流不可 seek → 一拖就回 0 秒。`prepareVideo()` 的 **5 个调用点里有 4 个没有先 await 基址**（`restoreLastPlayed`、两处 error→转码升级、手动转换），刷新页面后 cue 上一首正好命中。
+
+**修法**：把 `await ensureStreamBase()` 放进 `prepareVideo()` 内部（一处覆盖全部调用点），并把 `restoreLastPlayed` 的音频分支同样包起来。
+
+**门禁** `scripts/test-mv-seek.mjs`：在 `/session` 故意延迟 1.2 s 的时序下，断言挂上去的媒体源必须是**绝对 token 地址**。
+**负向对照**：去掉那句 await → 三条断言 FAIL，报出的正是 `/api/dsh-music/mvfile?k=…`，exit 1。
+
+### 5.15.2 TypeScript 迁移
+
+**规模实测**（先用 scratch 副本量，不动工作树）：`strict: true` → **667** 个类型错误（其中 455 是隐式 any，TS 7 默认开启）。`noImplicitAny: false` → **243**；再加 `strictNullChecks: true` **零额外代价**。
+
+**取舍**：不追求一次到位的 strict（6133 行历史 JS 的回归风险不可控），改用**分层 + 棘轮**：
+- `strictNullChecks` **开** —— 它正是能防住本轮与第 10 轮两个真实故障的那一项（缓存/基址可能为 null）；
+- `noImplicitAny` **暂关**，由 `scripts/typecheck-ratchet.mjs` 守住：基线 `scripts/typecheck-baseline.json` = **243**，**只许变少**。
+
+**真源与产物**：`src/*.ts` 是唯一真源，`lib/*.js` 是 `tsc` 产物。**产物也提交**（`dsh plugin add` 不跑构建，且本仓库显式无生命周期脚本），由 `scripts/check-build-fresh.mjs` 把关（编译到临时目录逐字节比对）。
+- 新增 `tsconfig.json`、`package.json` 的 `build` / `dev`（`tsc --watch`）/ `typecheck` 脚本。
+- 依赖从 npm 锁文件切到 **pnpm**（`pnpm-lock.yaml` + `packageManager: pnpm@11.7.0`）—— 因为 `dsh plugin` 内部本来就用 pnpm，此前的 `package-lock.json` 是残留且与实际依赖不一致。CI 同步改为 `pnpm install --frozen-lockfile`。
+
+**本轮自己犯的一个错，已沉淀为规则**：`test-audit.mjs` 用 `/^        ([a-zA-Z][\w]*):/gm`（写死 8 空格缩进）找 player API 方法；tsc 重新排版成 16 空格后这条断言**静默返回 0 个方法** —— 本该报警的地方反而变绿。改成「取该块里缩进最小的键」后恢复 29 个方法。已写入 AGENTS.md §2.15：**静态断言要按结构推导，不要按空白字符写死。**
+
+**验证**：`ALL 25 SUITES PASS` · `typecheck` 未倒退 · `check-build-fresh` 一致 · `check:manifest` PASS · CI 在 GitHub 上 `completed/success`。
