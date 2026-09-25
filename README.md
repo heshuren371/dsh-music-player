@@ -142,6 +142,19 @@ lib/client.js      客户端：conversation.view 槽位注册「音乐」视图�
 lib/tagwriter.js   标签写入 worker 线程入口（node-taglib-sharp）
 ```
 
+## 测试 / Tests
+
+`npm test` 跑 **17 套**回归（`scripts/run-all.mjs`）。除了功能与安全套件，还有两处专门防「写了但不生效」的防线 ——
+这类 bug 全部是**静默失效**（不抛异常、不报错，只是没效果），靠功能测试很难发现：
+
+| 防线 | 覆盖什么 |
+| --- | --- |
+| `scripts/test-audit.mjs`（静态审计） | ① CSS 里的 class 必须被 JS 用到、JS 用到的 class 必须有 CSS 规则；② 每个 `@keyframes` 必须真的被 `animation` 引用；③ **BEM 修饰类不能被子序列里的基类规则顶掉**（`.dshm-progress--stacked` 的 `align-items` 曾被靠后的 `.dshm-progress` 吃掉过）；④ 中英字典键一致且所有静态键都存在；⑤ player API 不能有没人调的方法；⑥ client 的 `api()` 调用都要有对应宿主路由 |
+| 按钮接线检查（client shell / match client 套件） | 读 React 挂在 DOM 上的 `__reactProps$*`，断言主视图、全屏播放器、匹配弹层里**每个 `<button>` 都真的挂了处理函数或处于 disabled** —— 防「画了按钮但没接行为」 |
+| 真实浏览器量布局（headless Chrome + CDP） | jsdom 没有布局引擎，所以涉及「位置/宽度/是否溢出」的结论一律用真实 Chromium 量盒模型后再下结论（曾据此定位跑马灯阈值算错一倍、时间行被压到中间两个 bug） |
+
+```
+
 ## DSH Desktop 适配 / Desktop notes
 
 Desktop 与 Web 复用同一份客户端 bundle，差异只在宿主传输。下面按**实测过的两个 Desktop 形态**写，不是照抄单一版本的源码：

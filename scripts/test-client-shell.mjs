@@ -194,6 +194,16 @@ plugin.apply(ctx);
 const container = document.createElement('div');
 document.body.appendChild(container);
 const root = createRoot(container);
+// ── 「画了但没接行为」检测：每个 button 必须真的挂上事件处理 ────────────────
+// React 会把 props 存在 DOM 节点上（__reactProps$xxx），可以据此判断按钮是不是装饰品。
+const reactProps = (node) => {
+  const key = Object.keys(node).find((k) => k.startsWith('__reactProps$'));
+  return key === undefined ? null : node[key];
+};
+const wired = (node) => {
+  const props = reactProps(node);
+  return props !== null && (typeof props.onClick === 'function' || typeof props.onPointerDown === 'function' || typeof props.onChange === 'function' || props.disabled === true);
+};
 const settle = async (ms) => act(async () => { await new Promise((r) => setTimeout(r, ms)); });
 await act(async () => { root.render(React.createElement(ViewComponent)); });
 await settle(300);
@@ -229,11 +239,20 @@ check('marquee carries the animation variables', String(nowTitle?.getAttribute('
 const proto = dom.window.Element.prototype;
 const scrollDescriptor = Object.getOwnPropertyDescriptor(proto, 'scrollWidth');
 const clientDescriptor = Object.getOwnPropertyDescriptor(proto, 'clientWidth');
-Object.defineProperty(proto, 'scrollWidth', { configurable: true, get() { return String(this.className).includes('dshm-marqueeInner') ? 400 : 0; } });
+Object.defineProperty(proto, 'scrollWidth', { configurable: true, get() { return String(this.className).includes('dshm-marqueeText') ? 400 : 0; } });
 Object.defineProperty(proto, 'clientWidth', { configurable: true, get() { return String(this.className).includes('dshm-marquee') ? 120 : 0; } });
 await act(async () => { dom.window.dispatchEvent(new dom.window.Event('resize')); });
 await settle(60);
 check('marquee turns on and duplicates the text once it overflows', container.querySelectorAll('.dshm-nowTitle.dshm-marquee--on').length === 1 && container.querySelectorAll('.dshm-nowTitle .dshm-marqueeText').length === 2, container.querySelector('.dshm-nowTitle')?.outerHTML?.slice(0, 160) ?? 'missing');
+// 回归：文本只比容器宽一点点（< 2 倍）也必须滚。旧实现从 inner.scrollWidth 折半，
+// 阈值被抬成"文本 > 2 倍容器宽"，这个区间就成了既不滚也不省略号、直接切掉。
+Object.defineProperty(proto, 'scrollWidth', { configurable: true, get() { return String(this.className).includes('dshm-marqueeText') ? 200 : 0; } });
+await act(async () => { dom.window.dispatchEvent(new dom.window.Event('resize')); });
+await settle(60);
+check('a title only slightly wider than the box still scrolls', container.querySelectorAll('.dshm-nowTitle.dshm-marquee--on').length === 1 && container.querySelectorAll('.dshm-nowTitle .dshm-marqueeText').length === 2, 'threshold is 1x box, not 2x');
+Object.defineProperty(proto, 'scrollWidth', { configurable: true, get() { return String(this.className).includes('dshm-marqueeText') ? 400 : 0; } });
+await act(async () => { dom.window.dispatchEvent(new dom.window.Event('resize')); });
+await settle(40);
 if (scrollDescriptor === undefined) delete proto.scrollWidth; else Object.defineProperty(proto, 'scrollWidth', scrollDescriptor);
 if (clientDescriptor === undefined) delete proto.clientWidth; else Object.defineProperty(proto, 'clientWidth', clientDescriptor);
 
@@ -289,6 +308,17 @@ check('the loop button is the row after -remaining (right-aligned cell)', (() =>
 })(), 'timeRow→loop sibling order');
 check('the speaker glyph is drawn (macOS style, not the old one)', String(overlay?.querySelector('.dshm-playerVolume .dshm-volIcon svg')?.innerHTML ?? '').includes('c.47.47 1.27.14 1.27-.53'), 'speaker svg present');
 check('full player title/artist use the marquee', overlay?.querySelector('.dshm-playerTitle.dshm-marquee') !== null && overlay?.querySelector('.dshm-playerArtist.dshm-marquee') !== null);
+// 全屏播放器同一个 Marquee：容器更窄，长歌名必须真的滚起来（不再是切掉）
+const mp = dom.window.Element.prototype;
+const sp = Object.getOwnPropertyDescriptor(mp, 'scrollWidth');
+const cp = Object.getOwnPropertyDescriptor(mp, 'clientWidth');
+Object.defineProperty(mp, 'scrollWidth', { configurable: true, get() { return String(this.className).includes('dshm-marqueeText') ? 240 : 0; } });
+Object.defineProperty(mp, 'clientWidth', { configurable: true, get() { return String(this.className).includes('dshm-marquee') ? 150 : 0; } });
+await act(async () => { dom.window.dispatchEvent(new dom.window.Event('resize')); });
+await settle(60);
+check('full player title scrolls when the name is longer than the box', overlay?.querySelector('.dshm-playerTitle.dshm-marquee--on') !== null && overlay?.querySelectorAll('.dshm-playerTitle .dshm-marqueeText').length === 2, 'marquee on in the full player');
+if (sp === undefined) delete mp.scrollWidth; else Object.defineProperty(mp, 'scrollWidth', sp);
+if (cp === undefined) delete mp.clientWidth; else Object.defineProperty(mp, 'clientWidth', cp);
 check('full player keeps the macOS Music ⭐ + ⋯ pair next to the title', (() => {
   const meta = overlay?.querySelector('.dshm-playerMeta');
   const rounds = Array.from(meta?.querySelectorAll('.dshm-playerRound') ?? []);
@@ -356,9 +386,13 @@ check('clicking the surface dismisses the ⋯ menu', overlay.querySelectorAll('.
 // 收起：先播 200ms 退出动画，再卸载（Apple Music 弹层的 zoom-out）
 await act(async () => { overlay.querySelector('.dshm-playerTop .dshm-playerRound').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
 await settle(60);
+check('every button inside the full player is wired too', Array.from(overlay.querySelectorAll('button')).every(wired), Array.from(overlay.querySelectorAll('button')).filter((b) => !wired(b)).map((b) => b.className || '?').join(' | '));
 check('collapse plays the exit animation before unmounting', container.querySelector('.dshm-player--closing') !== null);
 await settle(260);
 check('collapse button closes the full player', container.querySelector('.dshm-player') === null);
+
+const deadInMain = Array.from(document.querySelectorAll('button')).filter((b) => !wired(b));
+check('every rendered button is wired to a handler', deadInMain.length === 0, deadInMain.map((b) => (b.className || b.getAttribute('aria-label') || '?')).join(' | '));
 
 // 窗口在前台（聚焦 + 可见）时换曲也必须提示 —— 这是用户报的「通知栏没适配」场景。
 windowFocused = true;

@@ -141,6 +141,14 @@ check('row cover falls back to the proxied artwork', String(rows()[1].querySelec
 
 await act(async () => { rows()[1].querySelector('.dshm-match').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
 await settle(80);
+// 弹层里的按钮同样不能是装饰品：读了 React 挂在 DOM 上的 props 才能判断。
+const dialogButtonWired = (b) => {
+  const key = Object.keys(b).find((k) => k.startsWith('__reactProps$'));
+  const p = key === undefined ? null : b[key];
+  return p !== null && (typeof p.onClick === 'function' || typeof p.onPointerDown === 'function' || p.disabled === true);
+};
+const dialogButtons = Array.from(container.querySelectorAll('.dshm-dialog button'));
+check('every button in the match dialog is wired', dialogButtons.length > 0 && dialogButtons.every(dialogButtonWired), dialogButtons.filter((b) => !dialogButtonWired(b)).map((b) => b.className || '?').join(' | '));
 const footerButtons = container.querySelectorAll('.dshm-dialogFoot .dshm-btn');
 await act(async () => { footerButtons[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
 await settle(80);
