@@ -50,6 +50,9 @@
     "test": "node scripts/run-all.mjs"
   },
   "dependencies": {
+    "@libav.js/variant-webcodecs": "^6.10.9",
+    "libavjs-webcodecs-polyfill": "^0.5.5",
+    "mediabunny": "^1.59.1",
     "music-metadata": "^11.9.2",
     "node-taglib-sharp": "^6.0.3"
   },

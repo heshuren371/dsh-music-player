@@ -45,6 +45,7 @@ const FakeAudio = class extends dom.window.EventTarget {
 };
 Object.defineProperty(dom.window, 'Audio', { value: FakeAudio, configurable: true, writable: true });
 globalThis.Audio = FakeAudio;
+window.__dshMusicMedia = () => new FakeAudio();
 
 // ── 系统媒体接口桩件 ────────────────────────────────────────────────────────
 const mediaSession = {
@@ -138,8 +139,10 @@ const primitives = makePrimitives('regular');
 
 // ── 宿主响应桩件 ────────────────────────────────────────────────────────────
 const tracks = [
-  { id: 'a.mp3', name: 'a.mp3', title: 'Alpha', artist: 'Artist X', duration: 120, tagged: true },
-  { id: 'b.mp3', name: 'b.mp3', title: 'Beta', artist: 'Artist Y', duration: 90, tagged: true },
+  { id: 'a.mp3', name: 'a.mp3', title: 'Alpha', artist: 'Artist X', duration: 120, tagged: true, kind: 'audio', videoCodec: null },
+  { id: 'b.mp3', name: 'b.mp3', title: 'Beta', artist: 'Artist Y', duration: 90, tagged: true, kind: 'audio', videoCodec: null },
+  // 视频轨：MV 标识 / 出画槽位 / /mv 询问都要走到
+  { id: 'v.mp4', name: 'v.mp4', title: 'Movie Song', artist: 'Artist V', duration: 200, tagged: true, kind: 'video', videoCodec: 'h264' },
 ];
 const library = { dir: '/music', tracks, scanning: false, scanParsed: tracks.length, scanTotal: tracks.length, truncated: false, skippedPackages: 0, scannedAt: 1 };
 const calls = [];
@@ -153,6 +156,8 @@ const mockFetch = async (url) => {
   if (suffix.includes('/api/dsh-music/session')) return new dom.window.Response(JSON.stringify({ systemArtBase: SYSTEM_ART_BASE }), { headers: { 'content-type': 'application/json' } });
   if (suffix.includes('/api/dsh-music/library') || suffix.includes('/api/dsh-music/refresh')) return new dom.window.Response(JSON.stringify(library), { headers: { 'content-type': 'application/json' } });
   if (suffix.includes('/api/dsh-music/cover')) return new dom.window.Response('', { status: 404 });
+  // MV 出画方式：直出（视频轨会先问这里）
+  if (suffix.includes('/api/dsh-music/mv')) return new dom.window.Response(JSON.stringify({ mode: 'direct', state: 'ready', progress: 1, url: '/api/dsh-music/stream?p=v.mp4' }), { headers: { 'content-type': 'application/json' } });
   return new dom.window.Response('{}', { headers: { 'content-type': 'application/json' } });
 };
 dom.window.Response = dom.window.Response ?? globalThis.Response;
@@ -194,8 +199,6 @@ plugin.apply(ctx);
 const container = document.createElement('div');
 document.body.appendChild(container);
 const root = createRoot(container);
-// ── 「画了但没接行为」检测：每个 button 必须真的挂上事件处理 ────────────────
-// React 会把 props 存在 DOM 节点上（__reactProps$xxx），可以据此判断按钮是不是装饰品。
 const reactProps = (node) => {
   const key = Object.keys(node).find((k) => k.startsWith('__reactProps$'));
   return key === undefined ? null : node[key];
@@ -347,7 +350,8 @@ check('the seek bar is driven by its own pointer hit area', (() => {
 // 圆钮：macOS 原生白色圆钮（进度条悬停才现、音量条常显）
 const pluginCss = document.querySelector('style[data-plugin="@local/dsh-music-player"]')?.textContent ?? '';
 check('slider knob is the macOS white capsule (ellipse, not a circle)', pluginCss.includes('width:20px;height:14px;border-radius:999px;background:#ffffff') && pluginCss.includes('box-shadow:0 .5px 2px rgba(0,0,0,.28)'), 'knob rule');
-check('the seek slider itself ignores pointer events (hit area owns them)', pluginCss.includes('.dshm-progress .dshm-slider{pointer-events:none'), 'pointer-events rule');
+// 拖动已退回原生交互：滑杆必须自己吃指针事件（自绘命中区在真实环境里不可靠，已移除）
+check('the seek slider keeps native pointer interaction', !pluginCss.includes('.dshm-progress .dshm-slider{pointer-events:none') && pluginCss.includes('.dshm-progress .dshm-slider{width:100%}'), 'native seek');
 
 // 动效 / 材质：曲线、关键帧、Apple 的 saturate 毛玻璃、减少动效开关
 check('motion tokens carry the Apple Music easing curves', pluginCss.includes('--dshm-ease:cubic-bezier(.215,.61,.355,1)') && pluginCss.includes('--dshm-ease-snap:cubic-bezier(.23,1,.32,1)') && pluginCss.includes('--dshm-ease-spring:cubic-bezier(.76,.665,.37,1.35)'), 'easing tokens');
@@ -401,6 +405,38 @@ await act(async () => { container.querySelectorAll('.dshm-row')[1].dispatchEvent
 await settle(200);
 check('a track change notifies even while the window is focused', notifications.length === 2 && notifications[1].title === 'Beta', JSON.stringify(notifications.map((n) => n.title)));
 check('the second notification carries the new track artwork', String(notifications[1]?.options?.icon).startsWith(SYSTEM_ART_BASE), String(notifications[1]?.options?.icon));
+// ── MV（音乐视频）：列表标识 → /mv 询问 → 全屏播放器出画槽位 ────────────────
+const videoRow = Array.from(container.querySelectorAll('.dshm-row')).find((row) => row.textContent.includes('Movie Song'));
+check('video rows carry the MV badge', videoRow?.querySelector('.dshm-mvTag')?.textContent === 'MV', 'rows=' + Array.from(container.querySelectorAll('.dshm-row')).map((r) => r.textContent).join('/') + ' tags=' + container.querySelectorAll('.dshm-mvTag').length);
+const mvCallsBefore = calls.filter((c) => c.includes('/api/dsh-music/mv')).length;
+await act(async () => { videoRow.querySelector('.dshm-cellTitle').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(160);
+check('playing a video track asks the host how to show it (/mv)', calls.filter((c) => c.includes('/api/dsh-music/mv')).length > mvCallsBefore, 'calls=' + calls.filter((c) => c.includes('/mv')).length);
+check('the MV request carries the track id', calls.some((c) => c.includes('/api/dsh-music/mv?id=v.mp4')), calls.filter((c) => c.includes('/mv')).slice(-1)[0] ?? 'none');
+check('the bottom bar shows the MV badge for the video track', container.querySelector('.dshm-nowText .dshm-mvTag') !== null);
+await act(async () => { container.querySelector('.dshm-nowCoverBtn').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(80);
+check('the full player offers a video surface slot for MV', container.querySelector('.dshm-player .dshm-mvStage') !== null);
+
+// 一键补全确认条：有视频轨时必须能渲染出「转格式 + 删除原件」开关（曾因把字符串当函数调而整块炸掉）
+await act(async () => { container.querySelector('.dshm-complete').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(80);
+// 一键补全只做写标签 + 重命名（不再顺带转格式/删原件：那是设计错误，已移除）
+check('complete-all confirm bar renders and offers no destructive conversion', container.querySelector('.dshm-confirmBar') !== null && container.querySelector('.dshm-check') === null && container.querySelector('.dshm-error') === null, container.querySelector('.dshm-confirmBar')?.textContent?.slice(0, 80) ?? 'missing');
+await act(async () => { container.querySelector('.dshm-completeCancel').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(40);
+await act(async () => { container.querySelector('.dshm-player .dshm-mvStage').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(60);
+// 点 MV 画面 = 就地放大（不再另开预览层）；再点一下还原
+check('clicking the MV surface enlarges the video in place', container.querySelector('.dshm-player--mvbig') !== null && container.querySelector('.dshm-mvStage') !== null, container.querySelector('.dshm-player')?.className ?? 'missing');
+await act(async () => { container.querySelector('.dshm-mvStage').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(60);
+check('clicking it again restores the normal layout', container.querySelector('.dshm-player--mvbig') === null);
+await act(async () => { container.querySelector('.dshm-playerTop .dshm-playerRound').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(260);
+
+// ── 「画了但没接行为」检测：每个 button 必须真的挂上事件处理 ────────────────
+// React 会把 props 存在 DOM 节点上（__reactProps$xxx），可以据此判断按钮是不是装饰品。
 // ── 旧宿主回落：客户端已更新、宿主 index.js 未重启的窗口期 ──────────────────
 legacyOnly = true;
 const beforeFallback = calls.length;

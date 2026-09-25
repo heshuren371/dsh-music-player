@@ -34,6 +34,7 @@ const FakeAudio = class extends dom.window.EventTarget {
 };
 Object.defineProperty(dom.window, 'Audio', { value: FakeAudio, configurable: true, writable: true });
 globalThis.Audio = FakeAudio;
+window.__dshMusicMedia = () => new FakeAudio();
 
 let pluginFactory = null;
 dom.window.__ModuleLoader__ = { load: ({ factory }) => { pluginFactory = factory; } };
