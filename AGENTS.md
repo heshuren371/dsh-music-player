@@ -184,6 +184,8 @@ npm run check:manifest        # dsh-plugin.json 对 pinned Community v0.15 校�
 git diff --check              # 空白/冲突标记
 ```
 
+`.github/workflows/ci.yml` 在每次 push / PR 上跑同一组门禁（`npm ci` → 全部 `lib/*.js` 与 `scripts/*.mjs` 的 `node --check` → `npm test` → manifest 校验 → 冲突标记扫描）。**CI 绿不等于 manifest 校验过**：CI 里没有 vendor 基线，`check:manifest` 会走 SKIP 分支并打 `::warning::` —— SKIP 不是通过（见上）。
+
 - **只要动了 `dsh-plugin.json` 或 manifest 相关字段，`check:manifest` 是必跑项。** 它用固定 revision 的 `@dsh-std/manifest` 校验，不是照 `main` 分支。基线找不到时它以 **SKIP** 退出（exit 0 + 明确警告），**那不是通过**——用 `DSH_STD_MANIFEST=/path/to/@dsh-std/manifest/lib/index.js` 指过去。
 - 新增功能**必须**在 `scripts/run-all.mjs` 的 `suites` 里注册回归套件；没注册等于没有门禁。
 - 交回改动前**保留工作区中与本任务无关的用户改动**，不要顺手重构。
@@ -323,8 +325,23 @@ git diff --check              # 空白/冲突标记
 | `恒绿断言扫描` | 静态禁止 `check(…, true)` 字面真断言；「跳过」必须能与「通过」区分（非零退出或显式 skip 计数） | 2 | `A2-10`/`A2-11`/`A2-13` |
 | `门禁诊断可用` | `run-all.mjs` 失败时必须打印失败套件的 stderr | 2 | `A2-12` |
 
-## 7. 与本仓库既有文档的关系
+## 7. 文档分层与关系
 
-- `README.md`：面向使用者与市场复核的说明（安装、结构、测试、Desktop 适配、兼容性声明、依赖与权限边界）。
-- `dsh-plugin.json` `x-dsh-transition`：跨版本接缝的实测记录（`dsh.client.platform`、`ctx.webServer`、官方图标导出名）。**升级 DSH 后按运行中的应用核对，不要按本地 checkout。**
-- 本节（`AGENTS.md`）：面向改代码的人与 agent 的强制约定。**与 README 冲突时以本文件的规范条目为准，并同步修 README。**
+### 7.1 分层地图
+
+| 文件 | 面向谁 | 放什么 | **不放**什么 |
+| --- | --- | --- | --- |
+| `README.md` | 使用者 / 市场复核 | 定位、功能、安装更新卸载、兼容性**表**、权限**表**、API **表**、结构、开发与测试入口、排查、文档索引 | 逐条技术论证、实现叙事、历史沿革、术语表 |
+| `docs/desktop.md` | 改宿主接缝 / 排查 Desktop 问题的人 | 两代宿主形态差异、macOS 通知与「正在播放」的能力边界与验证方法、官方组件与图标命名演变、媒体直连（token 通道）的原因、技术名称表 | 与 Desktop 无关的内容 |
+| `docs/compatibility.md` | DSH STORE 收录 / 供应链与权限审查 | 声明位置与取值、逐版本依据、尚未提供的证据、已知断点、依赖、权限↔代码信号↔触发条件、外部服务、失败边界 | 使用说明 |
+| `AGENTS.md`（本文件） | 改代码的人与 agent | 规范基线、不可协商的规则（§2）、可跑门禁（§3）、既有约定（§4）、审计与迭代协议（§6） | 台账正文（已移出） |
+| `docs/audit-ledger.md` | 审计者 | 逐轮台账全文（证据、复现、符合项清单、编号裁定） | 规则本身 |
+| `dsh-plugin.json` `x-dsh-transition` | 跨版本核对者 | 接缝的实测记录。**升级 DSH 后按运行中的应用核对，不要按本地 checkout。** | —— |
+
+### 7.2 分层规则（改文档前先读）
+
+- **README 只放「怎么用」与「一张表」**。任何超过 3 行的论证、因果叙事、历史沿革、术语解释，**一律放 `docs/`**，README 只留一句结论 + 链接。目标：**≤ 220 行**，超出就要把内容下移。
+- **深度材料不得因为「README 要短」而被删掉**。搬家时保留全部事实与数字；本仓库的 `docs/` 就是这些材料的位置。删事实需要单独的理由与记录。
+- **不新增同义文档**。要写「关于 X」之前先查 §7.1 是否已有归属；有就并进去，不要开第三个讲同一件事的文件。
+- **README 里不许出现未验证的数字与不在仓库里的防线**。实测数字要标注是否纳入门禁（例：性能数字标注「未纳入门禁」）；曾出现过的「headless Chrome + CDP 布局门禁」是**不实主张**，已删除，不得再写回。
+- **与 README 冲突时以本文件的规范条目为准，并同步修 README。**

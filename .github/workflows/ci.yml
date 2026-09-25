@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# 门禁与本地一致：`node scripts/run-all.mjs`（24 套）+ manifest 校验 + 空白/冲突标记。
+# 任何一条红了就不要再合 —— 见 AGENTS.md §3 与 §6.2（禁止为了让门禁变绿而放宽断言）。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 与 package.json 的 engines.node（^22.19.0 || >=24.0.0）对齐
+          node-version: '24'
+          cache: npm
+
+      - name: Install (exact lockfile)
+        run: npm ci
+
+      - name: Syntax check every runtime entry
+        run: |
+          for f in lib/*.js scripts/*.mjs; do node --check "$f"; done
+
+      - name: Regression suites (24)
+        run: npm test
+
+      - name: Manifest schema check (pinned dsh-std Community v0.15)
+        run: |
+          set +e
+          out=$(npm run --silent check:manifest 2>&1)
+          status=$?
+          set -e
+          echo "$out"
+          if echo "$out" | grep -q 'SKIP'; then
+            # AGENTS.md §3：SKIP 明确「不是通过」。CI 里没有 vendor 基线，
+            # 所以这里只是警告，不要把它当成校验成功。
+            echo "::warning::dsh-plugin.json 校验被跳过（SKIP ≠ 通过）。要真校验需设置 DSH_STD_MANIFEST 指向 pinned @dsh-std/manifest。"
+          fi
+          exit $status
+
+      - name: Whitespace and conflict markers
+        run: |
+          if git grep -nI -E '^(<<<<<<< |=======$|>>>>>>> )' -- . ':!package-lock.json'; then
+            echo "::error::发现冲突标记残留"
+            exit 1
+          fi
+          echo "no conflict markers"
