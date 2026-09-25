@@ -420,3 +420,39 @@ process.stdout|process.stderr       第三方 logger（pino/winston/bunyan/…�
 - **13 条台账条目已修**（`D-05` + 12 条），**高危从 13 条降到 0 条**（`A4-06` 已通过「不声明」解决）。
 - 套件 18 → **23**，全部 PASS。
 - 存量未修项从「7 条高危」变为「若干中/低 + 明确接受项」，逐条见 §5.1 与各轮小节。
+
+---
+
+## 5.14 第 10 轮 —— 线上故障：音乐不能播、MV 能播
+
+**报告**：桌面客户端里音频全不能播，MV 正常。
+
+**实测定位**（对运行中的真机实例 `127.0.0.1:19387` + `dsh-desktop-host`）：
+
+| 检查 | 结果 |
+| --- | --- |
+| `/dsh-music/api/session` | 200，两个 token **不同**（第 9 轮的 `A5-02` 已生效） |
+| `/dsh-music/api/stream?p=<真实曲目>` | **200 `audio/flac` 37,946,235 B** |
+| `/dsh-music/api/system-stream?t=<streamToken>&p=…` | **200 `audio/flac`** |
+| 同上 + `Range: bytes=0-1023` | **206 + `content-range` + `accept-ranges: bytes`** |
+| 交叉 token（art 用去 stream） | 403 ✅ |
+| `/dsh-music/api/mv?id=<真实视频>` | 200，返回 **`"url":"/api/dsh-music/mvfile?k=…"`（相对地址）** |
+
+⇒ **宿主侧音频通路完全正常**。真正的不对称在这里：
+
+- **MV**：`/api/mv` 返回**相对地址**，走平台 `/api` + 浏览器会话，**不经 token**；
+- **音频**：Desktop 上**永远**走 `system-stream` token 直连（相对地址经 Desktop 转发会丢 Range）。
+
+所以「token 失效」的症状必然是 **音乐死、MV 活**。
+
+**根因**：`systemArtToken` / `systemStreamToken` 原本是 `createHost()` 里的 `randomUUID()` —— **每次宿主热重载都轮换**；而客户端把 `/session` 的基址**缓存整个页面生命周期**（`systemArtBasePromise` 从不重置）。于是任何一次 `lib/host.js` 保存（开发期频繁发生）都会让页面手里的媒体 URL 变成废纸，直到刷新页面。
+
+**修复（两条）**：
+
+1. **宿主：token 钉到进程级**（新增 `processTokens()`，用 `Symbol.for` 挂在 `globalThis` 上）。热重载产生新 module 实例，但符号注册表与 `globalThis` 是同一个 ⇒ **重载不再轮换 token**，客户端缓存的 URL 持续有效。
+2. **客户端：基址加 TTL + 失败自愈**。`loadSystemArtBase(force)` 带 60s TTL；新增 `invalidateSessionBase()`；音频 `error` 事件里若失败源是 `system-stream`（且未自愈过），丢掉缓存放并**当场用新基址重放本曲**，而不是退化成「跳过一首」。
+
+**新增门禁** `scripts/test-token-lifetime.mjs`：两次 `createHost()` 的 token 必须相同；旧 token 在新实例上不得 403。
+**负向对照**：把 token 退回实例级 → 两条断言 FAIL（`…->dec2ffd6…`），exit 1。
+
+**运维要求**：`lib/index.js` 改过（第 8 轮的 `FETCH_ROUTES` / `disposed`），**必须重启 DSH 应用**；`lib/client.js` 与 `lib/host.js` 改过，**必须刷新页面**（或重启应用）。

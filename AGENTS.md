@@ -164,12 +164,22 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 - **吞掉写失败后仍返回成功是违规**。现状 `A5-09`：`saveState` 全量吞错（`lib/host.js:1042-1044`）后 `/dir` 仍返回 `200 + dir`（`:1769-1776`）。
 - **持久化层必须能区分稳定错误码**（`storage.zh.md:87-93` 的 `PERMISSION_NOT_GRANTED` / `INVALID_KEY` / `INVALID_VALUE` / `QUOTA_EXCEEDED` / `STORAGE_UNAVAILABLE` 目前**一个都没有**），不能只靠"有没有抛异常"来表达。
 
+### 2.14 能力 token 必须与 activation 生命周期对齐（第 10 轮沉淀）
+
+客户端会把 `/session` 下发的 token 基址**缓存整个页面生命周期**，而宿主**每次热重载都会 `createHost()`**。因此：
+
+- **token 不得随 activation instance 轮换**。它要钉在**进程**上（`Symbol.for` + `globalThis`），否则一次「保存文件」就会让页面上所有取图/取媒体 URL 变成废纸。
+- **消费者必须能自愈**：缓存要带 TTL，并在**失败时**作废重取；否则症状会停在「刷新前一直坏」。
+- **判断症状归属的一条经验**：`/api/mv` 返回的是**相对地址**（走平台会话、不经 token），而**音频永远走 token 直连** —— 所以「**音乐不能播、MV 能播**」几乎总是 token 通道的问题，不是流本身的问题。排查时先直接 `curl` 那条 token URL 验证 200/206。
+
+> 第 10 轮的线上故障就是这一条被违反：token 原本是 `createHost()` 里的 `randomUUID()`，开发期每次保存 `lib/host.js` 都轮换一次。
+
 ## 3. 可跑门禁
 
 改完**必须**跑，全绿才算完成：
 
 ```bash
-node scripts/run-all.mjs      # 23 套回归；npm test 等价
+node scripts/run-all.mjs      # 24 套回归；npm test 等价
 npm run check:manifest        # dsh-plugin.json 对 pinned Community v0.15 校验
 git diff --check              # 空白/冲突标记
 ```
@@ -257,7 +267,8 @@ git diff --check              # 空白/冲突标记
 ### 5.3 当前状态（第 9 轮收口）
 
 - **13 条已修**（`D-05` + 12 条条目）；**高危 13 → 0**。存量只剩中/低与明确接受项。
-- 套件 18 → **23**，`ALL 23 SUITES PASS`；**每条新门禁都通过负向对照**（回退修复后确实变红）。
+- 套件 18 → **24**，`ALL 24 SUITES PASS`；**每条新门禁都通过负向对照**（回退修复后确实变红）。
+- **第 10 轮修掉一个线上故障**：能力 token 随 `createHost()` 轮换 → 客户端缓存的媒体基址失效 → 「音乐全不能播、MV 照播」。改为进程级 token + 客户端基址 TTL/失败自愈。见 §2.14 与台账 §5.14。
 - 第 7 轮由 Lead 亲自实测载荷性主张；第 8/9 轮各条门禁均做负向对照；两次自我推翻（`D-05` 误标「已修」、`A1-02` 的冷却设计）都按 §6.2 新写条目而非覆盖。
 - 判定变更：`D-05` 已修、第 3 轮 `L133` 由「符合」改「违规」、`A4-06` 由「中」上调「高」且已修。见台账 §5.10 / §5.11 / §5.12 / §5.13。
 - **审计维度已全部覆盖**：manifest+composition · lifecycle · permission+storage · 门禁有效性 · 声明面/注册面。
