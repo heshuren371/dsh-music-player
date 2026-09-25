@@ -372,17 +372,45 @@ window.__ModuleLoader__.load({
       if (force) sessionBaseFetchedAt = 0;
       if (systemArtBasePromise !== null && Date.now() - sessionBaseFetchedAt < SESSION_BASE_TTL_MS) return systemArtBasePromise;
       systemArtBasePromise = (async () => {
+        /** 采纳一份 /session 载荷；只有真的拿到基址才算成功（正向识别）。 */
+        const adoptSession = (payload: unknown): boolean => {
+          if (payload === null || typeof payload !== "object") return false;
+          const p = payload as { systemArtBase?: unknown; systemStreamBase?: unknown };
+          let got = false;
+          if (typeof p.systemArtBase === "string" && p.systemArtBase.length > 0) { systemArtBase = p.systemArtBase; got = true; }
+          if (typeof p.systemStreamBase === "string" && p.systemStreamBase.length > 0) { systemStreamBase = p.systemStreamBase; got = true; }
+          return got;
+        };
         try {
-          const payload = await api("/api/session");
-          if (payload !== null && typeof payload.systemArtBase === "string" && payload.systemArtBase.length > 0) {
-            systemArtBase = payload.systemArtBase;
+          if (adoptSession(await api("/api/session"))) {
+            sessionBaseFetchedAt = Date.now();
+            return systemArtBase;
           }
-          if (payload !== null && typeof payload.systemStreamBase === "string" && payload.systemStreamBase.length > 0) {
-            systemStreamBase = payload.systemStreamBase;
-          }
-          sessionBaseFetchedAt = Date.now();
         } catch {
-          // 老宿主没有 /session：退回页面的同源绝对地址。
+          // 落到下面用插件自建的回环路由再试一次。
+        }
+        // ⚠️ 这条回落**只给 /session**，因为它是唯一「以下发回环 token 基址为目的」的
+        // 端点 —— 那个基址存在的意义就是绕开平台 /api 的栅栏，让 Chromium 内部发起的
+        // 取图/取媒体能走通。所以它有资格自己走插件自建的回环路由。
+        //
+        // 为什么需要它：平台 /api 的 admit() 在**路由之前**判 Host/Origin 栅栏与浏览器
+        // 会话，Desktop 渲染进程拿 /session 会得到 **401/403，而不是 404**。A1-02 的通用
+        // 回落只在 404 触发，于是这里永远回落不了 ⇒ 基址恒为空 ⇒ 媒体只能用相对地址
+        // ⇒ Desktop 转发丢 Range ⇒ seekable=[0,0] ⇒ **一拖进度条就回 0 秒**（真机读数）。
+        // 其余端点不享受这条：把一次普通的 403 洗成降级会破坏信任边界（§2.8）。
+        if (endpointBase !== LEGACY_API_BASE) {
+          try {
+            const legacy = await fetch(LEGACY_API_BASE + "/session");
+            const payload = await legacy.json().catch(() => null);
+            if (legacy.ok && adoptSession(payload)) {
+              downgradedToLegacy = true;
+              if (typeof onDowngrade === "function") onDowngrade();
+              sessionBaseFetchedAt = Date.now();
+              return systemArtBase;
+            }
+          } catch {
+            // 两条路都不通：保持无基址，由 healUnseekableSource 继续尝试。
+          }
         }
         return systemArtBase;
       })();
@@ -1185,10 +1213,21 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * 经 Desktop 转发后 Range 丢失 → seekable=[0,0] → 一拖就回 0 秒（实测读数如此）。
        */
       const hasStreamBase = () => typeof systemStreamBase === "string" && systemStreamBase.length > 0;
-      /** 等一次 /session（媒体直连基址）；最多 2 秒，超时就按相对地址播（不阻塞播放）。 */
+      /**
+       * 等一次 /session（媒体直连基址）。返回是否**真的**拿到了。
+       *
+       * ⚠️ 不能「超时就算了」：拿不到基址就意味着媒体只能用**相对地址**，而相对地址
+       * 在 Desktop 上经 Electron 转发会丢 Range（`seekable=[0,0]`）⇒ 一拖进度条就回 0
+       * 秒。所以先给一次预算，还没有就**作废缓存强制重取**再来一次 —— 第二次会走
+       * `/session` 的回环回落路径（见 loadSystemArtBase），这正是 Desktop 上唯一能走通的路。
+       */
       const ensureStreamBase = async () => {
-        if (hasStreamBase()) return;
+        if (hasStreamBase()) return true;
         await Promise.race([loadSystemArtBase(), new Promise((resolve) => setTimeout(resolve, 2000))]);
+        if (hasStreamBase()) return true;
+        invalidateSessionBase();
+        await Promise.race([loadSystemArtBase(true), new Promise((resolve) => setTimeout(resolve, 4000))]);
+        return hasStreamBase();
       };
       const streamUrl = (track) => {
         const rev = "&v=" + (state.scannedAt ?? 0);
@@ -1201,6 +1240,21 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 
       /** Move the audio clock (clamped to the track) without touching store state. */
       /** 后台日志（不占界面）：排查"拖不动进度"用，DevTools 控制台可见。 */
+      /**
+       * 媒体源分类 + 是否已有 token 基址。「一拖就回 0」的排查全靠这行，
+       * 所以分类必须**无歧义**：空串 / blob: / dsh-app:// / 相对路径原来会被
+       * 一起算成 `rel`，等于看不出到底是哪一路。
+       */
+      const mediaSrcKind = (url: string): string => {
+        if (url === "") return "empty";
+        if (url.startsWith("http")) return url.includes("system-stream") ? "token" : "abs";
+        if (url.includes("/mvfile")) return "mvfile-rel";
+        if (url.startsWith("blob:")) return "blob";
+        return "rel";
+      };
+      /** 日志里不得出现能力 token（§2.9 凭据不进日志）。 */
+      const redactSrc = (url: string): string => url.replace(/t=[^&]*/g, "t=***");
+
       const logSeek = (asked) => {
         setTimeout(() => {
           try {
@@ -1208,14 +1262,93 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             const bounds = seekable !== null && seekable.length > 0
               ? seekable.start(0).toFixed(1) + ".." + seekable.end(0).toFixed(1) : "-";
             const src = typeof audio.currentSrc === "string" ? audio.currentSrc : "";
-            const kind = src.includes("system-stream") ? "token" : src.includes("mvfile") ? "mvfile" : src.startsWith("http") ? "abs" : "rel";
             console.info("[dsh-music] seek asked=" + asked.toFixed(1) + " now=" + (Number.isFinite(audio.currentTime) ? audio.currentTime.toFixed(1) : "?")
               + " dur=" + (Number.isFinite(audio.duration) ? audio.duration.toFixed(1) : String(audio.duration))
               + " seekable=" + (seekable === null ? "-" : seekable.length) + "(" + bounds + ")"
-              + " src=" + kind + " err=" + (audio.error !== null && audio.error !== undefined ? audio.error.code : 0));
+              + " src=" + mediaSrcKind(src) + " err=" + (audio.error !== null && audio.error !== undefined ? audio.error.code : 0)
+              + " base=" + (hasStreamBase() ? "token" : "none") + " ep=" + endpointBase
+              + " url=" + redactSrc(src));
           } catch { /* 日志失败无所谓 */ }
         }, 400);
       };
+
+      /**
+       * 「一拖就回 0 秒」的可观测判据自愈（第 13 轮）。
+       *
+       * 判据是**症状**，不是原因：源不是 token 直连、时长已知、而 `seekable` 是 [0,0]
+       * —— 这时媒体元素根本不能 seek，`currentTime = X` 只会让它从 0 重来。真机上
+       * 读到的正是 `seekable=1(0.0..0.0) src=rel`。
+       *
+       * 成因（相对地址在 Desktop 上经 Electron 转发丢 Range）已在 §2.14 记过，
+       * 但**只修成因不够**：基址可能因为平台 /api 的 401/403 而一直拿不到。所以这里
+       * 按症状兜底 —— 作废基址、重取（含 /session 的回环回落）、用 token 地址重挂同一
+       * 媒体并回到原位。只做一次，避免「失败→重取→再失败」的死循环。
+       */
+      let unseekableSrc = "";
+      let unseekableHealDeadline = 0;
+      let unseekableTimer: ReturnType<typeof setTimeout> | null = null;
+      /** 自愈窗口：只有源真的不可 seek 才会进来，所以在这里等基址是值得的（有界，非无限）。 */
+      const UNSEEKABLE_HEAL_WINDOW_MS = 20000;
+      const healUnseekableSource = () => {
+        if (disposed) return;
+        const src = typeof audio.currentSrc === "string" ? audio.currentSrc : "";
+        if (src.includes("system-stream")) return;                       // 已是 token 直连，基址没问题
+        if (!(Number.isFinite(audio.duration) && audio.duration > 0)) return;
+        const range = audio.seekable ?? null;
+        if (range === null) return;                                      // 拿不到可寻址信息就不猜（假元素可能没有这个属性）
+        if (range.length > 0 && range.end(0) > 0) return;                // 能 seek，正常
+        const index = state.current;
+        const track = index >= 0 ? state.tracks[index] : undefined;
+        if (track === undefined) return;
+        // 换了源就重新开一个窗口（每首歌各有自己的预算）。
+        // ⚠️ 条件必须带 `deadline === 0`：首次调用时 `src` 可能与 `unseekableSrc`
+        // 的初值同为 ""（假元素没有 currentSrc 时就是如此），只判「变了」会导致
+        // deadline 永远停在 0 → 第一行就 `Date.now() > 0` 直接 return，自愈从不执行。
+        if (src !== unseekableSrc || unseekableHealDeadline === 0) {
+          unseekableSrc = src;
+          unseekableHealDeadline = Date.now() + UNSEEKABLE_HEAL_WINDOW_MS;
+        }
+        if (Date.now() > unseekableHealDeadline) return;                 // 窗口内一直没成功：放弃，不再打扰
+        const wasAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+        const wasPlaying = state.playing;
+        invalidateSessionBase();
+        void (async () => {
+          const usable = await ensureStreamBase();
+          if (disposed || playingId !== track.id) return;
+          if (!usable) {
+            // ⚠️ 基址还没就绪时**不能一次就放弃**。第一版就是一次性的：第一次尝试压在
+            // 宿主还没准备好的时刻上，失败后永久锁死 —— 真机上等于自愈从未生效。
+            // 退回窗口内再试，由 deadline 收口，不会变成无限重试。
+            scheduleUnseekableHeal(1200);
+            return;
+          }
+          // 音频直接换 token URL；MV 的缓存键不在 state.mv 里，得重新问一次 /api/mv。
+          const next = track.kind === "video" ? await prepareVideo(track) : streamUrl(track);
+          if (disposed || next === null || playingId !== track.id) return;
+          audio.src = next;
+          audio.addEventListener("loadedmetadata", () => {
+            if (playingId !== track.id) return;
+            if (wasAt > 0 && Number.isFinite(audio.duration) && wasAt < audio.duration - 0.5) audio.currentTime = wasAt;
+            if (wasPlaying) {
+              const promise = audio.play();
+              if (promise !== undefined) promise.catch(() => {});
+            }
+          }, { once: true });
+          audio.load();
+        })();
+      };
+      /** 换源后延迟一点再判：`seekable` 在 loadedmetadata 当场可能还没填好。 */
+      const scheduleUnseekableHeal = (delayMs = 700) => {
+        if (disposed) return;                                            // 已立闸门：不再排期（§2.10）
+        if (unseekableTimer !== null) clearTimeout(unseekableTimer);
+        unseekableTimer = setTimeout(() => {
+          unseekableTimer = null;
+          healUnseekableSource();
+        }, delayMs);
+      };
+      /** 每次换源都会重新触发 loadedmetadata，在这里统一检查这个源能不能 seek。 */
+      audio.addEventListener("loadedmetadata", () => { scheduleUnseekableHeal(); });
+
       const seekAudio = (value) => {
         if (!Number.isFinite(value)) return 0;
         const known = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : state.duration;
@@ -2144,6 +2277,12 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           if (pollTimer !== null) {
             clearTimeout(pollTimer);
             pollTimer = null;
+          }
+          // 同一个道理：清句柄 + 阻止再武装。scheduleUnseekableHeal 在 disposed 后
+          // 直接返回，不会重新排期（见 §2.10「清 timer 与阻止再武装是两件事」）。
+          if (unseekableTimer !== null) {
+            clearTimeout(unseekableTimer);
+            unseekableTimer = null;
           }
           // 作废在途的 match/apply，并停掉批量循环：否则卸载后它还会继续
           // 逐首打接口、写文件（实测每 600ms 一次，停不下来的后台任务）。

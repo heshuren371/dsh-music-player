@@ -182,7 +182,7 @@ CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑同一组。**CI 故
 | `test-token-lifetime.mjs` | 能力 token 必须是**进程级**：`createHost()` 重跑不得轮换，否则音频全 403 |
 | `test-entry-fallback.mjs` | 入口回落必须**正向识别**（不是「404 即信号」）且降级对用户可见 |
 | `test-security.mjs` | 越界路径、跨站请求、SSRF、封面 MIME 白名单、token 分签与栅栏收窄 |
-| `test-mv-seek.mjs` | **MV 进度条必须能快进**：媒体源必须是 token 直连的**绝对地址**。相对地址在 Desktop 上经 Electron 转发会丢 Range/206，症状就是一拖就从头 |
+| `test-mv-seek.mjs` | **MV / 音频进度条必须能快进**：媒体源必须是 token 直连的**绝对地址**。带 15 条断言，含「平台 `/session` 答 401 时靠回环前缀拿到基址」与「源不可 seek 时按症状自愈」两个真机故障场景。相对地址在 Desktop 上经 Electron 转发会丢 Range/206，症状就是一拖就从头 |
 | `check-build-fresh.mjs` | `lib/*.js` 必须逐字节等于 `src/*.ts` 的编译结果（防「改了 src 忘了 build」） |
 | `typecheck-ratchet.mjs` | 类型错误数只许变少不许变多（基线已收紧到 **0**） |
 | `check-strict.mjs` | 逐文件收严：名单里的文件（`http-bridge` / `tagwriter`）必须在 `noImplicitAny: true` 下零错误，且**名单不许为空**（空名单=恒绿）。清干净一个文件就加一个 |

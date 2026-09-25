@@ -583,3 +583,98 @@ process.stdout|process.stderr       第三方 logger（pino/winston/bunyan/…�
   `LEGACY_ONLY_ROUTES` / `disposed` / `RELOAD_MIN_INTERVAL_MS` 均 0 命中）。
 - `permission.zh.md:111` / `storage.zh.md:101`：`mvEscalated` 的 reset 迁移**没有**引入任何新的
   日志/落盘点（`test-audit.mjs` 的写盘白名单与凭据扫描仍全绿）。
+
+---
+
+## 5.17 第 13 轮 —— Desktop MV 仍不能快进（A1-02 回落判据过窄）
+
+**真机证据（用户提供）**：
+```
+[dsh-music] seek asked=108.4 now=0.3 dur=260.4 seekable=1(0.0..0.0) src=rel err=0
+```
+`seekable=[0,0]` ⇒ 媒体元素**完全不能 seek**，所以 `currentTime = 108.4` 只会从 0 重来。
+`src=rel` ⇒ 挂的是相对地址。
+
+### 5.17.1 根因：A1-02 的回落只在 404 触发，而 Desktop 上答的是 401/403
+
+真机实测（Electron 宿主 :19387）：
+
+| 请求 | 结果 |
+| --- | --- |
+| `/dsh-music/api/session`（插件自建回环前缀） | **200** |
+| `/api/dsh-music/session`（平台 `/api`） | **401** `unauthorized` |
+| `/api/dsh-music/session` + `Origin: dsh-app://app` | **403** `forbidden` |
+
+平台 `/api` 的 `admit()` 在**路由之前**判 Host/Origin 栅栏与浏览器会话，所以 Desktop 渲染进程
+拿到的是 401/403，**不是 404**。而 A1-02 的通用降级条件是
+`response.status === 404 && ROUTE_MISSING_404_ENDPOINTS.has(endpoint)` —— **永远不成立**
+（`session` 虽然在那个集合里，但状态码是 401）。于是 `/session` 永远失败 ⇒ 基址恒为空
+⇒ `mvCacheUrl()` / `streamUrl()` 退回相对地址 ⇒ Desktop 转发丢 Range ⇒ `seekable=[0,0]`
+⇒ 一拖就回 0 秒。
+
+**这是设计缺陷，不是编码疏漏**：A1-02 把「宿主没有这个端点」与「这道栅栏不让这个请求过」
+当成了同一件事，而它们的可观测状态码不同。
+
+### 5.17.2 修法（三层）
+
+1. **`/session` 自己的回环回落**（`loadSystemArtBase`）。理由是它**唯一**以下发回环 token 基址
+   为目的 —— 那个基址存在的意义就是绕开平台栅栏，所以它有资格走插件自建的回环路由。
+   **只给 `/session`**：其余端点不享受（避免把一次普通的 403 洗成信任边界降级，§2.8）。
+   仍是**正向识别**（必须真的解析出 `systemStreamBase` 才算采纳）+ 通过 `onDowngrade()` 报告。
+2. **`ensureStreamBase()` 拿不到就强制重取一次**（不再「2 秒超时就按相对地址播」）。
+   相对地址在 Desktop 上等于不可 seek，那个降级比等待更糟。
+3. **按可观测症状自愈**（`healUnseekableSource`）：源不是 token 直连 + 时长已知 +
+   `seekable=[0,0]` ⇒ 作废基址、重取、用 token 地址重挂同一媒体并回到原位。
+   窗口 20 秒、成功即停、换源重开窗口 —— **有界**，不是无限重试。
+
+**诊断也一并修了**：原来的分类
+`includes("system-stream") ? token : includes("mvfile") ? mvfile : startsWith("http") ? abs : rel`
+把空串 / `blob:` / `dsh-app://` 全归成 `rel`，且 `mvfile` 的判定在 `http` 之前（相对 mvfile 会记成
+`mvfile` 而非 `rel`）—— 看不出到底哪一路。现在输出 `src=`（无歧义分类）+ `base=`（是否有 token 基址）
++ `ep=`（当前端点前缀）+ `url=`（**剥掉 token**，§2.9）。
+
+### 5.17.3 门禁 `scripts/test-mv-seek.mjs` 扩到 15 条
+
+| 场景 | 断言 |
+| --- | --- |
+| A 视频轨（正常） | 绝对 token 地址 + `&k=<cacheKey>` |
+| B 音频轨（正常） | 绝对 token 地址 + `&p=<trackId>` |
+| C 平台 `/session` 答 401 | 必须靠回环前缀拿到基址，仍是绝对 token 地址，**且从未挂过相对地址** |
+| D 基址在重试预算内一直拿不到 | 先真的挂上相对地址（D1 主动断言这一点），再自愈成 token 地址；重挂次数有界 |
+
+**负向对照**（都确认会变红）：
+- 关掉 `/session` 回环回落 → C2/C3/C4 红，**报出的正是 `/api/dsh-music/mvfile?k=…`**（= 用户机器上的 URL）；
+- 关掉不可 seek 自愈 → D2 红，报出 `/api/dsh-music/stream?p=…`。
+
+**场景 D 两次被我自己做废，都记在这里**：
+- 第一版让 `/session` 正常成功 ⇒ 源本来就是 token 地址，自愈不触发，**恒绿**；
+- 第二版按「前 N 次失败」写 ⇒ 与 `ensureStreamBase` 的 2s+4s 重试预算耦合，重试就已成功，
+  仍走不到相对地址。最终改用**时间窗**（7.5s，长于那个预算），并把 D1 写成主动断言
+  「fixture 真的产生了相对地址」——没有这一条，D 会再次静默失去判别力。
+
+### 5.17.4 本轮我自己的三个错，都被门禁抓住了
+
+1. **替换时删掉了 `let unseekableTimer` 的声明行** → 7 个 TS2552。**由第 12 轮刚收紧到 0 的
+   类型棘轮当场抓住**（基线 0 的价值就在这里）。
+2. **自愈第一版是「一次就放弃」**：`unseekableHealed = true` 在第一次尝试前就置位，而第一次尝试
+   恰好压在宿主还没准备好的时刻上 ⇒ 真机上等于自愈从未生效。改成窗口内退避重试。
+   → 这个形态与第 9 轮被推翻的「一次性标志」、以及 §2.10 的「清 timer ≠ 阻止再武装」是同一族。
+3. **deadline 初始化漏了首次**：`if (src !== unseekableSrc)` 在 `src` 与初值同为 `""` 时不成立，
+   deadline 停在 0 → 首行 `Date.now() > 0` 直接 return。同时**夹具也不真实**
+   （假媒体元素没有 `currentSrc`，真实元素一定有）。代码与夹具都修了。
+   → 教训：**夹具的保真度也是断言判别力的一部分**（同 §6.1 第 3 条「检验方法本身也要被检验」）。
+
+### 5.17.5 验证
+
+- `scripts/test-mv-seek.mjs` → 15 条全过；两条负向对照确认变红
+- `node scripts/run-all.mjs` → **ALL 25 SUITES PASS**
+- `typecheck` 0（基线 0）· `check-build-fresh` 一致 · `check-strict` 通过 · manifest PASS
+
+### 5.17.6 符合项
+
+- `composition.zh.md:143`（偏离 plan 必须报告）：`/session` 走回环前缀时仍调用 `onDowngrade()`，
+  降级在 UI 上可见（沿用第 8 轮的 `.dshm-notice`），不是静默发生。
+- `permission.zh.md:111` / `storage.zh.md:101`（凭据不得进日志）：新的 `url=` 字段经
+  `redactSrc()` 把 `t=<token>` 替换为 `t=***`；`test-audit.mjs` 的凭据扫描仍全绿。
+- `lifecycle.zh.md:29/:107`：新定时器 `unseekableTimer` 在 `halt()` 里先 `clearTimeout`
+  再置 null，且 `scheduleUnseekableHeal` 在 `disposed` 后直接返回 —— **清句柄与阻止再武装分开做**（§2.10）。
