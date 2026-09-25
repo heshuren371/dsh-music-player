@@ -744,3 +744,85 @@ if (next === null) { scheduleUnseekableHeal(1200); return; }   // 还没就绪�
 
 - `test-mv-seek.mjs` → 18 条全过；两组负向对照确认变红
 - `ALL 25 SUITES PASS` · typecheck 0（基线 0）· build-fresh 一致 · check-strict 通过 · manifest PASS
+
+---
+
+## 5.19 第 15 轮 —— 刷新后误报「无法播放该文件」+ 死代码/泄漏/进程审计
+
+### 5.19.1 `A5-14`（已修）—— 每次打开音乐页面都弹红字
+
+**用户报告**：MV 快进修好了 ✅，但每次打开音乐页面，上方弹红字
+「出错了：无法播放该文件（格式不受支持或文件已移动）」。
+
+**根因**（`restoreLastPlayed` 的视频分支）：
+```js
+attachSource(url);   // 内部调 audio.play() 并挂 .catch
+audio.pause();       // 紧接着同步 pause
+```
+`play()` 被紧随的 `pause()` 打断 ⇒ 那个 promise 以 **`AbortError`** 拒绝，而 `.catch` 里只放行
+`NotAllowedError` ⇒ 落到最后一行 `set({ error: translate("error.unsupported") })` ⇒ 弹红字。
+
+**这是第 13/14 轮修复暴露出来的潜伏 bug**：在此之前这条路根本走不到（基址拿不到 / MV 准备失败），
+基址与自愈修好之后它才真正执行。**修 bug 会把下游从未执行过的代码路径首次点亮** —— 审计时要预期这一点。
+
+**修法（两层独立防线，各自充分）**：
+1. `restoreLastPlayed` 的视频分支改用新增的 **`cueSource()`** —— 只挂源、**不调 `play()`**。
+   该分支的意图本来就是「cue 成暂停态」，不是「播了再赶紧停」。
+2. `attachSource` 与 `toggle` 的 `.catch` **放行 `AbortError`**（快速切歌 / 立刻暂停都会触发它，
+   它不是「格式不支持」）。
+
+**门禁**：`test-mv-seek.mjs` 新增场景 G（刷新后 cue 上一首不得弹红字），断言口径是
+**DOM 里没有 `.dshm-error` 节点**（可观测面，不是读内部状态）。
+**夹具必须同步变真实**：假媒体元素的 `play()` 原来直接 `return Promise.resolve()`，
+于是「play 后被 pause 打断」这条路径**永远不会产生 AbortError**。改成真实语义
+（`pause()` 会让在飞的 `play()` promise 以 AbortError 拒绝）后，这条才可能变红
+（§2.16「夹具的保真度也是判别力的一部分」）。
+
+**对照**：两层都退回 → G2 红，报出的正是 `error.prefixerror.unsupported`（= 用户看到的红字）；
+只退回任一层 → 仍绿（证明两层各自充分）。
+
+### 5.19.2 死代码：5 处清理 + **永久开启死代码门禁**
+
+类型清零后实测 `noUnusedLocals` / `noUnusedParameters` 全仓**只有 5 处**，于是全部清掉并**永久开启**：
+
+| 位置 | 死因 |
+| --- | --- |
+| `client.ts` `downgradedToLegacy` | 只写不读（降级状态由 `hostEntry` 表达、由 `onDowngrade()` 上报） |
+| `client.ts` `wasmCanvas` | 只赋值不读 |
+| `host.ts` `name` / `inject` | 未导出且无人 import（入口只调 `createHost()`；Cordis 模块约定残留） |
+| `host.ts` `scoreCandidate(…, pool)` | 形参无人使用（调用点只传 2 个实参） |
+
+代价：一条测试断言引用了被删的 `downgradedToLegacy`，门禁当场报红 —— **这是门禁在做它该做的事**。
+把它改写成**更强**的形状：剥注释后逐条降级路径断言（`/session` 回落路径 + 通用 A1-02 路径各需一次
+`onDowngrade()`）。两条对照各自精确变红。
+
+### 5.19.3 泄漏 / 进程 / CPU 门禁（补上 §6.3 一直空着的那条）
+
+新增 `scripts/test-leak.mjs`（注册进 run-all，带 `--expose-gc`）：8 次热重载后
+
+| 信号 | 类型 | 实测 |
+| --- | --- | --- |
+| fd 数不增长 | **脆** | 16 → 16 |
+| 无孤儿子进程 | **脆** | 0 → 0 |
+| `dispose()` 后 1.5s 内 CPU ≈ 0 | **脆** | 6 ms |
+| heap 增长有界 | 噪（辅助） | +3.01 MB / 8 次（0.38 MB 每次） |
+
+**heap 阈值是用正对照标定的，不是拍的**：注入「每次 `createHost` 往 module 级数组塞 1MB」
+的泄漏 → +11.00 MB（1.38 MB 每次）。阈值第一版写了 12MB，**正对照暴露了它放过了那个泄漏**；
+收紧到 6MB / 0.8MB-per-reload 后，基线有 2x 余量、真实泄漏有 1.8x 余量。
+**改这个阈值前必须重跑正对照**，否则会把它放宽成恒绿。
+
+### 5.19.4 本轮我自己的两个方法错误
+
+1. **负向对照改了 `src/` 却没 build** —— 门禁读的是 `lib/`（产物），控制组因此是空的，
+   差点让我误判「断言没有判别力」。**凡门禁读产物，控制组必须重建**。
+2. **重复犯了 §2.15 明明写着的坑**：新断言用 `/onDowngrade\(\)/g` 计数，被**我自己写的注释**
+   （`由 onDowngrade() 上报`）算进去一次 ⇒ 阈值 `>=2` 恒真。改成剥注释 + 逐路径断言。
+   **规则写在文件里不等于会遵守，所以这类断言要一次写成结构化的形状。**
+
+### 5.19.5 验证
+
+- `ALL 26 SUITES PASS`（新增 `test-leak.mjs`）
+- `typecheck` 0（基线 0，且现在含 `noUnusedLocals`/`noUnusedParameters`）
+- `check-build-fresh` 一致 · `check-strict` 通过 · manifest PASS · `git diff --check` clean
+- 正/负对照：泄漏注入 → `test-leak` 红；红字两层退回 → 场景 G 红；降级上报逐条退回 → 断言红

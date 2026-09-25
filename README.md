@@ -134,7 +134,7 @@ src/*.ts           源码（唯一真源）
   tagwriter.ts     标签写入 worker 入口（node-taglib-sharp）
 lib/*.js           上面 5 个文件的 tsc 产物（提交进仓库；DSH 加载的就是这里）
 tsconfig.json      编译与类型档位（见 AGENTS.md §2.15）
-scripts/           25 套回归 + 静态审计 + 类型棘轮 + 产物新鲜度 + 预览工具
+scripts/           26 套回归 + 静态审计 + 类型棘轮 + 产物新鲜度 + 预览工具
 ```
 
 ---
@@ -163,7 +163,7 @@ cd .. && dsh plugin --profile web add link:./dsh-music-player
 ```bash
 pnpm run build         # src/*.ts → lib/*.js
 pnpm run typecheck     # 类型棘轮：错误数只许变少（当前基线 0 —— 已经清到零）
-npm test               # 产物新鲜度 + 逐文件严格 + 25 套回归
+npm test               # 产物新鲜度 + 逐文件严格 + 26 套回归
 pnpm run check:manifest # dsh-plugin.json 对 pinned dsh-std Community v0.15 校验
 ```
 
@@ -184,6 +184,7 @@ CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑同一组。**CI 故
 | `test-security.mjs` | 越界路径、跨站请求、SSRF、封面 MIME 白名单、token 分签与栅栏收窄 |
 | `test-mv-seek.mjs` | **MV / 音频进度条必须能快进**：媒体源必须是 token 直连的**绝对地址**。带 18 条断言，含「平台 `/session` 答 401 时靠回环前缀拿到基址」与「源不可 seek 时按症状自愈」两个真机故障场景。相对地址在 Desktop 上经 Electron 转发会丢 Range/206，症状就是一拖就从头 |
 | `check-build-fresh.mjs` | `lib/*.js` 必须逐字节等于 `src/*.ts` 的编译结果（防「改了 src 忘了 build」） |
+| `test-leak.mjs` | 释放面/泄漏：8 次热重载后 fd 不增长、无孤儿子进程、`dispose()` 后 CPU≈0、heap 增长有界（阈值用正对照标定：无泄漏 3.0MB vs 注入 1MB/次泄漏 11.0MB） |
 | `typecheck-ratchet.mjs` | 类型错误数只许变少不许变多（基线已收紧到 **0**） |
 | `check-strict.mjs` | 逐文件收严：名单里的文件（`http-bridge` / `tagwriter`）必须在 `noImplicitAny: true` 下零错误，且**名单不许为空**（空名单=恒绿）。清干净一个文件就加一个 |
 

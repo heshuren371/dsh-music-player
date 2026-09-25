@@ -198,9 +198,30 @@ check('the entry probe is reentrant (resolved only on successful adoption)',
 check('business-404 endpoints are excluded from the entry signal (permission.zh.md-style endpoint semantics)',
   /ROUTE_MISSING_404_ENDPOINTS/.test(clientPortion) && /ROUTE_MISSING_404_ENDPOINTS\.has\(endpoint\)/.test(clientPortion),
   'bare 404 is still the only criterion');
-check('the downgrade assigns the base and reports it',
-  /endpointBase = LEGACY_API_BASE;/.test(clientPortion) && /downgradedToLegacy = true;/.test(clientPortion) && /onDowngrade()/.test(clientPortion),
-  'switch is not reported');
+// 第 15 轮重写（两处教训都在这条里）：
+// ① 原来还检查 `downgradedToLegacy = true;`，但那个变量只写不读、已作为死代码删除
+//    （noUnusedLocals）。真正的规范要求是 composition.zh.md:143「偏离 plan 必须报告」，
+//    由 onDowngrade() 承担。
+// ② 第一版改成了「onDowngrade() 出现次数 >= 2」—— **没有判别力**：我自己写在注释里的
+//    `由 onDowngrade() 上报` 也被算了一次，删掉一条真实上报后计数从 3 变 2 仍然通过。
+//    ⇒ 先**剥注释**，再**逐条降级路径**断言（§2.15 的两条坑：先剥注释、按结构推导）。
+const clientCode = clientPortion.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+const sessionBaseBody = (() => {
+  const start = clientCode.indexOf('const loadSystemArtBase');
+  const end = clientCode.indexOf('const DESKTOP', start);
+  return start < 0 ? '' : clientCode.slice(start, end < 0 ? undefined : end);
+})();
+const generalApiBody = (() => {
+  const start = clientCode.indexOf('async function api(');
+  const end = clientCode.indexOf('const PREFS_KEY', start);
+  return start < 0 ? '' : clientCode.slice(start, end < 0 ? undefined : end);
+})();
+check('the downgrade assigns the base and reports it on EVERY downgrade path',
+  /endpointBase = LEGACY_API_BASE;/.test(clientCode)
+    && /onDowngrade\(\)/.test(sessionBaseBody)      // ① /session 自己的回环回落
+    && /onDowngrade\(\)/.test(generalApiBody),      // ② 通用 A1-02 降级
+  'switch is not reported (session-path=' + /onDowngrade\(\)/.test(sessionBaseBody)
+    + ' general-path=' + /onDowngrade\(\)/.test(generalApiBody) + ')');
 check('the downgrade is surfaced in the UI',
   /hostEntry === "legacy"/.test(clientPortion) && /error.legacyEntry/.test(css + clientPortion),
   'no visible downgrade notice');

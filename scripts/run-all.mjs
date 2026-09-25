@@ -10,6 +10,7 @@ const suites = [
   { name: 'stream / range / traversal', file: 'scripts/test-stream.mjs', node: [] },
   { name: 'security / limits', file: 'scripts/test-security.mjs', node: [] },
   { name: 'perf / memory / fd', file: 'scripts/test-perf.mjs', node: ['--expose-gc'] },
+  { name: 'leak / release surface (reload, fd, cpu)', file: 'scripts/test-leak.mjs', node: ['--expose-gc'] },
   { name: 'plugin lifecycle (process)', file: 'scripts/test-lifecycle.mjs', node: [] },
   { name: 'progress bar', file: 'scripts/test-progress.mjs', node: [] },
   { name: 'resume after cut', file: 'scripts/test-resume.mjs', node: [] },

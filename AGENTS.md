@@ -264,13 +264,13 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 ```bash
 pnpm run build                # src/*.ts → lib/*.js（改了 src 必须跑）
 pnpm run typecheck            # 类型棘轮：错误数只许变少（基线 0）
-npm test                      # 产物新鲜度 + 逐文件严格 + 25 套回归
+npm test                      # 产物新鲜度 + 逐文件严格 + 26 套回归
                               # = check-build-fresh && check-strict && run-all
 pnpm run check:manifest       # dsh-plugin.json 对 pinned Community v0.15 校验
 git diff --check              # 空白/冲突标记
 ```
 
-`.github/workflows/ci.yml` 在每次 push / PR 上跑同一组门禁（`pnpm install --frozen-lockfile` → `typecheck` → 全部 `lib/*.js` 与 `scripts/*.mjs` 的 `node --check` → `npm test`（= 新鲜度 + 逐文件严格 + 25 套）→ manifest 校验 → 冲突标记扫描）。**CI 故意不先 build**：新鲜度门禁只在 `lib/` 未被就地覆盖时才有判别力。**CI 绿不等于 manifest 校验过**：CI 里没有 vendor 基线，`check:manifest` 会走 SKIP 分支并打 `::warning::` —— SKIP 不是通过（见上）。
+`.github/workflows/ci.yml` 在每次 push / PR 上跑同一组门禁（`pnpm install --frozen-lockfile` → `typecheck` → 全部 `lib/*.js` 与 `scripts/*.mjs` 的 `node --check` → `npm test`（= 新鲜度 + 逐文件严格 + 26 套）→ manifest 校验 → 冲突标记扫描）。**CI 故意不先 build**：新鲜度门禁只在 `lib/` 未被就地覆盖时才有判别力。**CI 绿不等于 manifest 校验过**：CI 里没有 vendor 基线，`check:manifest` 会走 SKIP 分支并打 `::warning::` —— SKIP 不是通过（见上）。
 
 - **只要动了 `dsh-plugin.json` 或 manifest 相关字段，`check:manifest` 是必跑项。** 它用固定 revision 的 `@dsh-std/manifest` 校验，不是照 `main` 分支。基线找不到时它以 **SKIP** 退出（exit 0 + 明确警告），**那不是通过**——用 `DSH_STD_MANIFEST=/path/to/@dsh-std/manifest/lib/index.js` 指过去。
 - 新增功能**必须**在 `scripts/run-all.mjs` 的 `suites` 里注册回归套件；没注册等于没有门禁。
@@ -288,7 +288,7 @@ git diff --check              # 空白/冲突标记
   | ③ | 「布局结论一律用真实 Chromium 量盒模型（headless Chrome + CDP）」 | ❌ **不存在**。该主张已从 README 删除（原在 `README.md:270`；现改为显式「本仓库没有布局测量能力」的警告），`scripts/` 下无任何浏览器启动器；8 个客户端套件全部走 jsdom，布局类结论实际靠**伪造 `scrollWidth`/`clientWidth`** 得出。见 `A2-02` |
 
   → **③ 是 README 的错误主张**。本仓库当前**没有**布局测量能力；涉及「位置/宽度/是否溢出」的判断要么补一个真实 Chromium 门禁，要么明确标注为**未验证**。不得再引用这条防线。
-- **不留死代码**：本仓库**已有** `typescript`（devDependency）与 `tsconfig.json`（见 §2.15），但**当前没开 `noUnusedLocals` / `noUnusedParameters`** —— 开了会立刻多出上百处历史告警。眼下可用的是 `scripts/test-audit.mjs` 的死方法 / 死字典键 / 死 CSS class 检查；把它们**分批清到零之后**再打开这两个开关，才会是有意义的信号。（`A2-15` 原记录「无 typescript / 无 tsconfig」已被第 11 轮推翻。）
+- **不留死代码**：**第 15 轮起 `noUnusedLocals` + `noUnusedParameters` 已永久开启**（开启前实测全仓仅 5 处，已全部清掉）—— 新增未使用的局部变量 / 参数 / 死声明会让 `typecheck` 直接变红。另有 `scripts/test-audit.mjs` 的死方法 / 死字典键 / 死 CSS class 检查作为补充。（`A2-15` 原记录「无 typescript / 无 tsconfig」已在第 11 轮推翻。）
 - 文案与注释以中文为主；新增 UI 文案必须同时补中英字典键。
 - 交付说明里**区分「已验证」与「未验证」**：写清用什么命令、在哪个运行时、什么结果；别把「没跑」写成「通过」。
 
@@ -398,7 +398,8 @@ git diff --check              # 空白/冲突标记
 | --- | --- | --- | --- |
 | `声明面一致性` | `dsh-plugin.json` 的 `endpoints`、`lib/index.js` 的 `FETCH_ROUTES`、`lib/host.js` 的分派表**三向集合相等**（不是单向 `expected.every()`）；`expected` 必须**从分派表推导**而非手工抄 | 1/2/4 | `A1-01`/`A2-03`/`A4-01` |
 | `传输面覆盖` | 每个功能套件至少有一个用例打**生产使用的传输面**（默认 `connection.fetch`），不得只打旧前缀 | 2 | `A2-03` |
-| `释放面完整性` | `dispose()` 后：`mvJobs.size === 0`、无存活 `job.child`、无新 `tagJobs`；且热重载 N 次后 module 级容器不增长 | 1/3 | `A1-03` |
+| `释放面完整性` | **第 15 轮已实现**（`test-leak.mjs`）：8 次热重载后 ① fd 不增长 ② 无孤儿子进程 ③ `dispose()` 后 1.5s 内 CPU≈0 ④ heap 增长有界（阈值由正对照标定） | 1/3/15 | `A1-03` |
+| `死代码` | **第 15 轮已实现**：`tsconfig.json` 永久开启 `noUnusedLocals` + `noUnusedParameters`（开启前全仓仅 5 处，已清）。新增未使用声明会直接让 `typecheck` 变红 | 15 | `A2-15` |
 | `停止后无自续期定时器` | teardown 后 3 s 内 fetch 次数不增；`getState().scanning === false` | 3 | `A3-01` |
 | `teardown 优先于在飞重载` | 挂起 `import()` 期间触发 disposer，断言不再创建 host（`fs.stat`/`import` 计数不增、tag worker 未启动、有回滚或明确降级而非静默空窗） | 1/3 | `A1-04`/`A3-02` |
 | `客户端 release 面` | teardown 后 `window.__dshMusicPlayer === undefined` 且 `.dshm-mvPark` 不在 DOM；二次 activation 不复用第一次的媒体元素 | 3 | `A3-03`/`A3-04` |

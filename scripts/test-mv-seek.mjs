@@ -73,6 +73,7 @@ async function bootAndCue(lastId, opts = {}) {
       super();
       this._src = ''; this.currentTime = 0; this.duration = 260.4; this.volume = 1; this.preload = '';
       this.videoWidth = 0; this.readyState = 4; this.paused = true; this.error = null;
+      this._pendingPlay = null;
       // 丢 Range 的源：seekable 恒 [0,0]
       this.seekable = unseekable
         ? { length: 1, start: () => 0, end: () => 0 }
@@ -91,8 +92,34 @@ async function bootAndCue(lastId, opts = {}) {
         this.dispatchEvent(event);
       }, 20);
     }
-    play() { this.paused = false; return Promise.resolve(); }
-    pause() { this.paused = true; }
+    /**
+     * 真实媒体元素的关键语义：`play()` 返回的 promise 在**被随后的 pause() 打断**时
+     * 以 **AbortError** 拒绝。夹具原来直接 `return Promise.resolve()`，于是
+     * 「attachSource(url) 后立刻 pause()」这条路径**永远不会触发 AbortError**，
+     * 也就抓不到「刷新后 cue 视频 → 误报无法播放」那个 bug（§2.16 夹具保真度）。
+     */
+    play() {
+      this.paused = false;
+      const pending = {};
+      this._pendingPlay = pending;
+      return new Promise((resolve, reject) => {
+        pending.resolve = resolve;
+        pending.reject = reject;
+        setTimeout(() => {
+          if (this._pendingPlay === pending) { this._pendingPlay = null; resolve(); }
+        }, 5);
+      });
+    }
+    pause() {
+      this.paused = true;
+      const pending = this._pendingPlay;
+      if (pending !== undefined && pending !== null) {
+        this._pendingPlay = null;
+        const error = new dom.window.Error('The play() request was interrupted by a call to pause().');
+        error.name = 'AbortError';
+        pending.reject(error);
+      }
+    }
     load() {}
     removeAttribute(name) { if (name === 'src') this._src = ''; }
   };
@@ -145,7 +172,8 @@ async function bootAndCue(lastId, opts = {}) {
   // 足够久：等 /session（可能延迟 1.2s）+ 自愈的 700ms 定时器 + 重挂
   await act(async () => { await new Promise((r) => setTimeout(r, waitMs ?? (SESSION_DELAY_MS + 3200))); });
 
-  const result = { srcs: srcs.filter((s) => typeof s === 'string' && s.length > 0), media, requested };
+  const errorBanner = dom.window.document.querySelector('.dshm-error');
+  const result = { srcs: srcs.filter((s) => typeof s === 'string' && s.length > 0), media: media, requested, errorBanner };
   Object.assign(globalThis, saved);
   return result;
 }
@@ -229,6 +257,21 @@ const badRel = (arr) => arr.filter((s) => !s.startsWith('http'));
     healBody.length > 0 && /wasMvCache/.test(healBody) && /src\.includes\("\/mvfile"\)|src\.includes\("&k="\)/.test(healBody)
       && !/track\.kind === "video" \? await prepareVideo/.test(healBody),
     healStart < 0 ? 'heal not found' : 'heal still branches on track.kind (WASM-bypass video would hang)');
+}
+
+// ── G. 刷新后 cue 上一首（视频）不得误报「无法播放该文件」─────────────────────
+// 真机症状：每次打开音乐页面，上方弹红字「出错了：无法播放该文件（格式不受支持或文件已移动）」。
+// 成因：restoreLastPlayed 的视频分支写的是 `attachSource(url); audio.pause();` ——
+// attachSource 内部调了 play()，紧随的同步 pause() 让那个 promise 以 **AbortError**
+// 拒绝，而 catch 只放行 NotAllowedError ⇒ 落到「格式不支持」分支。
+// 修法：cue 就只挂源不开播（cueSource），并把 AbortError 也从错误分支里放行。
+// 夹具必须真实（play() 被 pause() 打断要以 AbortError 拒绝），否则这条恒绿。
+{
+  const { srcs, errorBanner } = await bootAndCue(VIDEO.id);
+  check('G1: cueing the last (video) track attached a source', srcs.length >= 1, srcs.join(' '));
+  check('G2: no error banner on cue (AbortError from play()-then-pause() must not be reported)',
+    errorBanner === null || errorBanner === undefined,
+    errorBanner === null || errorBanner === undefined ? '' : String(errorBanner.textContent).slice(0, 120));
 }
 
 console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)');

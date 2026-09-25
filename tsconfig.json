@@ -20,6 +20,12 @@
      * 守住：只许变少、不许变多。见 AGENTS.md §2.15。 */
     "strictNullChecks": true,
     "noImplicitAny": false,
+    /* 死代码门禁：这两个开关已永久开启（第 15 轮）。
+     * 开启前实测全仓只有 5 处（client 2 / host 3），已全部清掉 —— 之后就由
+     * typecheck 兜住：新增未使用的局部变量/参数/死声明会立刻变红。
+     * 禁止为了让门禁变绿而关掉它们（见 AGENTS.md §2.15）。 */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noImplicitThis": true,
     "strictBindCallApply": true,
     "useUnknownInCatchVariables": true,
