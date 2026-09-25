@@ -82,6 +82,120 @@ dsh plugin --profile web remove @local/dsh-music-player
 
 ---
 
+## 兼容性声明 / Compatibility
+
+> 这一节是给 DSH STORE 的自动收录与人工复核看的**来源侧声明与证据边界**。声明只说明插件面向哪条 DSH 线、以及哪些版本真的跑过验收；**它不等于**任何真实 Profile 的安装 / 启动 / 运行验收。
+
+### 声明位置与取值
+
+| 项 | 位置 | 值 |
+| --- | --- | --- |
+| Node.js 兼容范围 | `package.json` → `engines.node` | `^22.19.0 \|\| >=24.0.0` |
+| DSH 兼容范围（描述性） | `package.json` → `dsh.compatibility.dsh` | `>=0.1.6-alpha.1 <0.2.0` |
+| DSH 精确记录（证据） | `package.json` → `dsh.compatibility.dshReleases` | 逐版本 `compatible` / `incompatible` / `unknown` |
+
+```json
+"engines": { "node": "^22.19.0 || >=24.0.0" },
+"dsh": {
+  "compatibility": {
+    "dsh": ">=0.1.6-alpha.1 <0.2.0",
+    "dshReleases": {
+      "0.1.7-alpha.2": "unknown",
+      "0.1.7-rc.1": "unknown",
+      "0.1.7-rc.2": "compatible"
+    }
+  }
+}
+```
+
+**为什么 Node 范围是这个值**：它与 DSH 宿主根包 `@deepseek-ai/dsh-root` 自身声明的 `engines.node` 完全一致（插件只能跑在 DSH 提供的 Node 运行时里，不单独面向通用 Node 环境）；本机随包运行时实测为 **Node v24.21.0**。
+
+### 每条精确记录的依据
+
+| DSH 版本 | 状态 | 依据 |
+| --- | --- | --- |
+| `0.1.7-rc.2` | `compatible` | 当前开发与实测宿主（本机 `$DSH_HOME/dsh-auto-update/runtime.json` 的 active slot 版本 = `0.1.7-rc.2`，commit `477b4f42`）。`npm test` 全部 **21 套**回归在该运行时 + Node v24.21.0 上逐套通过（含 desktop `/api` 路由、声明面三向一致性、插件生命周期、宿主热重载、安全/越界、MV ffmpeg 换壳、客户端 shell）。**不含真实浏览器断言**——客户端套件全部跑 jsdom，见「测试」一节的说明 |
+| `0.1.7-rc.1` | `unknown` | 升级路径上的上一格，未单独跑过验收 |
+| `0.1.7-alpha.2` | `unknown` | 未单独跑过验收 |
+
+> **范围 ≠ 证据。** 范围允许的版本仍可能是 `unknown`：`0.1.7-alpha.2` / `0.1.7-rc.1` 都落在 `>=0.1.6-alpha.1 <0.2.0` 里，但没有跑过验收就不写 `compatible`。DSH STORE 也只把**精确记录**当兼容证据，范围命中仅显示「范围支持·待验证」。
+> 这里只主张一个版本是**有意**的：没验证过的不写 `compatible`。
+
+### 尚未提供的证据
+
+`install` / `start` / `uninstall` / `rollback` 四项**一次性 Profile 证据尚未提供**，因此 `dsh.compatibility.dshOperations` 保持缺省（记为 `unknown`）。本节的回归套件是**进程内**验证，不能替代一次性 Profile 的真实装卸。要补齐需要在一个可丢弃的 profile 里真装、真起、真卸一次并把记录写进 `dshOperations`。
+
+### 已知的兼容断点（记录在案）
+
+`x-dsh-transition`（`dsh-plugin.json`）逐条记录了跨版本变过的三处接缝，升级 DSH 后应按**运行中的应用**核对，而不是按本地 checkout：
+
+| 接缝 | 0.1.6 时代 | 0.1.7 起 |
+| --- | --- | --- |
+| `dsh.client.platform` | 写死 `'web'` | 写死 `'web'`（**不存在** `'desktop'`） |
+| `ctx.webServer` | 不存在（desktop-host patch 里 `disabled: true`） | 存在（`runProfile` 起完整 Web 运行时） |
+| 官方图标导出名 | `IconXxx16` | `IconXxxRegular` / `IconXxxMedium` |
+
+插件对这三处的处理是**运行时探测 + 双形态回落**（见「DSH Desktop 适配」一节），因此不靠静态 `inject` 绑定宿主服务。
+
+---
+
+## 依赖、权限与失败边界 / Dependencies, permissions & failure bounds
+
+> 供 DSH STORE 的供应链与权限审查引用。**权威值是 `dsh-plugin.json` 的 `permissions` 与 `lib/` 的运行时代码信号**，本节逐条解释它们对应什么行为、什么时候触发。权限等级保守偏高（含 `node:child_process`、`fs.write`、`fs.delete`、`net.fetch`），这是能力实情，不是漏报。
+
+### 运行时依赖（npm）
+
+| 依赖 | 用途 | 不可用 / 失败时的行为 |
+| --- | --- | --- |
+| `music-metadata` | 解析音频标签与时长 | 该文件降级为文件名回退（「歌手 - 歌名」约定） |
+| `node-taglib-sharp` | 写入标签（跑在 worker 线程） | 该曲目报错，**不改名、不改文件** |
+| `mediabunny` | MV 容器 / 编码探测 | 该曲目按 direct play 处理；探测失败则不播 MV |
+| `@libav.js/variant-webcodecs`、`libavjs-webcodecs-polyfill` | 无 ffmpeg 时的浏览器内转码兜底 | 退回「提示安装 ffmpeg」 |
+
+全部是运行时依赖。**没有** `install` / `prepare` / `postinstall` / `prepublish` 等生命周期脚本——`package.json` 的 `scripts` 只声明 `test`。（`scripts/` 下的 `.mjs` 是开发者手动执行的回归与预览工具，不会被宿主自动执行。）
+
+### 权限 ↔ 代码信号 ↔ 触发条件
+
+| 权限 | 代码信号 | 什么时候才会发生 |
+| --- | --- | --- |
+| `fs.read` | `lib/host.js`：目录递归扫描、`createReadStream` 做 Range 流式读取 | 你选定音乐目录之后 |
+| `fs.write` | `lib/host.js` + `lib/tagwriter.js`：写标签、按「歌手 - 原名」重命名 | 只在「写入标签并重命名文件」流程里，且需你确认；取消勾选则只改应用内显示 |
+| `fs.delete` | `lib/host.js`：删除曲目（`fs.unlink` **永久删除**，不进废纸篓） | 只在删除确认条里点「删除」后，且只作用于**当前库内**曲目，越界一律拒绝 |
+| `net.fetch` | 在线补全元数据、封面代理 | 你点「✦」/「一键补全全部」，或需要取封面时 |
+| `transport.api` | `connection.fetch` 上的精确 `/api/dsh-music/*` 路由 | 插件激活时注册，供 Web 与 Desktop 共用 |
+| `storage.local` | `$DSH_HOME/storages/dsh-music-player.json`（兼容旧的包内 `lib/state.json`）+ `localStorage`（`dsh-music:*` 前缀） | 记住目录、最后播放曲目与进度、音量/循环/排序偏好 |
+
+**关于 `node:child_process`**：`lib/host.js` 确实 `import { spawn, spawnSync } from 'node:child_process'`，但**没有 shell 执行能力**——只用来调 `ffmpeg` / `ffprobe`。可执行文件按 `DSH_MUSIC_FFMPEG` → Homebrew / MacPorts → `PATH` 的顺序探测，参数由插件拼成数组直传（**不经过 shell**），输入是本地已扫描到的媒体文件路径，MV 转码产物写到 `os.tmpdir()/dsh-music-mv`。**没有 ffmpeg 也能用**：直出格式照常播，需要换壳/转码的给安装提示。
+
+**读取的环境变量**：`DSH_HOME`、`DSH_MUSIC_FFMPEG`、`DSH_MUSIC_ITUNES_COUNTRY`、`PATH`。不读 shell 配置、不读 keychain、不读浏览器 profile。
+
+### 外部服务
+
+全部 HTTPS，**没有**任何上传：出网的只有搜索词与查询参数，本地文件、文件名、标签、目录结构都不出网。
+
+| 用途 | 主机 |
+| --- | --- |
+| 元数据搜索 | `c.y.qq.com`、`itunes.apple.com`、`music.163.com`、`musicbrainz.org` |
+| 封面取图（宿主代理） | `mzstatic.com`（含 `*.mzstatic.com`）、`gtimg.cn`（含 `*.gtimg.cn`，即 `y.gtimg.cn`）、`music.126.net`（含 `*.music.126.net`）、`coverartarchive.org` |
+
+封面代理走**主机白名单**并逐跳校验重定向；MusicBrainz 全局限速 1 req/s 排队；单个数据源连续失败 2 次自动熔断 60s。
+
+### 失败边界
+
+| 失败情形 | 结果 |
+| --- | --- |
+| 某个在线源超时 / 报错 / 429 | 该源熔断 60s，其余源照常；匹配并发上限 2 |
+| 没有 ffmpeg / ffprobe | MV 直出格式照常播；需要换壳或转码的给出安装提示 |
+| 标签写入失败 | 该曲目报错，不改名、不动文件 |
+| 目录不可读 / 被移动 | 扫描回报错误，不影响其他端点 |
+| 曲库过大 | 扫描超 5000 首截断并显式提示 |
+| 非回环 / 跨站请求 | `403`；系统取图的 token 端点除外（只认 token、不看 Host/Origin，token 只随鉴权过的 session 发给本页） |
+| 库外路径 / `..` 逃逸 | 拒绝（`scripts/test-stream.mjs` 覆盖） |
+
+> 注明：MV 套件（`scripts/test-mv.mjs`）会真实调用 ffmpeg；**匹配套件是离线测试** —— `scripts/test-match.mjs:5` 自述 hermetic，并在 `:45-108` 替换 `globalThis.fetch`（只放行 `127.0.0.1`/`localhost`），`scripts/test-match-client.mjs:80-81` 同样打桩。DSH STORE 的静态检查本身不执行这些脚本。
+
+---
+
 ## 开发者安装（克隆 + link）
 
 要改插件代码、让改动随重启/热重载生效，用 link 方式：
@@ -117,20 +231,32 @@ dsh plugin --profile web add link:./dsh-music-player
 宿主端把每个端点注册为 `ctx.connection.fetch` 上的**精确 `/api` Fetch 路由**（Web 与 DSH Desktop 共用同一条接缝）。
 Web 侧旧版 `/dsh-music` 前缀仍保留作向后兼容（已加载的旧客户端 bundle 仍指向它），新客户端一律走下面这张表。
 
+**共 18 个端点**，与 `lib/host.js` 的分派表、`lib/index.js` 的 `FETCH_ROUTES`、`dsh-plugin.json` 的登记表由 `scripts/test-route-consistency.mjs` 强制三向一致。
+
 | 路由 | 方法 | 说明 |
 | --- | --- | --- |
 | `/api/dsh-music/library` | GET | 当前目录 + 曲目列表（含 `scanning`/`scanParsed`/`scanTotal`/`truncated` 进度字段，非阻塞） |
 | `/api/dsh-music/refresh` | POST | 重新扫描当前目录 |
 | `/api/dsh-music/dir` | POST | `{ "dir": "..." }` 设置目录并扫描 |
 | `/api/dsh-music/pick` | POST | 弹原生目录选择器，选定后扫描 |
+| `/api/dsh-music/session` | GET | 下发系统取图用的能力 token 与回环基址（仅通过鉴权过的 `/api` 通路） |
 | `/api/dsh-music/stream?p=<id>` | GET | 按稳定 ID（相对路径）流式传输（Range / 206，越界 403） |
 | `/api/dsh-music/cover?p=<id>` | GET | 内嵌专辑封面（内存缓存，无封面 404） |
 | `/api/dsh-music/match?p=<id>` | GET | 多源在线匹配：返回按置信度排序的候选（含 `score`/`auto`/`sources`）与 `best`（`q` 可覆盖搜索词；单源失败不影响其它源） |
 | `/api/dsh-music/art?u=<url>` | GET | 代理封面图（白名单：mzstatic / gtimg / music.126.net / coverartarchive+archive.org；逐跳校验重定向、字节封顶并缓存） |
 | `/api/dsh-music/apply` | POST | `{ id, title?, artist?, album?, cover?, rename? }` 写入标签（含封面）并按「歌手 - 原名」重命名；返回 `oldId/newId/tagged/renamed` 与更新后的库 |
 | `/api/dsh-music/delete` | POST | `{ "id": "<曲目 id>" }` 删除曲目（**含本地文件**，仅限当前库内、越界拒绝），返回更新后的库 |
+| `/api/dsh-music/caps` | POST | 上报客户端视频解码能力（用于选 direct / remux / transcode 档位） |
+| `/api/dsh-music/mv?id=<id>` | GET | MV 播放计划（direct / remux / transcode 三档判定与产物路径） |
+| `/api/dsh-music/mvconvert` | POST | 触发 remux / transcode 转换 |
+| `/api/dsh-music/mvlib` | GET | MV 库视图（含转换产物缓存） |
+| `/api/dsh-music/mvfile` | GET | 按稳定 ID 流式传输 MV 文件（Range / 206） |
+| `/api/dsh-music/system-art?t=<token>` | GET | **仅旧前缀可达**：Chromium 内部取封面，凭证是 URL 里的 token |
+| `/api/dsh-music/system-stream?t=<token>` | GET | **仅旧前缀可达**：Chromium 内部取媒体，凭证是 URL 里的 token |
 
-> **信任边界**：Web 与 0.1.7 起的 Desktop 都经 `@deepseek-ai/dsh-client-connection` 的 `/api` 握手统一鉴权（Host/Origin 栅栏 + 浏览器会话）；插件的旧 `/dsh-music` 前缀另有一道同构的 Host/Origin 检查，供 0.1.6 形态的 Desktop / 旧客户端使用。
+> **为什么最后两个不在 `connection.fetch` 上**：这两个端点服务 Chromium **内部**发起的请求（带 `Origin: dsh-app://app`、不带浏览器会话 cookie）。平台的 `/api` 路由会先判 Host/Origin 栅栏、再要求浏览器会话（`admit()`），这类请求必然 401/403，所以注册到 `connection.fetch` 也到不了。它们只能挂插件自建的 `/dsh-music` 旧前缀。**代价**：宿主没有 `webServer` 时（0.1.6 形态 desktop-host）这两个端点不可达 —— 这是已知限制。
+
+> **信任边界**：Web 与 0.1.7 起的 Desktop 都经 `@deepseek-ai/dsh-client-connection` 的 `/api` 握手统一鉴权（Host/Origin 栅栏 + 浏览器会话）；插件的旧 `/dsh-music` 前缀另有一道同构的 Host/Origin 检查，供 0.1.6 形态的 Desktop / 旧客户端使用。**上面两个 `system-*` 端点是这条栅栏的显式例外**（它们靠 token 而非会话），因此 token 的保密性是唯一防线。
 
 ## 结构 / Structure
 
@@ -146,16 +272,18 @@ lib/tagwriter.js   标签写入 worker 线程入口（node-taglib-sharp）
 
 ## 测试 / Tests
 
-`npm test` 跑 **17 套**回归（`scripts/run-all.mjs`）。除了功能与安全套件，还有两处专门防「写了但不生效」的防线 ——
+`npm test` 跑 **21 套**回归（`scripts/run-all.mjs`）。除了功能与安全套件，还有几处专门防「写了但不生效」的防线 ——
 这类 bug 全部是**静默失效**（不抛异常、不报错，只是没效果），靠功能测试很难发现：
 
 | 防线 | 覆盖什么 |
 | --- | --- |
-| `scripts/test-audit.mjs`（静态审计） | ① CSS 里的 class 必须被 JS 用到、JS 用到的 class 必须有 CSS 规则；② 每个 `@keyframes` 必须真的被 `animation` 引用；③ **BEM 修饰类不能被子序列里的基类规则顶掉**（`.dshm-progress--stacked` 的 `align-items` 曾被靠后的 `.dshm-progress` 吃掉过）；④ 中英字典键一致且所有静态键都存在；⑤ player API 不能有没人调的方法；⑥ client 的 `api()` 调用都要有对应宿主路由 |
+| `scripts/test-audit.mjs`（静态审计） | ① CSS 里的 class 必须被 JS 用到、JS 用到的 class 必须有 CSS 规则；② 每个 `@keyframes` 必须真的被 `animation` 引用；③ **BEM 修饰类不能被子序列里的基类规则顶掉**（`.dshm-progress--stacked` 的 `align-items` 曾被靠后的 `.dshm-progress` 吃掉过）；④ 中英字典键一致且所有静态键都存在；⑤ player API 不能有没人调的方法；⑥ client 的 `api()` 调用都要有对应宿主路由；⑦ **`lib/host.js` 的每个写盘目标必须在已审计的路径白名单内，且凭据/请求元数据不得进入任何写盘调用** |
 | 按钮接线检查（client shell / match client 套件） | 读 React 挂在 DOM 上的 `__reactProps$*`，断言主视图、全屏播放器、匹配弹层里**每个 `<button>` 都真的挂了处理函数或处于 disabled** —— 防「画了按钮但没接行为」 |
-| 真实浏览器量布局（headless Chrome + CDP） | jsdom 没有布局引擎，所以涉及「位置/宽度/是否溢出」的结论一律用真实 Chromium 量盒模型后再下结论（曾据此定位跑马灯阈值算错一倍、时间行被压到中间两个 bug） |
+| `scripts/test-route-consistency.mjs`（声明面一致性） | `lib/host.js` 的分派表 == `lib/index.js` 的 `FETCH_ROUTES` ∪ 具名旧前缀例外 == `dsh-plugin.json` 的端点登记表；**三向集合相等**，且 methods 逐条对齐。手工抄的期望值曾让「MV 端点在 Desktop 上不可达」在 18/18 全绿下活了很久 |
+| `scripts/test-poll-teardown.mjs` | 停用之后库轮询定时器**不得自我续期**（清句柄≠阻止再武装） |
+| `scripts/test-teardown-race.mjs` | 停用必须优先于在飞的热重载：挂起的 `import()` 恢复后不得再创建宿主实例 |
 
-```
+> ⚠️ **没有布局测量能力。** 本仓库**当前不存在** headless Chrome / CDP 的布局门禁；8 个客户端套件全部跑 jsdom，涉及「位置/宽度/是否溢出」的结论实际是靠**伪造 `scrollWidth`/`clientWidth`** 得出的。凡涉及真实盒模型的判断，请标注为**未验证**，或先补一个真实浏览器门禁。（此前的 README 版本曾声称有这条防线，那是不实主张。）
 
 ## DSH Desktop 适配 / Desktop notes
 

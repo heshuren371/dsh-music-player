@@ -1,0 +1,422 @@
+# 审计台账（完整证据）
+
+> 本文件是 `AGENTS.md` §5 的完整版，只追加不删。规则、门禁、迭代协议在 [`AGENTS.md`](../AGENTS.md)。
+> 拆出原因：`AGENTS.md` 是 workspace 指令文件，有 64 KiB 注入预算上限（撞上后尾部会被静默截断）。
+# 审计台账（只追加，不删）
+
+### 5.1 台账约定
+
+每条登记项固定字段：
+
+| 字段 | 含义 |
+| --- | --- |
+| `ID` | `D-xx`＝规范落盘时已知的偏差；`A<轮次>-xx`＝某轮审计新发现 |
+| `严重度` | 高 / 中 / 低。**越权、凭据泄漏、路径逃逸、孤儿进程一律高** |
+| `位置` | `文件:行号`，必须实测得到 |
+| `规范依据` | `文件名:行号` + 原文关键措辞 |
+| `判定` | **违规** / **符合** / **规范未覆盖** |
+| `门禁` | 现有套件是否拦得住；拦不住就是**门禁盲点**，必须记下来 |
+| `状态` | 待修 / 已修 / 接受（附理由） / 待定 |
+
+**只追加不改判**。已修项保留原始记录并补 `已修` 与修复 commit；判定被推翻的写新的 `A<轮>-xx` 说明推翻理由，不覆盖旧条目。
+
+### 5.2 第 0 轮 —— 规范落盘时记录的既有偏差
+
+改到这些地方时**不要扩大偏差**，要收窄或按「处置方向」修：
+
+| ID | 严重度 | 偏差 | 规范依据 | 处置方向 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| `D-01` | 中 | `requires.contracts` 未声明 `storage.dsh/v1alpha1` / `LocalStorage`；插件自己往 `$DSH_HOME/storages/dsh-music-player.json` 写文件（消耗 `fs.write`） | `storage.zh.md:20` consumer 通过 protocol requirement 声明 | 要么改走协议 provider，要么在 manifest/README 显式说明这是自建文件存储而非协议消费 | 接受（已在 README 声明为自建存储） |
+| `D-02` | 低 | 权限名 `storage.local` 不是规范动作名 `storage.local.read` / `storage.local.write` | `storage.zh.md:75` | 若改用 LocalStorage 协议，拆成 `.read` / `.write` | 待定 |
+| `D-03` | 中 | 自建「能力 token」（`/api/dsh-music/system-art?t=…`）把 URL 里的 token 当凭证 | `permission.zh.md:82` grant record 不是可重放 bearer token、不能用 grant id 构造权限 | 不走 grant 而是自建路径凭证。必须保证：token 随机、只随鉴权过的 session 下发、**不进日志**（`lifecycle.zh.md:133`、`storage.zh.md:101`） | 待定（见 `A1-02`） |
+| `D-04` | 低 | 封面代理用主机后缀匹配（`.mzstatic.com` 等）判断资源范围 | `permission.zh.md:119` 不得用字符串前缀等未规定方法判断域名 scope | 产品侧尚无该机制时的插件内补偿栅栏；上游提供标准 scope 后迁移 | 接受 |
+| `D-05` | 低 | `contributes["x-dev.dsh-std.extensions"]` / 顶层 `x-dsh-transition` 是自定义扩展 | `manifest.zh.md:64` 扩展不得暗含 required 行为 | ~~已把 `browser.ui.dsh/v1alpha1` 标 `optional: true` 并补 `fallback`~~ → **判定推翻，见 `A4-02`/`A4-03`**：该坐标在基线与宿主都是 0 命中（编造的），**补 `fallback` 不构成修复**，只让空壳声明看起来完整 | **待修**（原标「已修」有误，`§5.10` 记录更正） |
+| `D-06` | — | `dsh-plugin.json` 不被 DSH 运行读取（0.1.7-rc.2 全仓 0 处引用） | —— | 它是生态/市场侧产物。改它**不影响运行时**，但改了仍必须跑 `check:manifest` | 接受（事实记录） |
+
+### 5.3 第 1 轮 —— Lead 自审：路由注册面 + lifecycle 释放面
+
+基线：`node scripts/run-all.mjs` → **18/18 PASS**。**下列 6 条没有任何一条被现有门禁拦住。**
+
+| ID | 严重度 | 一句话 | 规范依据 | 门禁 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| `A1-01` | 高 | `host.js` 实现 18 个端点，`connection.fetch` 只注册 11 个，`manifest` 只声明 10 个 —— 三方漂移，7 个端点在无 `webServer` 的宿主形态下不可达 | `manifest.zh.md:64`、`composition.zh.md:82`、`:143` | ❌ 盲点 | 待修 |
+| `A1-02` | 高 | 客户端「一次性回落探测」用 **404** 作「宿主是旧入口」的信号，而 404 在本插件是正常业务语义（无封面 / MV 缓存未命中），会被无关 404 提前烧掉；探测成功则永久降级到旧前缀，**丢掉 `/api` 连接层信任栅栏** | `composition.zh.md:143`、`permission.zh.md:86` | ❌ 盲点 | 待修 |
+| `A1-03` | 高 | `mvJobs` 永不删除且 `dispose()` 不终止在飞 ffmpeg 子进程 —— 卸载/热重载后孤儿进程继续跑；Map 无界增长；module 级状态随 ESM 注册表**每次热重载永久泄漏一份** | `lifecycle.zh.md:107`、`:105`、`:118` | ❌ 盲点 | 待修 |
+| `A1-04` | 中 | 热重载先 `dispose()` 旧实例再 `import()` 新实例；新实例创建失败时旧实例已销毁，无回滚/降级（仅下一次请求重试） | `composition.zh.md:143` | ❌ 盲点 | 待修 |
+| `A1-05` | 中 | HTTP 错误响应把 `error.message` 原样返回，泄漏本地文件名/绝对路径（如 `文件不存在：<歌名>`、Node `ENOENT ... '/Users/...'`） | `storage.zh.md:95`、`permission.zh.md:111`、`lifecycle.zh.md:133` | ❌ 盲点 | 待修 |
+| `A1-06` | 低 | `registerLegacyRoute` 有被双次注册的边界（`connection` 在但 `connection.fetch.register` 不可用时会与 `webServer` 回调各注册一次） | `composition.zh.md:118` 无通用「最后注册者覆盖」 | ❌ 盲点 | 待定（防御性缺口，真实 DSH 走不到） |
+
+### 5.4 第 1 轮证据与复现
+
+**`A1-01` —— 三方漂移（实测，非静态推断）**
+
+用真实 `apply()` 抓注册面，与 `host.js` 的分派表、`dsh-plugin.json` 的 `endpoints` 对照：
+
+```
+host.js 实现     : 18
+connection.fetch : 11
+manifest 声明：10
+
+❌ 实现了但没注册到 connection.fetch (7)：
+   /api/dsh-music/caps        /api/dsh-music/mv        /api/dsh-music/mvconvert
+   /api/dsh-music/mvfile      /api/dsh-music/mvlib
+   /api/dsh-music/system-art  /api/dsh-music/system-stream
+❌ 实现了但 manifest 没声明 (8)：上述 7 个 + /api/dsh-music/session
+⚠️  注册了但 host.js 没有对应分派：无
+```
+
+- 注册面：`lib/index.js:25-37`（`FETCH_ROUTES`）；分派面：`lib/host.js:1769-2117`（18 条 `pathname === …`）
+- **`connection.fetch` 是精确路径匹配，不是前缀**：`dsh 0.1.7-rc.2` 的 `packages/client/connection/lib/index.js:625-634` 用 `fetchRoutes` Map 按 `route.path` 精确查表，重复路径直接抛 `exact Fetch route … is already registered`
+- 后果：`x-dsh-transition` 明确声明支持「0.1.6 形态的 desktop-host」（`webServer` 行被 `disabled: true`，**只有 `connection`**）。在该形态下这 7 个端点全部 404 → **MV 播放、MV 进度拖动、Desktop 封面（`system-art`/`system-stream`）全断**。这与 `lib/index.js:139-141` 自述的「Desktop 上这是唯一可达的通路」直接矛盾
+- 门禁盲点：`scripts/test-desktop-routes.mjs:104-118` 的 `expected` 列表是**手工硬编码的同一份 11 条**，断言写成 `expected.every(p => routes.has(p))` —— 只查单向包含，且期望值来自注册面而非分派面，**结构上无法发现这次漂移**
+
+**`A1-02` —— 404 当信号 + 静默降级**
+
+- `lib/client.js:664-673`：`if (response.status === 404 && !endpointProbed) { endpointProbed = true; … }`，且 `endpointProbed = true` 写在探测**之前**（`:667`）
+- 正常业务 404 的来源：`lib/host.js:1696`/`:1715` `no embedded cover`、`:2042`/`:2094` `mv cache miss`、`:1472`/`:1474` `文件不存在：`、`:1370`/`:1466` `track not in current library`
+- 后果一：Web/Desktop 上第一次碰到**无封面的曲目**或 **MV 缓存未命中**，就把唯一一次回落窗口烧掉 —— `A1-01` 那 7 个端点在需要回落时救不回来
+- 后果二：若探测**成功**，`endpointBase` 被永久切成 `LEGACY_API_BASE`（`/dsh-music/api`），而 `x-dsh-transition` 自己写明「信任边界交给连接层：Web/0.1.7 Desktop 走 `/api` 的 Host/Origin 栅栏 + 浏览器会话」—— 切成旧前缀等于**放弃连接层栅栏**，降级为插件自建检查。这属于 `composition.zh.md:143` 说的「悄悄把降级当正常」
+
+**`A1-03` —— 孤儿 ffmpeg + 无界增长 + 每次热重载永久泄漏**
+
+- `lib/host.js:157` `const mvJobs = new Map()` 是 **module 级**；全文只有 `:235` `get` 与 `:241` `set` —— **`mvJobs.delete` / `.clear` / 容量上限全都没有**（已 grep 确认）
+- `lib/host.js:2176-2192` `dispose()` 清了 `library`、封面/art/match 缓存、tag worker，**完全没有触碰 `mvJobs` 或 `job.child`**（已 grep 确认无 `mv`/`child`/`kill` 字样）
+- `:199-200` 把 `spawn()` 出的 `ChildProcess` 存进 `job.child`，无 `AbortController`、无 `kill` 路径
+- 后果：(a) 卸载/热重载后 ffmpeg 继续跑到结束，往 `os.tmpdir()/dsh-music-mv` 写 `.part`；(b) `mvJobs` 每首视频一条记录，每条持 `ChildProcess` 引用 + 最多 4000 字符 `job.log`，**无上限**；(c) `lib/index.js:54-58` 自己说明「每次 import 都会在 ESM 注册表里留下一个无法卸载的模块条目」，而 module 级 `mvJobs` 随该条目被永久持有 —— **每次热重载永久泄漏一份**
+- 对照（说明这是同一模式漏了一处，不是设计取舍）：tag worker 路径**做对了** —— `:1281-1287` `failAllTagJobs` 清 timer + resolve + delete 条目，`:2182-2191` dispose 里 `failAllTagJobs()` + `tagWorker.terminate()`，`:1312`/`:1336` 双 `unref()`
+- 门禁盲点：`scripts/test-lifecycle.mjs` 覆盖面不弱（`:62` dispose 后路由摘除、`:69` 在飞扫描取消、`:82`/`:83` 5 轮无资源/句柄增长、`:84` dispose 后进程空闲），但它只驱动 `/api/library` 扫描，**从不启动 MV 任务**，所以测不到
+
+**`A1-04` / `A1-05` / `A1-06` 位置**
+
+- `A1-04`：`lib/index.js:67-81`（`dispose()` → `host = null` → `await import()` → `createHost()`；后两步任一抛错即 `host` 停在 `null`）
+- `A1-05`：`lib/index.js:91`（`failResponse`）与 `:112`（`handleRequest`）都返回 `error.message`；错误文本来自 `lib/host.js:1472`/`:1474`（`'文件不存在：' + track.name`）。Node `fs` 报错本身含绝对路径
+- `A1-06`：`lib/index.js:196-202`
+
+### 5.5 第 1 轮结论
+
+- 现有 `npm test`（18 套，全绿）**与这 6 条发现完全不相交** —— 门禁的失败面集中在「功能对不对」和「进程句柄有没有涨」，**没有一条覆盖「声明面 ↔ 注册面 ↔ 分派面是否一致」**。
+- 因此第 1 轮最该补的不是功能测试，是**一致性门禁**：见 §6.3。
+
+### 5.6 第 2 轮 —— 门禁有效性 + 传输面覆盖
+
+基线：`node scripts/run-all.mjs` → **18/18 PASS**（Node v24.21.0，DSH 0.1.7-rc.2 / `477b4f42`）。本轮由独立审计员产出，Lead 逐条复核。
+
+| ID | 严重度 | 一句话 | 规范依据 | 门禁 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| `A2-01` | 高 | 一个已提交进 HEAD 的 `TEMP DIAGNOSTIC` 探针把**每个请求（含 query 里的能力 token）**明文落盘到 `/tmp/dshm-probe.log`；该写盘不在任何已声明 permission scope 内，且挡在路由分发之前 | `storage.zh.md:101`、`permission.zh.md:55`/`:111`、`lifecycle.zh.md:133` | ❌ 盲点 | 待修 |
+| `A2-02` | 高 | README:270 主张的「真实 Chromium + CDP 量布局」防线**在仓库里不存在**；8 个客户端套件全走 jsdom | 文档与代码不符 | ❌ 盲点 | 待修 |
+| `A2-03` | 高 | **传输面覆盖 1/10**：只有 `test-desktop-routes` 驱动 `connection.fetch`；`test-mv` 只注入 `webServer` → 「MV PASS」验证的是**旧前缀通路**，Desktop 的 `connection.fetch` 通路零覆盖且 5 个 MV 端点在该通路不可达 | `composition.zh.md:143` | ❌ **误导性绿灯** | 待修 |
+| `A2-04` | 中 | README:195「匹配套件会真实联网」与代码相反：`test-match.mjs:5` 自述 hermetic，`:45-108` stub `globalThis.fetch` | 文档与代码不符 | ❌ | 待修 |
+| `A2-05` | 中 | README:163「macOS 走 `~/.Trash`」与实际不符：`/api/delete` 是 `fs.unlink`（`lib/host.js:2133`）**永久删除**；`~/.Trash` 只在 MV 的 `deleteOriginal` 路径（`:1990-1996`） | 文档与代码不符 | ❌ | 待修 |
+| `A2-06` | 中 | README HTTP API 表只列 10 条，实际 18 条 —— 属 `A1-01` 在文档面的投影 | `manifest.zh.md:64` | ❌ | 待修 |
+| `A2-07` | 中 | 宿主侧删除流程无门禁：无套件断言一次成功删除真的删了文件 / 更新了库；`/api/delete` 越界 403 未测 | `permission.zh.md:86` | ❌ 盲点 | 待修 |
+| `A2-08` | 中 | 列头排序 / 搜索过滤（n/N）/ 排序记忆有代码无门禁（`sortKey`/`toggleSort`/`dshm-sorted` 在 `scripts/` 零命中） | 门禁缺失 | ❌ | 待修 |
+| `A2-09` | 中 | README:41 的性能数字（53MB 主线程阻塞 90ms→1ms）无门禁；`test-perf` 量的是扫描/缓存/fd/idle | 门禁缺失 | ❌ | 待修 |
+| `A2-10` | 低 | `test-stream.mjs:101` 断言体是字面 `true` | 恒真断言 | 该行恒绿 | 待修 |
+| `A2-11` | 低 | `test-mv.mjs:90`/`:101` 无 ffmpeg 时退化为 `check(…, true, 'skipped')`，门禁无法区分「跳过」与「通过」 | 条件恒绿 | 本机否 / 无 ffmpeg 时是 | 待修 |
+| `A2-12` | 低 | `run-all.mjs:34` 优先级 bug 吞掉 stderr（`stdout ?? '' + stderr ?? ''`），导入期崩溃的套件只显示 `FAIL <name>` 无诊断 | 门禁可用性 | — | 待修 |
+| `A2-13` | 低 | `test-audit.mjs:76` BEM 检查是唯一无非空护栏的检查，CSS 解析器失配即恒绿 | 潜在恒绿 | 本机否 | 待修 |
+| `A2-14` | 低 | Windows 保留设备名 / 结尾点空格过滤（`lib/host.js:1190-1201`）无测试，README:42 明确主张 | 门禁缺失 | ❌ | 待修 |
+| `A2-15` | 低 | `/api/apply` 串行锁（`lib/host.js:1720-1727`）无并发用例，README:42 主张消除竞态 | 门禁缺失 | ❌ | 待修 |
+| `A2-16` | 低 | 旧 `lib/state.json` 迁移（`lib/host.js:933-942`）无测试 | 门禁缺失 | ❌ | 待修 |
+| `A2-17` | 低 | 文件名序号清洗只断言「合法前导数字被保留」，**清洗行为本身未断言** | 门禁缺失（部分） | ❌ | 待修 |
+| `A2-18` | 低 | `lib/host.js:327` 注释「差 >10s 一律不自动写入」与实现不符：`delta == 10` 时 `durationScore` 返回 `0.55` 仍放行（`:494-496`、`:555-556`） | 文档与代码不符（注释） | ❌ | 待修 |
+| `A2-19` | 低 | 本仓库无 `typescript`、无 `tsconfig.json`，`tsc --noUnusedLocals` **无法执行** | 约定不可执行 | — | 已修（§4） |
+
+#### 5.6.1 `A2-01` 证据（凭据落盘，实测）
+
+- 代码：`lib/host.js:1736-1757`，注释自称「TEMP DIAGNOSTIC（排查完删掉）」，`await fs.appendFile('/tmp/dshm-probe.log', JSON.stringify({ …, url: req.url, host, origin, referer, cookie: !!cookie, ua }) + '\n')`，位于 `dispatch()` 开头、**路由分发之前**
+- 已提交：`git show HEAD:lib/host.js | grep dshm-probe` → 命中 `:1740`；`git status --porcelain lib/host.js` 为空（工作树 == HEAD `389b6e5`）
+- 实机文件：`/tmp/dshm-probe.log` **549842 字节 / 2620 行**，`grep -c 'system-\(art\|stream\)?t='` → **5 行含能力 token**；`"via"` 分布 `legacy=2495 / fetch=120 / system-art=5`
+- scope 越界：`dsh-plugin.json` 的 `fs.write` scope 是「当前音乐目录内、且在播放列表中的音频文件」，`storage.local` scope 是 `$DSH_HOME/storages/…` + localStorage —— **`/tmp` 两者都不是** → 违反 `permission.zh.md:55`
+- 安全属性：文件权限 `-rw-r--r--`（**同机其他用户可读**）
+
+#### 5.6.2 `A2-03` 证据（为什么 18/18 全绿却仍漏掉 `A1-01`）
+
+逐套件统计「驱动哪条传输面」（`grep -c connection` / `grep -c webServer`）：
+
+```
+test-desktop-routes.mjs                  connection=10  webServer=5   ← 唯一驱动 connection.fetch
+test-stream/security/perf/lifecycle/
+     match/apply/mv/hot-reload           connection=0   webServer=1   ← 全靠旧 /dsh-music 前缀
+test-progress/resume/refresh-remap/
+     restore-race/teardown/delete/
+     client-shell/match-client/audit     connection=0   webServer=0   ← 纯 jsdom，打桩 fetch
+```
+
+`test-mv.mjs:50` 只注入 `webServer: { register }`，**没有 `connection`** → 它验的是旧前缀通路。而 `mv`/`mvfile`/`caps`/`mvlib`/`mvconvert` **不在 `FETCH_ROUTES`** 里，`connection.fetch` 又是精确匹配 → **Desktop 走的那条通路既不可达、又零覆盖**。客户端确实在调它们（`lib/client.js:1136-1138`、`api("/api/mv?id=")`）。这解释了 `A1-01` 为什么能在「MV 套件 PASS」的同时为真。
+
+#### 5.6.3 Lead 自身错误（本轮建立，必须单列）
+
+| ID | 我做了什么 | 为什么错 | 已修 |
+| --- | --- | --- | --- |
+| `E-01` | 在 README「依赖、权限与失败边界」里写「`fs.delete`：删除曲目（**macOS 走 `~/.Trash`**）」 | 我看到 `host.js:1992` 有 `~/.Trash` 字符串就当成删除路径，**没核实它属于 MV 的 `deleteOriginal` 分支**；实际 `/api/delete` 是 `fs.unlink` 永久删除（且与 README:17 自相矛盾） | README 待修（`A2-05`） |
+| `E-02` | 在 README 里写「`npm test` 中的匹配套件会真实联网……**不是离线测试**」 | 我**只看了套件名字**（"online metadata match"）就下结论，没读 `test-match.mjs:5` 的 `hermetic` 自述与 `globalThis.fetch` 桩 | README 待修（`A2-04`） |
+| `E-03` | 在 AGENTS.md §4 把 README:270 的「真实 Chromium + CDP 量布局」写成既有防线 | 把 **README 的自我描述当成事实**，没验证仓库里有没有浏览器启动器 | ✅ 已修 §4（标注为 ❌ 不存在） |
+| `E-04` | 在 AGENTS.md §4 写「改完用 `tsc --noUnusedLocals --noUnusedParameters` 扫一遍」 | 抄自 `.jspace/WORKSPACE.md` 的历史条目，没核实 `typescript`/`tsconfig.json` 是否存在 | ✅ 已修 §4（标注为不可执行） |
+
+> **教训（已沉淀为 §6.1 第 2 条）**：**README 的自我描述不是事实来源。** 任何「本仓库已有 X 防线 / 已有 Y 约定」的说法，引用前必须实测存在（`glob`/`grep`/实跑）。
+
+#### 5.6.4 第 2 轮结论
+
+现有门禁的**骨架真实有效**（18/18 实跑通过；失败能真的非零 —— 负向对照 `DSH_MUSIC_HOST=/dev/null node scripts/test-perf.mjs` → exit 1；18 个 `test-*.mjs` 与 `run-all.mjs` 的 `suites` 集合完全一致；静态审计 6 项与按钮接线防线均落地；封面策略 / 安全栅栏 / 生命周期有硬断言）。**但**它强在「功能对不对」与「句柄涨不涨」，在三个面是空的：
+
+1. **声明面 ↔ 注册面 ↔ 分派面一致性**（`A1-01`）
+2. **传输面覆盖** —— 1/10 套件打在生产使用的通路上（`A2-03`），这使第 1 类缺陷**表现为绿灯**
+3. **module 级容器与子进程的释放**（`A1-03`）
+
+### 5.7 第 3 轮 —— Lifecycle 释放面（客户端 + 宿主）
+
+基线沿用 §5.3 的 18/18 PASS（本轮只读，未重跑）。独立审计员逐行读 `lib/index.js` / `lib/host.js` / `lib/client.js` / `lib/tagwriter.js` / `lib/http-bridge.js` 及 cordis、`dsh-client-runtime` 的 vendored 实现。
+
+| ID | 严重度 | 一句话 | 规范依据 | 门禁 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| `A3-01` | 高 | **客户端库轮询定时器在停用后自我续期**：`halt()` 只在 `pollTimer !== null` 时能清；若 teardown 撞上某次轮询在飞（回调开头已把 `pollTimer` 置 null），该请求 404 → `catch { schedulePoll(); }` 再武装，而 `halt()` 的 `set()` **不重置 `scanning`** → `if (!state.scanning) return` 永不成立 → **永久 1.5s 请求风暴** | `lifecycle.zh.md:107`、`:29` | ❌ 盲点 | 待修 |
+| `A3-02` | 中 | **卸载与在飞 `ensureHost` 竞态**：`ensureHost` 有两个 await 挂起点，teardown effect 只把 `host = null`，**无 `disposed` 标志**；挂起的 IIFE 恢复后照样 `host = module.createHost(ctx)` → 产生**无人持有的新 host**（会 `startScan` + 可能拉起 tag worker），此后再也没人 `dispose()` 它 | `lifecycle.zh.md:29`、`:107` | ❌ 盲点 | 待修 |
+| `A3-03` | 中 | **客户端 player 经 `window.__dshMusicPlayer` 跨 activation 复用**：bundle HMR 换代后新 module 不再 `createPlayer()`，直接接管旧 closure 的全部 handler / timer / `playingId`；新旧 activation 的 disposer 操作**同一个 player** → 旧 disposer 会对新实例仍在用的对象调 `halt()` | `lifecycle.zh.md:125`、`:127` | ❌ 盲点 | 待修 |
+| `A3-04` | 中 | 停用后 `document.body` 上的自建 DOM（`.dshm-mvPark` + `<video>`）与 `window.__dshMusicPlayer` **从不释放**；`halt()` 既不 `remove()` 也不清 window 键 | `lifecycle.zh.md:107` | ❌ 盲点 | 待修 |
+| `A3-05` | 中 | **Activation context 读取未在 manifest 声明的产品 API**：`ctx.get('directoryPicker')`（`lib/host.js:1907`）、`ctx.locale`（`lib/client.js:3169`）、`connection.fetch`（`lib/index.js:145`）都**不是** `requires.contracts` 条目 —— `dsh-plugin.json` 全文 grep `directoryPicker` **0 处**，`connection.fetch` 只出现在权限 scope 文本与扩展 `spec.transport` 里 | `lifecycle.zh.md:82` | ❌ 盲点 | 待修 |
+| `A3-06` | 低 | `registerFetchRoutes` 组内按**注册正序**摘除（11 条路由在一个 `ctx.effect` 里注册，对 coordinator 只有 1 个 disposer；逆序条款绑定 scope 的 disposer 序列，不绑定插件自建数组次序）→ **规范未覆盖** | `lifecycle.zh.md:105` | ❌ 盲点 | 接受 |
+| `A3-07` | 低 | `mvconvert` 用 `spawnSync(ffmpeg, …, { timeout: 30 * 60 * 1000 })`（`lib/host.js:1983`）→ 事件循环被独占至多 **30 分钟**，deactivation 无法推进，且无句柄可 `kill`、无 timeout 诊断 → 规范 L121 义务主体是 coordinator，但 **L145 描述的风险真实存在** | `lifecycle.zh.md:121`、`:145` | ❌ 盲点 | 待定 |
+| `A3-08` | 低 | `matchWaiters`（`lib/host.js:378`）无 `clear`/`delete` 路径 —— 但会随任务完成自行 `shift` 排空，上游请求都带 `AbortSignal.timeout`，**不是真实泄漏**；不满足新增 §2.2「容器必须留 clear 路径」的字面要求 | 仓库自定 §2.2 | ❌ 盲点 | 接受（非泄漏） |
+
+#### 5.7.1 `A3-01` 证据（与历史 bug 同族，但修复是逐路径的）
+
+```
+lib/client.js:934-946   pollTimer = setTimeout(async () => { pollTimer = null;
+                          if (!state.scanning) return;          ← 唯一守卫
+                          try { applyLibrary(await api("/api/library")); }
+                          catch { schedulePoll(); }             ← 失败即再武装
+lib/client.js:989       schedulePoll();                          ← 成功路径也再武装
+lib/client.js:1771-1799 halt: clearTimeout(pollTimer); … set({ playing: false,
+                          pendingDelete: -1, current: -1, error: null, … })
+                                                     ← set() 里没有 scanning
+lib/client.js:790       scanning 初值
+```
+
+历史 bug 复核（**确已修好**）：自动续播 `recoverAt`（`:1591-1602`）与自动跳曲（`:1668-1670`）经 `halt()` → `stopAudio()`（`:857-862`，`playingId = null`）+ `set({current:-1})` 使三处延迟回调的守卫全部落空，且 `test-teardown.mjs:74-83` 有回归断言。**但修复是逐路径的、不是结构性的** —— 轮询这条同类路径漏了。
+`test-teardown.mjs:44` 的假 payload 写死 `scanning: false`，**结构上测不到**。
+
+#### 5.7.2 本轮推翻的怀疑（必须记录，避免后续重复怀疑）
+
+- **`ctx.slots.inject(...)` 未显式包 `ctx.effect` → 不是违规。** 读 vendored `@deepseek-ai/dsh-client-runtime` 实现确认：它**内部调用调用者的 `ctx.effect`**（`lib/client.js:55-113`，`:57` `const disposeController = ctx.effect(...)`、`:81` `const disposeEffect = ctx.effect(callback, ...)`；`:15` 文档写明「declaration injection through the caller's ctx.effect (fiber unload collects both)」）。→ `lib/client.js:3183` **符合** L29。
+- **插件内部路由已在该换新 module 后重新解析**：`handleFetch`/`handleRequest` 每次 `await ensureHost()`（`lib/index.js:98-124`），路由**不**随实例重复注册 → 宿主侧**不存在**「旧路由被转移到新实例」。L125/L127 的违规面只在客户端（`A3-03`）。
+
+#### 5.7.3 第 3 轮符合项（逐条款证据）
+
+| 规范条目 | 判定 | 证据 |
+| --- | --- | --- |
+| L29 激活期注册绑 cleanup scope | ✅ 符合 | 宿主 `lib/index.js:146-162`/`:170-177`/`:182-191`；客户端 `lib/client.js:3169`/`:3174`/`:3175-3182`；`ctx.slots.inject` 见 §5.7.2 |
+| L107 自建资源由 deactivate 释放 | ⚠️ 大部分符合 | ✅ `lib/host.js:2182-2191`（`failAllTagJobs` + `terminate` + 置 null）、`:1281-1287`（逐 job 清 timer/resolve/delete）、`:2179-2181`（清三类缓存）、`:2177`+`:1543`（`scanGeneration` 协作取消在飞扫描）、`:1312`/`:1336` 双 `unref()`；客户端 `lib/client.js:1770-1799`（`halt()` 清 `pollTimer`、`matchSeq += 1` 作废在途 match、`stopAudio`、清 MediaSession）。缺口见 `A3-01`/`A3-02`/`A3-04`/`A1-03` |
+| L105 关闭顺序/至多一次/失败不阻塞 | ✅ 符合 | vendored cordis `lib/index.js:1168-1184`：`:1175` `if (disposing) return disposalTask`（幂等）、`:1178` `disposables.splice(0).reverse()`（逆序）。插件侧 `lib/index.js:154-160` 逐条 try/catch；`host.dispose()` 两处调用点都 try/catch（`:69-73`、`:184-189`） |
+| L133 不持久化 context/凭据/异常对象 | ✅ 符合 | 持久化面仅 `lib/host.js:1035-1043`（只写 `{dir}`，temp+rename 原子）与 `lib/client.js:680-702`（只写音量/循环/排序/上次 id 与秒数）。能力 token `:1520` `randomUUID()` 每实例新生成，只出现在 `:2110-2113` 的 `/session` 响应里；`grep console.* lib/host.js` = **0 处** |
+| L165 / L22 不得依赖 module 卸载完成清理 | ✅ 设计符合 | `lib/index.js:54-58` 注释**主动承认** ESM 注册表条目无法卸载，并用 `RELOAD_MIN_INTERVAL_MS` 限流；清理靠显式 `host.dispose()`（`:68-75`、`:182-191`）而非 GC；`dispose()` 主动清 module 级缓存（`lib/host.js:2179-2181`）避免被不可回收的 module 钉住 |
+| L139 Observer 不得改变状态机 | 规范未覆盖 | `grep ctx.on/ctx.emit/ctx.before/ctx.after lib/` = **0 处**，无监听面 |
+| L5 / L58 纯声明 facet 无 activation instance | 规范未覆盖 | `dsh-plugin.json:7-12` 只有可执行 `facets.host`；客户端 UI 走 `contributes["x-dev.dsh-std.extensions"]` 由宿主装配 |
+| L118 停止后验证 support/owner 移除 | 规范未覆盖（coordinator 职责） | 外部机械验证：`test-lifecycle.mjs:62`（route unregistered on dispose）、`:69`（在飞扫描取消）、`:82`/`:83`（5 轮无资源/handle 增长）、`:84`（idle CPU） |
+| L121 超 deadline 留 timeout 诊断 | 规范未覆盖（无 deadline 机制） | 仅 tag worker `TAG_WORKER_TIMEOUT_MS`（`:1275`、`:1325-1335`）超时后 resolve 带 `'标签写入超时'` 而非报告成功 —— 符合该条**精神**。风险面见 `A3-07` |
+
+#### 5.7.4 第 3 轮结论
+
+生命周期维度的**结构性事实**：宿主侧（`lib/index.js` + `lib/host.js`）对 L29/L105/L133 落实得比较扎实，且作者**主动承认**了 module 不可卸载；**缺口集中在两类**：
+
+1. **「teardown 之后还能再启动」** —— `A3-01`（客户端轮询自我续期）、`A3-02`（宿主再创建孤儿 host），两者都缺同一个状态位（`disposed`）。这是 §2.2 高危区的**真实复发形态**，只是换了个入口。
+2. **客户端 activation 的 instance 归属** —— `A3-03`/`A3-04`：`window` 全局复用让 instance 边界消失，disposer 变成共享对象上的操作。
+
+#### 5.7.5 本轮判定撤回（`§6.2` 要求：判定推翻必须新写一条，不覆盖旧条目）
+
+审计员在补读完 `lib/host.js:1710-1930`（首轮漏读的区间，正含 `A2-01` 探针）后**主动撤回**自己先前的判定：
+
+| 条款 | 原判定 | 改判 | 原因 |
+| --- | --- | --- | --- |
+| `L133` 不持久化 context / 凭据 / 异常对象 | 符合（并把「token 不进日志」列为证据） | **违规** | 反例即 `A2-01`：`lib/host.js:1740` 把 `req.url`（含 `?t=<能力token>`）落盘。该条已由 `A2-01` 登记，此处只更正判定 |
+
+**方法错误（必须沉淀，这是本轮最有价值的一条）**：审计员用 `grep "console\.\(log\|error\|warn\|info\)"` 来证明「凭据不进日志」，得出「`lib/host.js` 0 处 → 符合」。**但落盘型诊断走的是 `fs.appendFile`，代码里根本没有 "log" 这个词。**
+
+→ **核查「是否把凭据写进日志/诊断」必须按「写盘 / 输出动词」搜索，不能按 "log" 这个词搜索。** 最小搜索面：
+
+```
+console.log|error|warn|info|debug   appendFile|writeFile|createWriteStream|writeFileSync
+process.stdout|process.stderr       第三方 logger（pino/winston/bunyan/…）
+```
+
+已沉淀为 §6.1 第 3 条。
+
+### 5.8 第 4 轮 —— Manifest 声明与契约一致性（manifest + composition）
+
+基线：`check-manifest.mjs` → **PASS**（只证 schema 结构，不证可激活）。独立审计员产出。
+
+| ID | 严重度 | 一句话 | 规范依据 | 门禁 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| `A4-01` | 高 | `endpoints` 三方漂移（= `A1-01` 的独立复核，不再单列） | 同 `A1-01` | ❌ | 待修 |
+| `A4-02` | 高 | **插件主功能在 manifest 上是未声明的**：会话视图 + 宿主传输只以「无 definition 扩展」声明；三个扩展 id 在 `lib/` 下**逐个 grep 均 0 命中**；pinned 投影把三条扩展并入 host facet，对无 definition 扩展只产出 `unknown-extension` **warning** | `manifest.zh.md:64`、`:62`、`composition.zh.md:110` | ❌ 盲点 | 待修 |
+| `A4-03` | 高 | **两条契约坐标是编造的**：`webserver.dsh/v1alpha1` 与 `browser.ui.dsh/v1alpha1` 在**整个 references 树 0 命中**、在 **DSH 0.1.7-rc.2 app.asar 里也 0 命中**；真实坐标是 `ui.dsh/v1alpha1`/`ContributionHost`（基线）与 `web.ui.dsh/v1alpha1`（adapter）。且 `requires.contracts` **无任何 required** → preflight 永不阻塞，可在**零端点注册**下「激活成功」（`lib/index.js:193-206`） | `manifest.zh.md:56`、`:64`、`composition.zh.md:80`、`:82`、`:143` | ❌ 盲点 | 待修 |
+| `A4-04` | 中 | `fallback` 文案方向写错且夸大：`webserver` 那条说「宿主没有 webServer 时…端点改挂 connection.fetch」——实际 `/api` 路由是**无条件优先注册**的，`webServer` 只注册 `/dsh-music` 旧前缀；「照常激活」掩盖了 7 个端点在无 webServer 形态下不可达 | `manifest.zh.md:98-101` | ❌ | 待修 |
+| `A4-05` | 中 | `prefix` 与精确路由语义冲突：声明 `HttpPrefixRoutes` 的 `prefix=/api/dsh-music` + `transport: connection.fetch`，代码注册 11 条**精确**路径，`webServer` 上注册的是另一个前缀 `/dsh-music` → 三处对不上 | `composition.zh.md:65`、`:143` | ❌ | 待修 |
+| `A4-06` | 中 | `ContributionHost` 无 surface 列表 → **结构上永远形成不了 agreement**（Community v0.15 的 contract 引用字段只有 apiVersion/kind/optional/fallback，装不下 surfaces） | `ui-contribution.zh.md:58`、`:115`、`composition.zh.md:80` | ❌ | 待修 |
+| `A4-07` | 低 | 顶层 `x-dsh-transition` 被 pinned 投影整段丢弃 → 跨版本声明不进入 provenance/composition（规范未覆盖：pinned validator 行为） | `manifest.zh.md:128` | ❌ | 接受 |
+| `A4-08` | 低 | `package.json dsh.compatibility` 范围宽于精确证据（0.1.6 线零记录，与 `x-dsh-transition` 的 0.1.6 实测叙述不对称） | `manifest.zh.md:113`（同原则） | ❌ | 待定 |
+| `A4-09` | — | **符合**：`dsh-plugin.json` ↔ `package.json` 重复项一致（version/license/source/entry/exports/files 全对得上）；`files` 无运行时必需文件缺口 | — | ✅ | — |
+| `A4-10` | 低 | `facets.host.apiVersion` 被 pinned 投影忽略（实现缺口，非本仓库违规） | `manifest.zh.md:107-108` | ❌ | 接受 |
+
+### 5.9 第 5 轮 —— Permission + 敏感数据泄漏
+
+基线沿用 18/18 PASS。独立审计员产出（只读，含对运行中 DSH 0.1.7-rc.2 asar 的只读核对）。
+
+| ID | 严重度 | 一句话 | 规范依据 | 门禁 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| `A5-01` | 高 | = `A2-01` 独立复核（凭据落盘）。新增实测：`/private/tmp/dshm-probe.log` 含 3 行 `system-art?t=` + 2 行 `system-stream?t=`，token 为 36 字符完整 UUID | `permission.zh.md:105`/`:111`、`storage.zh.md:101` | ❌ 盲点 | 待修 |
+| `A5-02` | 高 | **单一 token 同时授权 `art` 与 `stream`**（后者=任意曲目全量读），进程生命周期内**不过期、无轮换、不按 session 区分**；唯一撤销边界是 `createHost` 闭包销毁 | `permission.zh.md:82`/`:74-80`/`:99` | ❌ 盲点 | 待修 |
+| `A5-03` | 高 | **`A2-01` 的升级**：token 通道被**永久钉在豁免栅栏的旧前缀**（`lib/host.js:2109-2113` 基址硬编码 `/dsh-music`；`:2157-2159` system-* 显式豁免 `isUntrustedRequest`）。该通道**既不走平台会话鉴权、也不走插件栅栏**，唯一防线是 token 保密性 —— 而 token 已在**世界可读**文件里 ⇒ 同机任意进程可 `GET /dsh-music/api/system-stream?t=…&p=<任意曲目>` 读库内任意文件，无 cookie / 无 Origin | `permission.zh.md:86`、`:119` | ❌ 盲点 | 待修 |
+| `A5-04` | 高 | **受保护操作在副作用位置无 grant 检查**；`manifest.permissions` 运行期**零次读取**（`lib/` 全目录无 permission/grant 调用）。实际只有三道自建门：Host/Origin 栅栏、平台 `/api` 栅栏+会话、库成员 allowlist。且「用户确认」只在客户端 UI，**服务端无确认凭证** | `permission.zh.md:86`/`:55`/`:68` | ❌ 盲点 | 待修 |
+| `A5-05` | 中 | `ctx.get('directoryPicker')` 字符串查询未声明 Host service（已核实是**真实服务** `@deepseek-ai/dsh-host-directory-picker`；服务层无授权闸门，靠 OS 对话框） | `permission.zh.md:32`/`:55` | ❌ | 待修 |
+| `A5-06` | 中 | `net.fetch` 声明 scope **漏 `archive.org`**（`lib/host.js:345-356` 白名单 + `:897-900` 逐跳跟随实际请求），`dsh-plugin.json:47` 未列 | `permission.zh.md:55`/`:119` | ❌ | 待修 |
+| `A5-07` | 中 | 前缀/后缀判定 scope：新增 `lib/host.js:2011-2012`（mvlib 白名单前缀）、`:1048-1050`（expandHome `~/`）。**未发现可利用路径逃逸**（mvlib 后有 `path.resolve`+`rootWithSep`；扫描用 `readdir(withFileTypes)` 整体跳过符号链接） | `permission.zh.md:119` | ❌ | 待修 |
+| `A5-08` | 中 | **三条 fs scope 都小于实际调用面**：`fs.write` 最严重（`/tmp` 探针 `:1740`、`/tmp` MV 缓存 `:238`/`:248`、`~/.Trash` `:1993-1995`、非播放列表新文件 `:1978-1983`）；`fs.read` 另读 `$DSH_HOME`（`:1040`）与 `node_modules`（`:2015-2029`）；`fs.delete` 含 `rm /tmp`（`:1986`） | `permission.zh.md:55` | ❌ | 待修 |
+| `A5-09` | 中 | 自建存储**无任何稳定错误码**（`PERMISSION_NOT_GRANTED`/`INVALID_KEY`/`INVALID_VALUE`/`QUOTA_EXCEEDED`/`STORAGE_UNAVAILABLE` 全缺）；`saveState` 全量吞错（`:1042-1044`）后 `/dir` 仍返回 200 + dir（`:1793-1795`）⇒ **持久化失败被报告为成功** | `storage.zh.md:87-93`、`:83` | ❌ 盲点 | 待修 |
+| `A5-10` | 低 | uninstall 保留规则未声明：README:81 只声明不动音乐文件，未声明 `$DSH_HOME/storages/dsh-music-player.json` 的保留/清理 | `storage.zh.md:81` | ❌ | 待修 |
+| `A5-11` | 低 | 包内 `lib/state.json` 被当状态来源（`:942`、`:1024-1032`），工作区该文件含开发机绝对路径；但 `.gitignore` 与 `files` 白名单均排除它 ⇒ 不进 git / 不进 npm 包，风险仅限本机 | — | ❌ | 接受 |
+
+**第 5 轮最重要的结构性发现**：`A5-03` + `A5-04` 合起来说明 —— **插件的实际信任模型与它自己声称的不一致**。`x-dsh-transition` 写「信任边界交给连接层」，但（a）`createSharedFetchHandler` **自身不含栅栏与鉴权**（栅栏只在 `webServer` 存在时挂外层路由），（b）token 通道显式豁免栅栏并钉在旧前缀。审计员对「无 webServer 形态下谁在鉴权」标注为**推断**（0.1.6 desktop-host 源码不可得）。
+
+#### 5.9.1 第 5 轮符合项（这批是真做对的）
+
+封面 XSS 面系统性关闭（MIME allowlist `:301-308` + 读取再校验 `:1704-1709` + nosniff + 8MB 上限 `:310`/`:917`/`:924`）；封面代理非任意跳板（仅 https `:882`、主机白名单 `:883`、redirect manual 每跳重校验 ≤4 跳 `:888-906`）；请求体 64KB 上限 + 413（`:1008-1021`）；路径包含判定 + 库成员 allowlist **双重**且 stream/delete/match/apply 共用（`:1361-1373`、`:1454-1477`、`:2124-2131`）；**故意不泄漏 cwd**（自造中文错误 `:1586-1589` + 回归断言）；token 随机源合格（`randomUUID` `:1520`）+ 精确等值比较；状态写入原子 tmp+rename（`:1038-1041`）；客户端只写 3 个 `dsh-music:*` 键、**token 只存模块变量不落 localStorage**；`lib/host.js` **零 console / 零 logger / 零遥测**。
+
+### 5.10 编号裁定与更正记录（第 6 轮 · 收口）
+
+**编号裁定**：5 轮审计并行产出时出现过 ID 冲突。现按「**先写好者占号，后到者让号**」一次性裁定，此后不再改号：
+
+| 轮次 | 维度 | ID 段 | 状态 |
+| --- | --- | --- | --- |
+| 第 0 轮 | 规范落盘时既有偏差 | `D-01`…`D-06` | 已登记 |
+| 第 1 轮 | Lead 自审：路由注册面 + lifecycle | `A1-01`…`A1-06` | 已登记 |
+| 第 2 轮 | 门禁有效性 + 传输面覆盖 | `A2-01`…`A2-19` | 已登记 |
+| 第 3 轮 | Lifecycle 释放面 | `A3-01`…`A3-08` | 已登记 |
+| 第 4 轮 | Manifest + composition | `A4-01`…`A4-10` | 已登记 |
+| 第 5 轮 | Permission + 敏感数据泄漏 | `A5-01`…`A5-11` | 已登记 |
+| 第 6 轮 | 收口：编号裁定 + 更正记录 | 本节 | — |
+
+> 审计员各自报告里的临时编号（如 permission 轮的 `A4-01…A4-09`、lifecycle 轮的 `A2-01…A2-08`）**一律以上表为准**；被去重的条目已在其原轮次注明「= `Axx-xx` 独立复核」。
+
+**更正记录 1 —— `D-05` 状态由「已修」改为「待修」**
+
+我（Lead）在第 0 轮把 `D-05` 标为「已修」，理由是「给 `browser.ui.dsh/v1alpha1` 补了 `optional: true` + `fallback`」。**该判定错误**，第 4 轮 `A4-03` 证明：
+
+- `browser.ui.dsh/v1alpha1` 与 `webserver.dsh/v1alpha1` 在 **references 全树 0 命中**、在 **DSH 0.1.7-rc.2 app.asar 里也 0 命中** —— 坐标是**编造的**；
+- 给编造的坐标补 `fallback`，只是让**空壳声明看起来完整**，协商层永远拿不到 definition；
+- 真正的修复是**改用真实坐标**（`ui.dsh/v1alpha1` / `web.ui.dsh/v1alpha1`）或**删掉这两条声明**并在 README 说明插件走自建栅栏。
+
+→ **教训（已进 §2.11）**：`fallback` 不能把不存在的坐标洗成合规声明。**"补了个字段"不等于"修好了"。**
+
+**更正记录 2 —— 第 3 轮 `L133` 判定由「符合」改为「违规」**
+
+见 §5.7.5。根因是审计员按 `"log"` 这个词搜索日志面，而落盘型诊断走 `fs.appendFile`。已沉淀为 §6.1 第 3 条。
+
+**第 6 轮结论**：AGENTS.md 现在与代码实际状态一致（含 5 处**明确标注的编造/不实声明**），但**代码本身一行未改** —— 41 条台账条目中 **0 条已修**，其中 **12 条为高**。下一步不是继续审计，是**修**。
+
+
+---
+
+## 5.11 第 7 轮 —— 独立复核（Lead 亲自实测，不采信审计员转述）
+
+**动机**：`§6.1` 第 2 条禁止把描述当事实。前 6 轮中部分载荷性主张来自审计员报告，我未亲自验证。本轮逐条实测，**结果全部成立**；并**纠正了我自己的一个无效检验方法**。
+
+| 被复核主张 | 我的检验 | 结果 |
+| --- | --- | --- |
+| `A4-03` 两条坐标是编造的 | `grep -rn "webserver\.dsh\|browser\.ui\.dsh\|HttpPrefixRoutes" references/` → **0 命中**；同时在 DSH 0.1.7-rc.2 运行时搜 `webserver.dsh` / `browser.ui.dsh` → **0 个文件** | ✅ **成立** |
+| `A4-03` 真实坐标存在 | `ui-contribution.zh.md:55` 实测有 `ui.dsh/v1alpha1` + `ContributionHost` | ✅ **成立** |
+| `A5-03` 基址硬编码旧前缀 + 回显 Host | `lib/host.js:2111-2112` 实测 `'http://' + host + '/dsh-music/api/system-art?t=' + …`，`host` 取自 `req.headers.host` | ✅ **成立**（逐字） |
+| `A5-03` `system-*` 豁免栅栏 | `lib/host.js:2157-2160` 实测 `isSystemPath` 含 4 条 system-art/system-stream 路径，`if (!isSystemPath && isUntrustedRequest(req)) throw 403` | ✅ **成立**（逐字） |
+| `A3-01` 轮询自我续期 + `halt()` 不复位 `scanning` | `lib/client.js:934-946` 实测 `catch { schedulePoll(); }`；`scanning:` 全文**只出现在 `:790` 初值**，未出现在 `halt()` 的 `set({…})` 里 | ✅ **成立** |
+| `A2-04` 匹配套件是离线测试 | `scripts/test-match.mjs:5` 实测原文「All upstream traffic is stubbed, so the suite is hermetic.」；`:45` `globalThis.fetch = async …` | ✅ **成立** |
+| `A5-09` 吞错后仍报成功 | `lib/host.js:1042-1044` 实测 `catch { /* best-effort */ }` 无重抛；`:1795` `sendJson(res, 200, libraryPayload(library))` 无条件 200 | ✅ **成立** |
+| `A1-05` 错误文本含文件名 | `lib/host.js:1472` / `:1474` 实测 `'文件不存在：' + track.name` | ✅ **成立** |
+
+### 5.11.1 我自己的无效检验方法（必须记录）
+
+**首次检验 `A4-03` 的 asar 主张时，我用了 `grep -c <pattern> bin.js`，对 `webserver.dsh` / `browser.ui.dsh` / `HttpPrefixRoutes` 全部得到 `0` —— 但同一个命令对宿主**确实在用**的 `conversation.view` 也得到 `0`。**
+
+（`conversation.view` 由 `lib/client.js:3183-3190` 注册，宿主必然认识。）
+
+→ 说明**检验方法本身无效**（搜错了产物：`bin.js` 是 CLI 入口，不是 client bundle）。**若我当时不跑这个对照，就会用一个无信息的 `0` 去「证实」一条主张。**
+
+**纠正后的方法**：先用一个**已知为真**的字符串校准搜索面（`conversation.view` → 命中 `cordis-client-runner/lib/client.js`、`ui-chat/lib/client.js` 等），再在同一批产物里搜待证字符串。
+
+**结论**：`webserver.dsh` / `browser.ui.dsh` / `HttpPrefixRoutes` 在**整个 DSH 运行时 0 个文件**，而 `conversation.view` 命中 —— 方法有效后结论仍成立。
+
+> **教训（应并入 `§6.1`）**：**任何「0 命中」的结论，必须先用一个已知为真的样本校准同一搜索面。** 否则 `0` 可能只是「搜错了地方」。这条与前两轮的「按动词搜日志」「不把描述当事实」是同一族错误：**检验方法本身也需要被检验。**
+
+### 5.11.2 本轮附带发现（比台账原文更精确）
+
+`ContributionHost` 与 `ui.dsh/v1alpha1` 在 **DSH 0.1.7-rc.2 运行时同样是 0 命中** —— 即 **DSH 宿主根本没有实现 Community 的 `ContributionHost` 契约**，它只用字符串 slot（`conversation.view`）。
+
+因此 `A4-06`（`ContributionHost` 无 surface 列表 → 永远形成不了 agreement）的真实严重度**高于**原文：不只是「manifest 写不下列 surfaces」，而是**该契约在 DSH 侧根本没有对端实现**。→ `A4-06` 严重度由「中」**上调为「高」**，并新增说明（按 `§6.2`，这是判定变更，新写一条而非覆盖）。
+
+### 5.11.3 第 7 轮结论
+
+- 前 6 轮的载荷性主张**经 Lead 亲自实测，无一条被推翻**；台账与代码状态一致。
+- 新增 1 条判定变更（`A4-06` 中 → 高）与 1 条方法学教训（校准搜索面）。
+- **审计维度已全部覆盖**：manifest+composition（第 4 轮）、lifecycle（第 3 轮）、permission+storage（第 5 轮）、门禁有效性（第 2 轮）、声明面/注册面（第 1 轮）—— 5 个维度各有独立审计员 + Lead 复核。
+- **仍未做的事**：47 条台账 **0 条已修**；`§6.3` 的 17 条门禁规格**尚未实现**。这两项不属于本目标（目标是「审计 + 迭代 AGENTS.md」），属于后续修复目标。
+
+---
+
+## 5.12 第 8 轮 —— 修复（按 Lead 提出的顺序执行）
+
+基线：`node scripts/run-all.mjs` → **21/21 PASS**（新增 3 套）。每条修复都补了门禁，且**每条门禁都做了负向对照**（把修复回退 → 门禁必须变红）。
+
+| 条目 | 修复内容 | 新增门禁 | 负向对照结果 |
+| --- | --- | --- | --- |
+| `A2-01` | 删除 `lib/host.js` 的 `TEMP DIAGNOSTIC` 探针（21 行）；删除随之成为死代码的 `dispatch(req,res,entry)` 的 `entry` 参数（3 处调用点同步）；清掉实机上已长到 **641,835 B** 的 `/tmp/dshm-probe.log` | `test-audit.mjs` ⑦「写盘目标白名单」+「凭据不得进入写盘调用」 | 注入探针 → **2 项 FAIL / exit 1**（`'/tmp/dshm-probe.log'` 不在白名单 + 凭据进写盘） |
+| `A1-01` | `FETCH_ROUTES` 11 → 16 条（补 `mv`/`mvconvert`/`mvlib`/`mvfile`/`caps`）；`system-art`/`system-stream` 记为**具名例外** `LEGACY_ONLY_ROUTES` | 新建 `test-route-consistency.mjs`：`host.js` 分派表 == `FETCH_ROUTES ∪ LEGACY_ONLY_ROUTES` == manifest 登记表（三向相等 + methods 对齐） | 删 `FETCH_ROUTES` 一条 → **FAIL `mvfile`**；删 manifest 一条 → **FAIL `mvlib`** |
+| `A2-03` | `test-desktop-routes.mjs` 的 `expected` 改为**从 `lib/host.js` 分派表推导**（不再手工抄），并加「注册面不得超出推导集合」的反向断言 | 同上 | 手工抄的旧列表结构上无法发现漂移 → 推导版本能（见 `A1-01` 对照） |
+| `A2-06` | README 端点表 10 → **18 条**（补 `session`/`caps`/`mv`/`mvconvert`/`mvlib`/`mvfile`/`system-art`/`system-stream`），并写明 `system-*` 仅旧前缀可达及其代价 | 三方一致门禁已覆盖 manifest 面 | — |
+| `A2-02` | README 删掉不实的「真实浏览器量布局（headless Chrome + CDP）」防线主张，改为显式**没有布局测量能力**的警告；同时清掉该节一个**无配对开启的孤立代码围栏** | — | — |
+| `A3-01` | `lib/client.js`：加 `disposed` 闸门（`schedulePoll` 三处守卫）+ `halt()` 显式复位 `scanning: false` | 新建 `test-poll-teardown.mjs`：挂载→刷新进入扫描态→轮询在飞→teardown→释放在飞请求，断言此后 fetch 次数不增 | 回退 4 处修复 → **FAIL `before=2 after=3`**（请求风暴复现） |
+| `A3-02` | `lib/index.js`：加 `disposed`；`ensureHost` 的两个 await 之后、**赋值之前**复查；teardown effect 先置位再 dispose | 新建 `test-teardown-race.mjs`：用顶层延迟 400 ms 的 stub `host.js` 精确制造在飞 import 窗口，在窗口内 teardown，断言 `createHost` 调用数为 0 | 回退 4 处修复 → **FAIL `createHost calls=1`**（孤儿 host 复现） |
+| `A4-03` | `requires.contracts` 两条编造坐标**删除** → `[]`；`contributes` 扩展的 `browser.ui.dsh/v1alpha1` 换成基线里真实的 `ui.dsh/v1alpha1` / `UiContribution`；路由登记表移到顶层插件自有键 `x-dsh-music-player.transport` | 三方一致门禁新增：结构位置上的 `apiVersion` 值不得是已知编造坐标；非空 `contracts` 必须至少一条 `required` | 塞回编造坐标 → **2 项 FAIL**；只加一条纯 `optional` 契约 → **1 项 FAIL** |
+| `D-05` | 状态由「待修」改为**已修**：这次是真的删/换，不是补 `fallback` | 同上 | — |
+
+### 5.12.1 修复过程中新发现的两条事实（必须记录）
+
+1. **`system-art`/`system-stream` 不能注册到 `connection.fetch`** —— 原计划「7 个端点全部补注册」是**错的**。实测平台实现：`/api` 路由挂在 `webServer` 上，`admit()` 先判 `isTrustedApiRequest`（Host/Origin）**再要求 `browserAuth.isAuthenticated`**；而 `createSharedFetchHandler` 自身**不含栅栏与鉴权**（`packages/client/connection/lib/index.js:608-623` 只做精确查表，栅栏在 `:830-843` 的 `webServer` 路由里）。Chromium 内部取图带 `Origin: dsh-app://app`、不带会话 cookie ⇒ 走 `/api` 必然 403/401。**这两个端点必须留在插件自建的旧前缀上**，这是设计约束不是漏改。代价（无 `webServer` 时不可达）已写入 manifest 与 README。
+2. **`api()` 的 404 回落探测会污染端到端测试** —— 设计 `A3-01` 门禁时，我先后两版误判：第一版挂错了请求；第二版用 404 释放，结果 `api()` 自带的旧前缀回落探测（`lib/client.js:664-673`）凭空多打一次请求，被误读成「轮询再武装」。**在飞请求必须用非 404 状态码释放**，否则会把 `A1-02` 的行为混进 `A3-01` 的断言。这条已写进该套件的文件头注释。
+
+### 5.12.2 第 8 轮结论
+
+- **8 条台账条目已修**（`A2-01`/`A1-01`/`A2-03`/`A2-06`/`A2-02`/`A3-01`/`A3-02`/`A4-03`）+ `D-05` 状态更正。
+- **新增 3 套门禁、扩写 1 套**，套件总数 18 → **21**，全部 PASS。
+- **每条门禁都通过负向对照**：把修复回退后门禁确实变红，不是恒绿测试。
+- **仍未修**：`A1-02`（404 当信号 + 静默降级）、`A1-03`（孤儿 ffmpeg + 无界 Map）、`A1-04`、`A1-05`（错误面脱敏）、`A2-04`/`A2-05`（README 另外两处不实）、`A3-03`/`A3-04`（window 复用 + DOM 释放）、`A4-02`（扩展 id 无运行时对应）、`A5-02`/`A5-03`（token 三律）、`A5-04`（副作用前置授权）、`A5-06`/`A5-08`（scope 小于实际）、`A5-09`（失败不得报成功）等。
+
+---
+
+## 5.13 第 9 轮 —— 修复剩余 7 条高危
+
+基线：`node scripts/run-all.mjs` → **23/23 PASS**（新增 2 套）。每条都配门禁，**每条门禁都做过负向对照**。
+
+| 条目 | 修复内容 | 门禁 | 负向对照 |
+| --- | --- | --- | --- |
+| `A5-03` | ①基址**钉回环字面量**：新增 `loopbackAuthority(req)` 只从请求 Host 取**端口**，主机名固定 `127.0.0.1`（不再回显 Host）；②栅栏豁免**收窄**：`system-*` 仍豁免 Origin/Sec-Fetch（Chromium 内部发起必须豁免），但新增 `isLoopbackHostRequest(req)` 要求 Host 仍是回环 | `test-security.mjs` 新增 8 条断言 | 回显 Host → FAIL「host is the loopback literal」；去掉回环要求 → 2 条 FAIL |
+| `A5-02` | token **按用途分签**：`systemArtToken` / `systemStreamToken` 两个独立 `randomUUID()`；art 端点只认 art token、stream 端点只认 stream token | 同上（交叉使用必须 403） | 复用同一 token → 3 条 FAIL |
+| `A1-03` | ①`mvJobs` **有界**：`MV_JOBS_MAX = 32` + `MV_JOB_TTL_MS`，新增 `pruneMvJobs()`（终态条目 TTL 淘汰、**运行中的永不淘汰**）；②终态盖 `finishedAt`；③`dispose()` 调 `killAllMvJobs()`，对每个在飞子进程 `SIGKILL` 并清空容器 | 新建 `test-mv-teardown.mjs`（假 ffmpeg 自报 PID → dispose → 断言 PID 已消失）+ `test-audit.mjs` 4 条结构断言 | dispose 不 kill → **FAIL「child alive=true」**（孤儿进程复现） |
+| `A5-04` | 新增 `authorize(action, targetPath, scopes)`，在**7 个副作用位置**逐一校验目标路径落在已声明 scope 内（库目录 / 状态目录 / MV 缓存 / 回收站） | `test-audit.mjs`：每个 `fs.<mutator>` 必须包 `authorize(...)` 或引用 `authorize` 赋值出的变量 | 去掉一处 → **FAIL `fs.unlink(`** |
+| `A1-02` | ①判据改为**端点语义 + 正向识别**：只有「本来不该 404」的端点回 404 才算路由缺失信号（新增 `ROUTE_MISSING_404_ENDPOINTS`）；②旧前缀必须答出宿主数据对象（`looksLikeHostPayload`）才采纳；③`entryResolved` **只在采纳成功时置位**（可重入）；④降级写进 `state.hostEntry` 并渲染成可见提示（新增 `.dshm-notice` 类 + 中英文案） | 新建 `test-entry-fallback.mjs`（6 条）+ `test-audit.mjs` 5 条静态断言 | 去掉端点语义判据 → **FAIL**（静态断言） |
+| `A4-02` / `A4-06` | 删除 `contributes["x-dev.dsh-std.extensions"]` 两条**无 definition** 的条目（pinned 投影只产出 `unknown-extension` warning，`manifest.zh.md:62` 明确不能声称功能已生效）；真实绑定记录到顶层 `x-dsh-music-player.ui`（`package.json` 的 `exports["./client"]` + `dsh.client.platform` + 字符串 slot `conversation.view`） | `test-route-consistency.mjs`：不得声明 `x-*` 扩展行 + 记录的 slot 必须在 `lib/client.js` 里找得到 + `./client` 导出必须一致 | — |
+
+### 5.13.1 本轮推翻了我自己的一个设计（必须记录）
+
+`A1-02` 我第一版修复用了「5 秒探测冷却」来避免「每个 404 都探一次」。**这是错的**，被既有套件 `test-client-shell.mjs` 抓住：该套件模拟「宿主入口未重启」时，前面的 `/api/dsh-music/cover` 业务 404 已经启动了冷却，150 ms 后真正需要回落的 `/refresh` 被冷却跳过 → UI 出现错误条。
+
+→ **「冷却窗口」与原来的「一次性标志」是同一类错误**：都让**无关的业务 404** 影响真实回落机会。正确判据是**端点语义**（这个端点的 404 到底意味什么），不是时间窗。改成 `ROUTE_MISSING_404_ENDPOINTS` 后，`cover`/`mv`/`stream` 这类业务 404 完全不参与入口判定。
+
+### 5.13.2 本轮删掉了一条没有判别力的断言
+
+`test-entry-fallback.mjs` 里我曾用「`/cover` 的业务 404 不得触发探测」做断言，但负向对照**没有变红** —— 因为 jsdom 不加载 `<img>`，客户端根本不会请求 `/cover`。**没有判别力的断言等于没断言**，已删除，改由 `test-audit.mjs` 的精确静态断言（grep 条件表达式本身）把守，并验证该静态断言能被回退触发。
+
+### 5.13.3 第 9 轮结论
+
+- **13 条台账条目已修**（`D-05` + 12 条），**高危从 13 条降到 0 条**（`A4-06` 已通过「不声明」解决）。
+- 套件 18 → **23**，全部 PASS。
+- 存量未修项从「7 条高危」变为「若干中/低 + 明确接受项」，逐条见 §5.1 与各轮小节。

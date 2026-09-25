@@ -140,6 +140,55 @@ const bigLib = await waitScan();
 check('MAX_TRACKS caps a single directory', bigLib.tracks.length === 5000, 'tracks=' + bigLib.tracks.length);
 check('a capped scan is reported as truncated', bigLib.truncated === true, 'truncated=' + bigLib.truncated);
 
+// ── A5-02 / A5-03：系统取图 / 取媒体凭证通道 ────────────────────────────────
+// 这条通道自建路径凭证（`?t=<randomUUID>`），不走平台会话，所以三条性质必须有回归：
+//   ① 按用途分签：art 与 stream 用**不同**的 token，且互不通用；
+//   ② 基址钉回环字面量：主机名不跟着请求 Host 走（Host 是外部输入）；
+//   ③ 栅栏豁免只到 Origin / Sec-Fetch 为止 —— Host 仍必须是回环。
+const port = server.address().port;
+const sessionViaHost = (hostHeader) => new Promise((resolve, reject) => {
+  const request = httpRequest({ host: '127.0.0.1', port, path: '/dsh-music/api/session', method: 'GET', headers: { host: hostHeader } }, (res) => {
+    let body = '';
+    res.on('data', (c) => { body += c; });
+    res.on('end', () => resolve({ status: res.statusCode, body }));
+  });
+  request.on('error', reject);
+  request.end();
+});
+
+// 用 loopback 别名 localhost 取会话：栅栏放行，但返回的基址必须写成 127.0.0.1
+const viaLocalhost = await sessionViaHost('localhost:' + port);
+let session = null;
+try { session = JSON.parse(viaLocalhost.body); } catch { /* 下面会报失败 */ }
+check('session is reachable over a loopback alias', viaLocalhost.status === 200 && session !== null, 'status=' + viaLocalhost.status);
+const artToken = session === null ? null : new URL(session.systemArtBase).searchParams.get('t');
+const streamToken = session === null ? null : new URL(session.systemStreamBase).searchParams.get('t');
+check('A5-02 the art and stream tokens are different',
+  artToken !== null && streamToken !== null && artToken !== streamToken,
+  'art=' + (artToken === null ? 'null' : artToken.slice(0, 8)) + '… stream=' + (streamToken === null ? 'null' : streamToken.slice(0, 8)) + '…');
+check('A5-03 the base host is the loopback literal, not the request Host',
+  session !== null && new URL(session.systemArtBase).hostname === '127.0.0.1' && new URL(session.systemStreamBase).hostname === '127.0.0.1',
+  session === null ? 'no session' : new URL(session.systemArtBase).hostname);
+check('A5-03 the base keeps the port so the URL stays reachable',
+  session !== null && new URL(session.systemArtBase).port === String(port),
+  session === null ? 'no session' : new URL(session.systemArtBase).port);
+
+// ① 交叉使用必须被拒
+check('A5-02 the art token is refused by system-stream',
+  (await rawGet('/dsh-music/api/system-stream?t=' + artToken + '&p=plain.wav', '127.0.0.1:' + port)) === 403);
+check('A5-02 the stream token is refused by system-art',
+  (await rawGet('/dsh-music/api/system-art?t=' + streamToken + '&p=plain.wav', '127.0.0.1:' + port)) === 403);
+
+// ② 正确 token + 回环 Host：这条通道本身必须还能用
+const okArt = await rawGet('/dsh-music/api/system-art?t=' + artToken + '&p=plain.wav', '127.0.0.1:' + port);
+check('A5-03 a correct token over a loopback Host still works', okArt === 200 || okArt === 404, 'status=' + okArt);
+
+// ③ 正确 token 但 Host 非回环 → 必须 403（修复前 isSystemPath 完整豁免栅栏，这里会放行）
+check('A5-03 system-art refuses a non-loopback Host even with a valid token',
+  (await rawGet('/dsh-music/api/system-art?t=' + artToken + '&p=plain.wav', 'evil.example:' + port)) === 403);
+check('A5-03 system-stream refuses a non-loopback Host even with a valid token',
+  (await rawGet('/dsh-music/api/system-stream?t=' + streamToken + '&p=plain.wav', 'evil.example:' + port)) === 403);
+
 server.close();
 await fs.rm(home, { recursive: true, force: true });
 await fs.rm(music, { recursive: true, force: true });

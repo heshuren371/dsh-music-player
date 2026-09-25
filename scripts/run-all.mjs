@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const suites = [
+  { name: 'route/declaration consistency (3-way)', file: 'scripts/test-route-consistency.mjs', node: [] },
   { name: 'desktop /api fetch routes', file: 'scripts/test-desktop-routes.mjs', node: [] },
   { name: 'stream / range / traversal', file: 'scripts/test-stream.mjs', node: [] },
   { name: 'security / limits', file: 'scripts/test-security.mjs', node: [] },
@@ -15,6 +16,10 @@ const suites = [
   { name: 'refresh remap', file: 'scripts/test-refresh-remap.mjs', node: [] },
   { name: 'restore race', file: 'scripts/test-restore-race.mjs', node: [] },
   { name: 'teardown', file: 'scripts/test-teardown.mjs', node: [] },
+  { name: 'poll teardown (no self-rearming timer)', file: 'scripts/test-poll-teardown.mjs', node: [] },
+  { name: 'entry fallback (positive identification)', file: 'scripts/test-entry-fallback.mjs', node: [] },
+  { name: 'teardown wins over in-flight hot reload', file: 'scripts/test-teardown-race.mjs', node: [] },
+  { name: 'MV teardown (in-flight ffmpeg child)', file: 'scripts/test-mv-teardown.mjs', node: [] },
   { name: 'delete flow', file: 'scripts/test-delete.mjs', node: [] },
   { name: 'online metadata match (host)', file: 'scripts/test-match.mjs', node: [] },
   { name: 'apply tags + rename (host)', file: 'scripts/test-apply.mjs', node: [] },

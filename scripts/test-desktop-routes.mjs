@@ -7,7 +7,7 @@
 //   - 用与平台一致的路径/方法规则校验每条注册；
 //   - 直接以 Fetch Request 驱动路由，覆盖 JSON、Range 流、HEAD、错误状态。
 import { createServer } from 'node:http';
-import { promises as fs } from 'node:fs';
+import { promises as fs, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -100,22 +100,19 @@ const check = (label, ok, detail) => {
 };
 
 // ---- 路由注册面 ----
-const expected = [
-  '/api/dsh-music/library',
-  '/api/dsh-music/session',
-  '/api/dsh-music/refresh',
-  '/api/dsh-music/dir',
-  '/api/dsh-music/cover',
-  '/api/dsh-music/match',
-  '/api/dsh-music/art',
-  '/api/dsh-music/apply',
-  '/api/dsh-music/pick',
-  '/api/dsh-music/stream',
-  '/api/dsh-music/delete',
-];
+// expected 必须**从 host.js 的分派表推导**，不能手工抄（AGENTS.md §2.7）。
+// 手工抄的旧版本与注册面同步漂移过：host.js 有 18 个端点、这里只列 11 个，
+// 于是「MV 端点在 Desktop 上不可达」在绿灯下活了很久（A1-01 / A2-03）。
+const hostSource = readFileSync(new URL('../lib/host.js', import.meta.url), 'utf8');
+const LEGACY_ONLY = ['/api/dsh-music/system-art', '/api/dsh-music/system-stream'];
+const expected = [...hostSource.matchAll(/pathname === '(\/api\/dsh-music\/[a-z-]+)'/g)]
+  .map((m) => m[1])
+  .filter((p) => !LEGACY_ONLY.includes(p));
+check('expected list is derived from the host dispatch table (not hand-copied)', expected.length >= 15, expected.length + ' expected');
+check('every endpoint registered as an exact /api Fetch route', expected.every((p) => routes.has(p)), 'missing=' + expected.filter((p) => !routes.has(p)).join(','));
+check('no extra route is registered beyond the derived expected set', routeRegistrations.every((p) => expected.includes(p)), 'extra=' + routeRegistrations.filter((p) => !expected.includes(p)).join(','));
 check('only connection is injected (no webServer)', injectCalls.join('|').includes('connection'), 'inject=' + injectCalls.join('|'));
 check('webServer inject stays pending (Desktop has no webServer service)', pendingInject.length === 1 && pendingInject[0].dep === 'webServer');
-check('every endpoint registered as an exact /api Fetch route', expected.every((p) => routes.has(p)), 'missing=' + expected.filter((p) => !routes.has(p)).join(','));
 check('no legacy /dsh-music prefix route on the Desktop composition', legacyRoutes.length === 0);
 check('all routes sit under /api (desktop host only forwards /api/*)', routeRegistrations.every((p) => p.startsWith('/api/')), routeRegistrations.join(','));
 

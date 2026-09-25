@@ -33,7 +33,18 @@
     "cordis.patch.yml",
     "README.md"
   ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
   "dsh": {
+    "compatibility": {
+      "dsh": ">=0.1.6-alpha.1 <0.2.0",
+      "dshReleases": {
+        "0.1.7-alpha.2": "unknown",
+        "0.1.7-rc.1": "unknown",
+        "0.1.7-rc.2": "compatible"
+      }
+    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
@@ -47,7 +58,8 @@
     }
   },
   "scripts": {
-    "test": "node scripts/run-all.mjs"
+    "test": "node scripts/run-all.mjs",
+    "check:manifest": "node scripts/check-manifest.mjs"
   },
   "dependencies": {
     "@libav.js/variant-webcodecs": "^6.10.9",
