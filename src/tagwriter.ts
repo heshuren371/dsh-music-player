@@ -6,11 +6,29 @@
 import { parentPort } from 'node:worker_threads';
 import { File as TagFile, Picture as TagPicture, ByteVector } from 'node-taglib-sharp';
 
-function reply(id, tagged, reason) {
+/**
+ * host.js 经 `worker.postMessage` 投递的任务形状（见 src/host.ts 的
+ * `writeTagsInWorker`）。`meta` 的字段来自客户端 JSON，先按 `unknown` 接住再逐个
+ * `typeof` 收窄；`cover` 是 Buffer（Uint8Array）或 null。
+ */
+interface TagJob {
+  id: number;
+  path: string;
+  meta?: { title?: unknown; artist?: unknown; album?: unknown } | null;
+  cover?: Uint8Array | number[] | null;
+  replaceCover?: boolean;
+}
+
+/**
+ * 回一条结果给主线程。`parentPort` 只在 worker 线程里非空：主线程误加载时没有
+ * 消息通道，显式判空后提前返回，而不是用 `!` 断言。
+ */
+function reply(id: number, tagged: boolean, reason?: string) {
+  if (parentPort === null) return;
   parentPort.postMessage({ id, tagged, reason });
 }
 
-parentPort.on('message', (job) => {
+function handleJob(job: TagJob) {
   let file;
   try {
     file = TagFile.createFromPath(job.path);
@@ -41,4 +59,8 @@ parentPort.on('message', (job) => {
       // dispose is best-effort
     }
   }
-});
+}
+
+// 主线程误加载时 parentPort 为 null：没有消息通道就不注册监听。ESM 不允许顶层
+// `return`，所以用显式判空包裹注册；worker 线程里这一分支必定命中。
+if (parentPort !== null) parentPort.on('message', handleJob);

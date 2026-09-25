@@ -188,11 +188,26 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 | 编译器选项 | 当前 | 理由 |
 | --- | --- | --- |
 | `strictNullChecks` | **开** | 零额外代价（实测：关掉它一处错误都不少），而且它正是能防住本仓库两个真实线上故障的那一项 —— token 缓存可能为 null（音频全 403）、媒体基址未就绪（MV 拼出相对地址、丢 Range、进度条一拖就回 0） |
-| `noImplicitAny` | **暂关** | TS 7 默认开启；本仓库 6133 行历史 JS 有 455 处隐式 any，一次性补完的回归风险不值得 |
+| `noImplicitAny` | **暂关** | TS 7 默认开启。第 12 轮把全仓类型错误清到 0 之后，实测再开它仍会多出 **343** 处（305 处是未标注的函数参数）—— 一次性补完的回归风险不值得。改由下面的**逐文件允许清单**分批收严 |
 | `noImplicitThis` / `strictBindCallApply` / `useUnknownInCatchVariables` / `noFallthroughCasesInSwitch` / `alwaysStrict` | **开** | 都是零/极低代价项 |
 
-- 剩余类型错误由 `npm run typecheck`（`scripts/typecheck-ratchet.mjs`）守住：基线在 `scripts/typecheck-baseline.json`，**只许变少**。修掉一批就跑 `--update` 收紧棘轮。
+- 剩余类型错误由 `npm run typecheck`（`scripts/typecheck-ratchet.mjs`）守住：基线在 `scripts/typecheck-baseline.json`。**第 12 轮已把全仓降到 0 并把基线收紧到 0** —— 此后任何新增类型错误都会直接变红。
 - **禁止为了让棘轮变绿而放宽 `tsconfig.json` 的档位或上调基线**（与 §6.2「禁止放宽断言」同理）。要过门禁只有一条路：把类型补对。
+
+**逐文件收严允许清单（第 12 轮）**
+
+全量开 `noImplicitAny` 还不现实（第 12 轮实测仍剩 **343** 处，其中 305 处是未标注的函数参数），但**已经干净的文件可以单独钉死**：
+
+- `tsconfig.strict.json` 的 `include` 是一份**允许清单**，清单里的文件必须在 `noImplicitAny: true` 下零错误；
+- 门禁 `scripts/check-strict.mjs` 已接进 `npm test` 与 CI。当前名单：`src/http-bridge.ts`、`src/tagwriter.ts`。
+- **规则**：清理干净一个文件就把它加进名单，严格度**单向增长**；**禁止**为了让门禁变绿从名单里删文件；名单为空会被门禁自己拒绝（空名单 = 恒绿，比没门禁更坏）。
+
+**静态断言的两个坑（都是第 12 轮踩的）**
+
+1. **先剥注释**：说明性注释里会出现被断言的名字（`currentDir =`、`mvEscalated`），直接 `indexOf` 会被注释骗到 —— 表现是**恒红或恒绿**，两者都等于没断言。
+2. **按行号判断，不要按字符偏移**：本仓库的 `clientPortion` 是剥掉 CSS 块后的文本，行号与源文件**不一致**；用它的偏移比较先后会错位。要么读源文件本身，要么逐行比较。
+
+> 同族教训见 §6.1 第 3 条（「0 命中」要先用已知为真的样本校准）。**检验方法本身也需要被检验。**
 
 **`client.ts` 必须保持零 import**
 
@@ -210,13 +225,14 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 
 ```bash
 pnpm run build                # src/*.ts → lib/*.js（改了 src 必须跑）
-pnpm run typecheck            # 类型棘轮：错误数只许变少（基线 243）
-npm test                      # 产物新鲜度 + 25 套回归（= check-build-fresh && run-all）
+pnpm run typecheck            # 类型棘轮：错误数只许变少（基线 0）
+npm test                      # 产物新鲜度 + 逐文件严格 + 25 套回归
+                              # = check-build-fresh && check-strict && run-all
 pnpm run check:manifest       # dsh-plugin.json 对 pinned Community v0.15 校验
 git diff --check              # 空白/冲突标记
 ```
 
-`.github/workflows/ci.yml` 在每次 push / PR 上跑同一组门禁（`pnpm install --frozen-lockfile` → `typecheck` → 全部 `lib/*.js` 与 `scripts/*.mjs` 的 `node --check` → `npm test` → manifest 校验 → 冲突标记扫描）。**CI 故意不先 build**：新鲜度门禁只在 `lib/` 未被就地覆盖时才有判别力。**CI 绿不等于 manifest 校验过**：CI 里没有 vendor 基线，`check:manifest` 会走 SKIP 分支并打 `::warning::` —— SKIP 不是通过（见上）。
+`.github/workflows/ci.yml` 在每次 push / PR 上跑同一组门禁（`pnpm install --frozen-lockfile` → `typecheck` → 全部 `lib/*.js` 与 `scripts/*.mjs` 的 `node --check` → `npm test`（= 新鲜度 + 逐文件严格 + 25 套）→ manifest 校验 → 冲突标记扫描）。**CI 故意不先 build**：新鲜度门禁只在 `lib/` 未被就地覆盖时才有判别力。**CI 绿不等于 manifest 校验过**：CI 里没有 vendor 基线，`check:manifest` 会走 SKIP 分支并打 `::warning::` —— SKIP 不是通过（见上）。
 
 - **只要动了 `dsh-plugin.json` 或 manifest 相关字段，`check:manifest` 是必跑项。** 它用固定 revision 的 `@dsh-std/manifest` 校验，不是照 `main` 分支。基线找不到时它以 **SKIP** 退出（exit 0 + 明确警告），**那不是通过**——用 `DSH_STD_MANIFEST=/path/to/@dsh-std/manifest/lib/index.js` 指过去。
 - 新增功能**必须**在 `scripts/run-all.mjs` 的 `suites` 里注册回归套件；没注册等于没有门禁。
@@ -302,6 +318,9 @@ git diff --check              # 空白/冲突标记
 
 - **13 条已修**（`D-05` + 12 条条目）；**高危 13 → 0**。存量只剩中/低与明确接受项。
 - 套件 18 → **24**，`ALL 24 SUITES PASS`；**每条新门禁都通过负向对照**（回退修复后确实变红）。
+- **第 12 轮把类型错误从 243 清到 0**，并做**逐文件收严允许清单**（`tsconfig.strict.json` + `check-strict.mjs`）。
+  同轮类型检查顺手抓出并修掉两个真实缺陷：MV「重试」按钮因引用 `createPlayer` 局部量而**必然抛 ReferenceError**（`A5-12`）、
+  `setDirectory` 未等 `ready` 导致目录被 `loadState()` 清掉（`A5-13`）。见 §2.15 与台账 §5.16。
 - **第 10 轮修掉一个线上故障**：能力 token 随 `createHost()` 轮换 → 客户端缓存的媒体基址失效 → 「音乐全不能播、MV 照播」。改为进程级 token + 客户端基址 TTL/失败自愈。见 §2.14 与台账 §5.14。
 - 第 7 轮由 Lead 亲自实测载荷性主张；第 8/9 轮各条门禁均做负向对照；两次自我推翻（`D-05` 误标「已修」、`A1-02` 的冷却设计）都按 §6.2 新写条目而非覆盖。
 - 判定变更：`D-05` 已修、第 3 轮 `L133` 由「符合」改「违规」、`A4-06` 由「中」上调「高」且已修。见台账 §5.10 / §5.11 / §5.12 / §5.13。
@@ -370,7 +389,8 @@ git diff --check              # 空白/冲突标记
 | `docs/audit-ledger.md` | 审计者 | 逐轮台账全文（证据、复现、符合项清单、编号裁定） | 规则本身 |
 | `dsh-plugin.json` `x-dsh-transition` | 跨版本核对者 | 接缝的实测记录。**升级 DSH 后按运行中的应用核对，不要按本地 checkout。** | —— |
 | `src/*.ts` → `lib/*.js` | 改代码的人 | 源码在 `src/`，产物在 `lib/`；两者都提交，由 `check-build-fresh.mjs` 保证一致。见 §2.15 | 手改 `lib/` |
-| `tsconfig.json` + `scripts/typecheck-baseline.json` | 改代码的人 | 类型档位与棘轮基线。**禁止为了让门禁变绿而放宽档位或上调基线** | —— |
+| `tsconfig.json` + `scripts/typecheck-baseline.json` | 改代码的人 | 类型档位与棘轮基线（当前 **0**）。**禁止为了让门禁变绿而放宽档位或上调基线** | —— |
+| `tsconfig.strict.json` + `scripts/check-strict.mjs` | 改代码的人 | 逐文件收严的**允许清单**：名单里的文件必须在 `noImplicitAny: true` 下零错误。清干净一个就加一个，**禁止删**（见 §2.15） | —— |
 
 ### 7.2 分层规则（改文档前先读）
 

@@ -13,28 +13,85 @@
  * 只依赖 node:stream 与 WHATWG 全局对象，不引入任何 DSH 内部模块。
  */
 import { Readable, Writable } from 'node:stream';
+import type { ReadableStream as NodeWebReadableStream } from 'node:stream/web';
+
+/**
+ * 这个适配器交给上游路由实现的「node:http 请求」形状。
+ *
+ * 就地声明最小面，而不是硬套 IncomingMessage 的完整类型：宿主代码实际只用
+ * method / url / headers / signal，加上 Readable 自带的 `on` / `destroy` /
+ * 异步迭代（`for await (const chunk of req)`）。
+ */
+interface NodeRequestFacets {
+  method: string;
+  url: string;
+  headers: Record<string, string | undefined>;
+  signal: AbortSignal;
+}
+
+/** Readable + 上面那层请求面。 */
+type NodeRequestLike = Readable & NodeRequestFacets;
+
+/**
+ * 这个适配器交给上游路由实现的「node:http 响应」形状。
+ *
+ * writeHead / setHeader 按 node 习惯返回 this，便于链式调用；头名统一小写存储。
+ */
+interface NodeResponseFacets {
+  statusCode: number;
+  statusMessage: string;
+  headersSent: boolean;
+  writeHead(
+    statusCode: number,
+    statusOrHeaders?: string | Record<string, unknown>,
+    maybeHeaders?: Record<string, unknown>,
+  ): NodeResponseLike;
+  setHeader(headerName: string, value: string | number | readonly string[]): NodeResponseLike;
+  getHeader(headerName: string): string | undefined;
+  removeHeader(headerName: string): void;
+  getHeaders(): Record<string, string>;
+}
+
+/** 真 Writable + 上面那层状态/响应头面。 */
+type NodeResponseLike = Writable & NodeResponseFacets;
+
+/**
+ * 路由层用 `statusError(code, message)` 抛出带 statusCode 的错误对象。
+ *
+ * 这里把 catch 绑定的 `unknown` 收窄成「确实带 statusCode」的形状（含原型链上的），
+ * 语义等价于原来的 `error?.statusCode`，但不把 unknown 当逃生舱。
+ */
+function isStatusError(value: unknown): value is { statusCode: number } {
+  if (typeof value !== 'object' && typeof value !== 'function') return false;
+  if (value === null) return false;
+  if (!('statusCode' in value)) return false;
+  return typeof value.statusCode === 'number';
+}
 
 /**
  * 把 Fetch Request 包成 node:http IncomingMessage 的形状。
  * 宿主代码只用到 method / url / headers / 异步迭代 / signal，因此这里手工补齐这些面。
  */
-function requestToNode(request) {
+function requestToNode(request: Request): NodeRequestLike {
   const url = new URL(request.url);
-  const headers = {};
+  const headers: Record<string, string | undefined> = {};
   for (const [headerName, value] of request.headers) headers[headerName.toLowerCase()] = value;
   // Electron 自定义协议不带 Host；补上 URL 自身的 authority，方便任何读 Host 的代码。
   if (headers.host === undefined) headers.host = url.host;
 
   const hasBody = request.method !== 'GET' && request.method !== 'HEAD' && request.body !== null;
-  const body = hasBody && request.body !== null
-    ? Readable.fromWeb(request.body)
+  // DOM 的 ReadableStream 与 node:stream/web 的 ReadableStream 是同一份运行时对象的两份
+  // 结构声明（Node 里全局 ReadableStream 就是 stream/web 的那个构造函数），
+  // 但两份声明互不可赋值，所以这里按实际运行时类型做一次窄化断言（不是 any 逃逸）。
+  const body: Readable & Partial<NodeRequestFacets> = hasBody && request.body !== null
+    ? Readable.fromWeb(request.body as NodeWebReadableStream)
     : Readable.from([]);
   // HEAD 复用 GET 的路由实现；body 由 fetchFromNodeHandler 统一丢弃。
   body.method = request.method === 'HEAD' ? 'GET' : request.method;
   body.url = url.pathname + url.search;
   body.headers = headers;
   body.signal = request.signal;
-  return body;
+  return body as NodeRequestLike;
 }
 
 /**
@@ -47,11 +104,11 @@ function requestToNode(request) {
  *    释放挂起的 _write 回调并让上层 destroy 掉读取流。
  */
 function createResponseSink() {
-  let controller = null;
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
   let cancelled = false;
-  let pendingWrite = null;
+  let pendingWrite: (() => void) | null = null;
   /** 创建顺序上的前向引用：cancel 回调可能在 res 赋值后才触发。 */
-  let sink = null;
+  let sink: Writable | null = null;
 
   const releasePending = () => {
     if (pendingWrite === null) return;
@@ -60,7 +117,7 @@ function createResponseSink() {
     callback();
   };
 
-  const stream = new ReadableStream({
+  const stream = new ReadableStream<Uint8Array>({
     start(controllerRef) {
       controller = controllerRef;
     },
@@ -78,7 +135,7 @@ function createResponseSink() {
   });
 
   const res = new Writable({
-    write(chunk, _encoding, callback) {
+    write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void) {
       if (cancelled || controller === null) {
         callback();
         return;
@@ -94,7 +151,7 @@ function createResponseSink() {
       if ((controller.desiredSize ?? 1) > 0) callback();
       else pendingWrite = callback;
     },
-    final(callback) {
+    final(callback: (error?: Error | null) => void) {
       if (!cancelled && controller !== null) {
         try {
           controller.close();
@@ -104,7 +161,7 @@ function createResponseSink() {
       }
       callback();
     },
-    destroy(error, callback) {
+    destroy(error: Error | null, callback: (error?: Error | null) => void) {
       cancelled = true;
       releasePending();
       if (controller !== null) {
@@ -116,14 +173,14 @@ function createResponseSink() {
       }
       callback(error);
     },
-  });
+  }) as NodeResponseLike;
 
   sink = res;
   res.statusCode = 200;
   res.statusMessage = 'OK';
   res.headersSent = false;
   /** 响应头小写化存储，值先转成字符串（pipeFile/writeHead 都按 node 习惯传数字）。 */
-  const headers = {};
+  const headers: Record<string, string> = {};
   res.writeHead = (statusCode, statusOrHeaders, maybeHeaders) => {
     res.statusCode = statusCode;
     const source = typeof statusOrHeaders === 'string' ? maybeHeaders : statusOrHeaders;
@@ -154,7 +211,10 @@ function createResponseSink() {
  * @param dispatch - `(req, res) => Promise<void>`，node:http 形状的路由实现。
  * @returns 与 node 响应等价的 Fetch Response；HEAD 保留响应头但丢弃 body。
  */
-export async function fetchFromNodeHandler(request, dispatch) {
+export async function fetchFromNodeHandler(
+  request: Request,
+  dispatch: (req: NodeRequestLike, res: NodeResponseLike) => void | Promise<void>,
+): Promise<Response> {
   const req = requestToNode(request);
   const sink = createResponseSink();
   const { res, stream, headers } = sink;
@@ -167,7 +227,8 @@ export async function fetchFromNodeHandler(request, dispatch) {
       res.end('{}');
     }
   } catch (error) {
-    const statusCode = Number.isSafeInteger(error?.statusCode) ? error.statusCode : 500;
+    // 读两次 statusCode 与原来的 `Number.isSafeInteger(error?.statusCode) ? error.statusCode : 500` 同形。
+    const statusCode = isStatusError(error) && Number.isSafeInteger(error.statusCode) ? error.statusCode : 500;
     const message = error instanceof Error ? error.message : String(error);
     if (!res.headersSent) {
       res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });

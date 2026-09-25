@@ -205,5 +205,42 @@ check('the downgrade is surfaced in the UI',
   /hostEntry === "legacy"/.test(clientPortion) && /error.legacyEntry/.test(css + clientPortion),
   'no visible downgrade notice');
 
+// ── 宿主：目录切换必须等 ready（第 12 轮抓出的线上缺陷）───────────────────────
+// `ready` 里那句 `currentDir = await loadState()` 会在 await 恢复时**覆盖**刚设好的
+// 目录。逐个路由补 `await ready` 会漏（/dir 与 /pick 的成功分支就漏了），所以正确
+// 形状是放进 `setDirectory` 自己。这条断言钉的就是「它在 setDirectory 里，且在
+// 任何 currentDir 赋值之前」。回退修复 → 必红。
+const hostSrc = readFileSync(new URL('../src/host.ts', import.meta.url), 'utf8');
+const hostLines = hostSrc.split('\n');
+const setDirLine = hostLines.findIndex((line) => line.includes('async function setDirectory('));
+// 按**行号**判断，不按字符偏移：跨行剥注释会让偏移量错位（本断言前两版都栽在
+// 「注释里也出现了这个名字」上）。逐行剥掉行尾注释后，只看真的代码行。
+const codeOf = (line) => line.replace(/\/\/.*$/, '').replace(/\/\*.*?\*\//g, '').trim();
+const setDirEndLine = setDirLine < 0 ? -1 : hostLines.findIndex((line, i) => i > setDirLine && line === '  }');
+const setDirBodyLines = setDirLine < 0 ? [] : hostLines.slice(setDirLine, setDirEndLine < 0 ? undefined : setDirEndLine);
+const readyLine = setDirBodyLines.findIndex((line) => codeOf(line).includes('await ready;'));
+const assignLine = setDirBodyLines.findIndex((line) => /^currentDir\s*=/.test(codeOf(line)));
+check('setDirectory awaits ready before touching currentDir (else loadState() clobbers it)',
+  readyLine >= 0 && assignLine >= 0 && readyLine < assignLine,
+  setDirLine < 0 ? 'setDirectory not found' : 'await ready missing, or placed after the currentDir assignment (ready@line+' + readyLine + ' assign@line+' + assignLine + ')');
+
+// ── 客户端：视图层不得引用 createPlayer 的局部量（第 12 轮的「MV 重试」按钮）────
+// `mvEscalated` / `set` 声明在 createPlayer() 内部，而 MusicView 在它外面。从视图里
+// 引用会在**运行时抛 ReferenceError**，且抛在 player.retryVideo() 之前 ——
+// 表现是「转码失败后点『重试』毫无反应，只有控制台报错」。
+// 断言形状：`mvEscalated` 的每一处**代码**引用都必须早于 MusicView 的声明。回退 → 必红。
+// ⚠️ 读**源文件本身**而不是上面剥过 CSS 的 clientPortion：那个文本行号与源文件不一致，
+// 用它的索引判断先后会错位（本断言前两版就栽在这里）。另外逐行剥注释——说明文字里
+// 也会出现 `mvEscalated`。
+const clientSrcLines = readFileSync(new URL('../src/client.ts', import.meta.url), 'utf8').split('\n');
+const mvViewLine = clientSrcLines.findIndex((line) => /function MusicView\(|const MusicView\s*=/.test(line));
+const mvRefAfterView = clientSrcLines
+  .map((text, i) => ({ i, code: codeOf(text) }))
+  .filter(({ i, code }) => code.includes('mvEscalated') && i > mvViewLine);
+const mvRefTotal = clientSrcLines.filter((text) => text.includes('mvEscalated')).length;
+check('MusicView never references createPlayer locals (retry must not throw ReferenceError)',
+  mvViewLine >= 0 && mvRefTotal > 0 && mvRefAfterView.length === 0,
+  mvViewLine < 0 ? 'MusicView not found' : 'mvEscalated referenced inside MusicView at source line(s) ' + mvRefAfterView.map((r) => r.i + 1).join(', '));
+
 console.log(failures === 0 ? 'ALL PASS' : failures + ' CHECK(S) FAILED');
 process.exit(failures === 0 ? 0 : 1);

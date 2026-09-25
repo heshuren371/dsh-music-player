@@ -65,7 +65,36 @@ Desktop 页面是 `dsh-app://`，媒体 `src` 走 Desktop 转发，实测**转�
 
 > **token 必须是进程级**：客户端把基址缓存整个页面生命周期，而宿主每次热重载都会 `createHost()`。若 token 随实例轮换，一次「保存文件」就让人手里所有媒体 URL 变成废纸 —— 症状是**音乐全不能播、MV 照播**（`/api/mv` 返回的是相对地址，不经 token）。见 `lib/host.js` 的 `processTokens()` 与 `scripts/test-token-lifetime.mjs`。
 
-## 7. 用到的技术名称
+## 7. 怎么让 Desktop 的客户端改动生效
+
+**`Cmd+R` 在 Desktop 上不起作用，这不是按错了。** 从应用自己的菜单代码可以确认（`app.asar` 里）：
+
+```js
+const devToolsItems = [
+  { role: "toggleDevTools", visible: false },
+  { role: "toggleDevTools", visible: false, accelerator: "F12" }
+];
+Menu.setApplicationMenu(Menu.buildFromTemplate([
+  { label: app.name, submenu: [...applicationItems(), ...devToolsItems] },
+  ...platformMenus()
+]));
+```
+
+菜单里**只注册了 `toggleDevTools`，没有 `reload` / `forceReload` 角色** —— 主窗口没有任何重新加载的快捷键。两个 `toggleDevTools` 项都是 `visible: false`（菜单里看不见），但 **`F12` 快捷键仍然生效**。
+
+三种办法，从快到慢：
+
+| 办法 | 怎么做 | 说明 |
+| --- | --- | --- |
+| **F12 → 控制台 → `location.reload()`** | 按 `F12` 开 DevTools，Console 里执行 `location.reload()` | 最快。DevTools 打开时 `Cmd+R` 也会生效（被 DevTools 自己接管） |
+| **F12 → DevTools 工具栏的 ⟳** | 同上，点左上角刷新图标 | 等价 |
+| **重启应用** | 退出 DeepSeek Harness 再打开 | 最可靠；改 `src/index.ts`（入口层）时**只能**用这个 —— 入口不热重载 |
+
+> ⚠️ **最容易踩的坑**：`src/host.ts` 的改动走 mtime 热重载**自动生效**，所以宿主侧改完「看起来好了」；但 `src/client.ts` 的改动**必须重新加载渲染进程**才算数。桌面端没重载页面就会一直跑旧 bundle —— 表现正是「**Web 上已经修好了，Desktop 上还是坏的**」。
+>
+> 第 12 轮真实发生过：MV 进度条在 Web 能快进、Desktop 不能，原因就是 Desktop 渲染进程从未重新加载（`Cmd+R` 没有绑定），而非 Desktop 特有的缺陷。
+
+## 8. 用到的技术名称
 
 | 技术 | 用在哪 |
 | --- | --- |

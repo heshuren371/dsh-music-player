@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noImplicitAny": true
+  },
+  /*
+   * 「逐文件收严」允许清单。
+   *
+   * 背景：`noImplicitAny` 当前是关的（TS 7 默认开，本仓库历史 JS 有 300+ 处隐式 any）。
+   * 全量打开不现实，但**已经干净的文件可以被单独钉住** —— 只要文件在这个 include 列表
+   * 里，它就必须在 `noImplicitAny: true` 下零错误。这样：
+   *   - 已干净的文件不会偷偷退化；
+   *   - 每清理一个文件就加进列表，严格度**单向增长**；
+   *   - 全仓总错误数由 scripts/typecheck-ratchet.mjs 的棘轮另行守住。
+   *
+   * 加文件的前提：该文件在 `node scripts/check-strict.mjs` 下确实是 0 错误。不要为了
+   * 凑数把带错误的文件塞进来，也不要把这里的文件移出去（见 AGENTS.md §2.15）。
+   */
+  "include": [
+    "src/http-bridge.ts",
+    "src/tagwriter.ts"
+  ]
+}

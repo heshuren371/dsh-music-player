@@ -485,3 +485,101 @@ process.stdout|process.stderr       第三方 logger（pino/winston/bunyan/…�
 **本轮自己犯的一个错，已沉淀为规则**：`test-audit.mjs` 用 `/^        ([a-zA-Z][\w]*):/gm`（写死 8 空格缩进）找 player API 方法；tsc 重新排版成 16 空格后这条断言**静默返回 0 个方法** —— 本该报警的地方反而变绿。改成「取该块里缩进最小的键」后恢复 29 个方法。已写入 AGENTS.md §2.15：**静态断言要按结构推导，不要按空白字符写死。**
 
 **验证**：`ALL 25 SUITES PASS` · `typecheck` 未倒退 · `check-build-fresh` 一致 · `check:manifest` PASS · CI 在 GitHub 上 `completed/success`。
+
+---
+
+## 5.16 第 12 轮 —— 类型错误清零（243 → 0）与两个真实缺陷
+
+**维度**：类型系统有效性（第 11 轮迁移的收尾）。
+**基线**：TS 7.0.2，`strictNullChecks` 开、`noImplicitAny` 关。
+
+### 5.16.1 `A5-12`（新发现，已修）—— MV「重试」按钮是坏的
+
+`MusicView` 的 MV 重试按钮 onClick 引用了 `mvEscalated.delete(...)` 与 `set({mv:…})`，
+而这两个名字都声明在 `createPlayer()` **内部**（`mvEscalated` 在 client.ts:1419，`set` 在 :1138），
+`MusicView` 在 `createPlayer()` **外面**。⇒ 运行时抛 `ReferenceError`，**且抛在
+`player.retryVideo()` 之前**，所以那个按钮点了完全没反应（只有控制台报错）。
+
+- **迁移前就存在**：`git show 032e333:lib/client.js` 的对应位置有同样两行。
+- **门禁盲点**：既有 25 套没有任何一条覆盖「转码失败 → 点重试」。jsdom 套件渲染了视图，
+  但没人点那个按钮（`test-client-shell.mjs` 只断言每个 `<button>` **挂了**处理函数，
+  不断言处理函数**能跑通** —— 这是结构断言，抓不到引用错误）。
+- **修法**：把「重置 `mvEscalated` + 置 `preparing`」移进 `createPlayer` 的 `retryVideo` 内部。
+  放在那里而不是视图里，理由与 `prepareVideo` 那处相同：**调用者会忘**。
+- **门禁**：`test-audit.mjs` 新增「`MusicView` 不得引用 `createPlayer` 局部量」。
+  负向对照：把代码引用挪回 MusicView → 变红并报出源文件行号 3160。
+
+### 5.16.2 `A5-13`（新发现，已修）—— `setDirectory` 未等 `ready`，目录会被 `loadState()` 清掉
+
+`ready` 是个 async IIFE（host.ts:1845），里面 `currentDir = await loadState()`。
+它在 `await` 恢复时会**覆盖**期间被设好的 `currentDir`。
+
+- **只有部分路由 `await ready`**：`/library`(:2027)、`/refresh`(:2034)、`/delete`(:2393)、`ensureLibrary`(:1876)。
+  **`/api/dsh-music/dir`(:2046) 与 `/pick`(:2166) 的成功分支都没有。**
+- **后果**：激活后第一个请求若是 `POST /dir`，`loadState()` 落地时把目录清回 `null` →
+  「选了目录，列表一直是空的」。真实客户端先 `GET /library`（有 await）所以碰不到，
+  但那是**运气**，不是设计。由类型修复 agent 的隔离冒烟测试（`/tmp/smoke`）撞出。
+- **修法**：把 `await ready` 放进 `setDirectory` 自己，一次覆盖全部调用者（现在与将来）。
+- **门禁**：`test-audit.mjs` 新增「`setDirectory` 必须在任何 `currentDir` 赋值前 `await ready`」。
+  负向对照：去掉那句 await → 变红。
+
+### 5.16.3 类型错误 243 → 0
+
+四个并行 agent 分工（文件互不相交）：`client.ts` 127→0、`host.ts` 73→0、
+`http-bridge.ts` 33→0、`index.ts` 7→0、`tagwriter.ts` 3→0。
+
+**根因高度集中**：最大的两簇是
+①`let x = null` 没标注 → 下游全成 `never`（`Property 'x' does not exist on type 'never'`，约 90 处）；
+②`const arr = []` → `never[]`。
+补上真实类型（`PlayerState`、`LibraryResult`、`Track`、`MvJob`、`MusicPlayerApi` 等 26 个就地 interface）后一次性消掉大半。
+
+**约束执行情况（这是本轮最该被复核的部分）**：
+- 全仓 `as any` / `@ts-ignore` / `@ts-expect-error` / `@ts-nocheck`：**0**
+- 全仓 `!` 非空断言：**2**，均在 `client.ts` 并带可证性注释
+  （`:1495` `canvas.getContext("2d")!` —— 加判空会把「drawImage 抛错被 catch 吞掉」
+  改成「startWasmVideo 返回 false 从而改走转码」，那是行为变更；
+  `:2765` `player.t!` —— `apply()` 在 `ctx.slots.register` 之前赋值）
+- 每份交付都要求 agent 做**行为等价证明**（node 类型剥离后与旧产物 diff / 等价性实测），
+  而不是只报「0 错误」。`http-bridge.ts` 那份把「改前 vs 改后」的运行期 JS 逐字 diff 到 `IDENTICAL`。
+
+**棘轮收紧到 0**：`scripts/typecheck-baseline.json` 由 243 下调为 **0**，此后任何新增类型错误直接变红。
+
+### 5.16.4 逐文件收严允许清单（新增门禁）
+
+全量开 `noImplicitAny` 仍会多出 **343** 处（305 处是未标注的函数参数），不能一次开。
+但实测 `http-bridge.ts` 与 `tagwriter.ts` 在该档位下**已经是 0**，于是新增：
+
+- `tsconfig.strict.json`：`extends` 主配置 + `noImplicitAny: true` + `include` 允许清单；
+- `scripts/check-strict.mjs`：名单里的文件必须零错误，且**名单为空要拒绝**
+  （空名单 = 恒绿门禁，比没有更坏 —— 这条自身也做了负向对照）。
+- 已接进 `npm test` 与 CI。严格度**单向增长**：清干净一个文件就加一个。
+
+### 5.16.5 本轮我自己犯的三个错（同一族：**静态断言被文本骗到**）
+
+1. `test-audit.mjs` 的 `setDirectory` 断言：`indexOf('currentDir =')` 命中的是**我自己注释里**的
+   `currentDir = await loadState()` → 恒红。
+2. 同一条的 `MusicView` 断言：被 `MusicView` 内部**注释里**的 `mvEscalated` 命中 → 恒红。
+3. 改用字符偏移比较先后：`clientPortion` 是**剥掉 CSS 块后**的文本，偏移与源文件行号不一致 → 错位。
+
+**沉淀为规则（AGENTS.md §2.15）**：静态断言①先剥注释；②按行号判断、不要按字符偏移。
+这与 §6.1 第 3 条、以及第 11 轮「缩进不可写死」是同一族：**检验方法本身也需要被检验。**
+三条断言最终都做了负向对照并确认会变红。
+
+### 5.16.6 验证
+
+- `node scripts/run-all.mjs` → **ALL 25 SUITES PASS**
+- `node scripts/typecheck-ratchet.mjs` → 0 错误（基线 0）
+- `node scripts/check-build-fresh.mjs` → lib/ 与 src/ 一致
+- `node scripts/check-strict.mjs` → 2 个文件在全严格下零错误
+- `node scripts/check-manifest.mjs` → PASS；`git diff --check` → clean
+- CI（GitHub Actions，pnpm）：见本次 push 的 run
+
+### 5.16.7 符合项（本轮确认落地）
+
+- `permission.zh.md:86`「在产生副作用的位置检查授权」：类型修复期间 **6 个 `authorize()` 副作用点
+  一行未改**（agent 用 `git diff -U0 | grep` 逐符号核对，并跑冒烟测试确认 saveState / delete / apply 三条路径的授权仍放行）。
+- `lifecycle.zh.md:29/:107`：`dispose` 的 kill 路径、`disposed` 状态位、两个 post-await 复查
+  在类型修复中**全部保持**（`src/index.ts` 的 diff 只含 5 个 hunk，且 `FETCH_ROUTES` /
+  `LEGACY_ONLY_ROUTES` / `disposed` / `RELOAD_MIN_INTERVAL_MS` 均 0 命中）。
+- `permission.zh.md:111` / `storage.zh.md:101`：`mvEscalated` 的 reset 迁移**没有**引入任何新的
+  日志/落盘点（`test-audit.mjs` 的写盘白名单与凭据扫描仍全绿）。

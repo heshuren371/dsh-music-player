@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import { createReadStream, existsSync } from 'node:fs';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +9,137 @@ import { File as TagFile, Picture as TagPicture, ByteVector } from 'node-taglib-
 import { Worker } from 'node:worker_threads';
 import { randomUUID } from 'node:crypto';
 import { fetchFromNodeHandler } from './http-bridge.js';
+
+// ── 就地声明的数据结构 ───────────────────────────────────────────────────────
+// 按 AGENTS.md §2.15：client.ts 不能 import，宿主侧类型一律声明在本文件内，
+// 不新建只有 host 会 import 的类型模块。这些声明**只是类型**，编译后不产生任何代码。
+
+/** 扫描阶段发现的一个候选文件（mime 与音/视频类别决定它怎么被播放）。 */
+interface ScannedFile {
+  path: string;
+  mime: string | undefined;
+  kind: 'audio' | 'video';
+}
+
+/** 深度优先扫描的待访问目录（depth 用于 MAX_SCAN_DEPTH 截断）。 */
+interface ScanFrame {
+  directory: string;
+  depth: number;
+}
+
+/**
+ * 库内曲目。`id` 是相对库根目录的稳定标识（不是数组下标）：重扫、重排都不会变，
+ * 由 scanLibrary 在扫描收尾时回填（readMetadata 先给空串占位）。
+ */
+interface Track {
+  id: string;
+  path: string;
+  name: string;
+  title: string;
+  artist: string | null;
+  duration: number | null;
+  mime: string | undefined;
+  kind: 'audio' | 'video';
+  videoCodec: string | null;
+  audioCodec: string | null;
+  width: number | null;
+  height: number | null;
+  tagged: boolean;
+}
+
+/** 一次完整扫描的结果；`scannedAt` 变化即代表库内容已更新（payload 缓存据此失效）。 */
+interface LibraryResult {
+  dir: string;
+  tracks: Track[];
+  truncated: boolean;
+  skippedPackages: number;
+  scannedAt: number;
+}
+
+/** /library 下发给 UI 的曲目形状（只含 UI 读的字段，index 由数组顺序隐含）。 */
+interface PayloadTrack {
+  id: string;
+  name: string;
+  title: string;
+  artist: string | null;
+  duration: number | null;
+  tagged: boolean;
+  kind: 'audio' | 'video';
+  videoCodec: string | null;
+}
+
+/** 封面：只有 mime 过白名单、且未超字节上限的才会走到这里。 */
+interface Cover {
+  data: Buffer;
+  mime: string;
+}
+
+/** 一条 MV 转封装/转码任务的状态（cacheKey → job），供轮询端点回报进度。 */
+interface MvJob {
+  state: 'preparing' | 'ready' | 'failed';
+  progress: number;
+  error: string | null;
+  child: ChildProcess | null;
+  attempt: string | null;
+  log: string;
+  finishedAt: number | null;
+}
+
+/** 写标签的结果；tagged=false 时 reason 说明原因（worker 不可用 / 超时 / 格式不支持）。 */
+interface TagWriteResult {
+  tagged: boolean;
+  reason?: string;
+}
+
+/** 各在线源归一化后的候选曲目（mergeCandidate 合并时会补上 sources）。 */
+interface Candidate {
+  source: string;
+  rank: number;
+  id: string;
+  title: string;
+  artist: string;
+  album: string;
+  cover: string;
+  duration: number | null;
+  sources: string[];
+}
+
+/** 打分后的候选（/match 下发给 UI 的形状）。 */
+interface RankedCandidate extends Candidate {
+  score: number;
+  auto: boolean;
+}
+
+/** 带 HTTP 状态码的错误：`statusCode` 不是 Error 的标准字段，路由层按它回响应。 */
+interface StatusError extends Error {
+  statusCode: number;
+}
+
+/** 有 `message` 字段的对象/函数（Error、Node 的 SystemError、普通对象都算）。 */
+function isMessageCarrier(value: unknown): value is { message?: unknown } {
+  return (typeof value === 'object' && value !== null) || typeof value === 'function';
+}
+
+/**
+ * 取抛出物的 `message`，与原来的 `error?.message` **语义完全一致**（值可能不是字符串，
+ * 所以返回 unknown，由调用方决定是否 String()）。`useUnknownInCatchVariables` 下
+ * catch 绑定是 unknown，这里做一次真实收窄：非对象/函数一律 undefined。
+ */
+function thrownMessage(error: unknown): unknown {
+  if (!isMessageCarrier(error) || !('message' in error)) return undefined;
+  return error.message;
+}
+
+/**
+ * music-metadata 的 `IFormat` 类型里没有 `audioCodec`（旧字段名），但运行时它可能带着
+ * 这个字段。不假设、也不说谎：按 `unknown` 读取，只有字符串才采纳，否则返回 null
+ * （与原来 `typeof metadata.format.audioCodec === 'string' ? ... : null` 等价）。
+ */
+function readFormatAudioCodec(format: unknown): string | null {
+  if (format === null || typeof format !== 'object' || !('audioCodec' in format)) return null;
+  const codec = format.audioCodec;
+  return typeof codec === 'string' ? codec : null;
+}
 
 /** Cordis plugin identity used by Loader diagnostics. */
 const name = 'music-player';
@@ -168,7 +299,7 @@ function processTokens() {
 }
 
 /** 正在进行的 MV 任务：cacheKey → job（同 key 只跑一个）。 */
-const mvJobs = new Map();
+const mvJobs = new Map<string, MvJob>();
 /** 终态任务的保留时长（够客户端轮询到结果）与容器容量上限。 */
 const MV_JOB_TTL_MS = 10 * 60 * 1000;
 const MV_JOBS_MAX = 32;
@@ -301,7 +432,7 @@ async function mvPrepare(track, mode, lengthSeconds) {
   await fs.mkdir(MV_CACHE_DIR, { recursive: true });
   const partial = output + '.part';
   pruneMvJobs();
-  const job = { state: 'preparing', progress: 0, error: null, child: null, log: '', attempt: null, finishedAt: null };
+  const job: MvJob = { state: 'preparing', progress: 0, error: null, child: null, log: '', attempt: null, finishedAt: null };
   mvJobs.set(key, job);
   const attempts = mode === 'remux' ? ['copy', 'audio', 'full'] : ['full'];
   void (async () => {
@@ -319,7 +450,7 @@ async function mvPrepare(track, mode, lengthSeconds) {
           job.finishedAt = Date.now();
         } catch (error) {
           job.state = 'failed';
-          job.error = String(error?.message ?? error);
+          job.error = String(thrownMessage(error) ?? error);
           job.finishedAt = Date.now();
         }
         return;
@@ -446,7 +577,8 @@ const sourceHealth = new Map();
 /** 同时在跑的匹配上限：防止连点 / 多标签页把 3×N 个上游请求同时打出去。 */
 const MATCH_CONCURRENCY = 2;
 let matchActive = 0;
-const matchWaiters = [];
+/** 等待匹配名额的排队者：push 的是 Promise 的 resolve。 */
+const matchWaiters: Array<(value?: unknown) => void> = [];
 
 function isSourceCoolingDown(name) {
   const health = sourceHealth.get(name);
@@ -637,7 +769,7 @@ function isAutoApplicable(score, track, candidate) {
 }
 
 function rankCandidates(track, merged) {
-  const ranked = [];
+  const ranked: RankedCandidate[] = [];
   for (const candidate of merged.values()) {
     const score = scoreCandidate(track, candidate, merged);
     ranked.push({ ...candidate, score: Math.round(score * 1000) / 1000, auto: isAutoApplicable(score, track, candidate) });
@@ -684,7 +816,7 @@ function buildMatchQueries(track) {
   const taggedArtist = typeof track.artist === 'string' ? track.artist.trim() : '';
   const title = taggedTitle.length > 0 ? taggedTitle : parsed.title;
   const artist = taggedArtist.length > 0 ? taggedArtist : parsed.artist;
-  const queries = [];
+  const queries: string[] = [];
   const push = (value) => {
     const query = String(value ?? '').replace(/\s+/g, ' ').trim();
     if (query.length >= 2 && !queries.includes(query)) queries.push(query);
@@ -909,7 +1041,7 @@ function mergeCandidate(merged, candidate) {
  */
 async function matchTrack(track, queries) {
   const merged = new Map();
-  const errors = [];
+  const errors: string[] = [];
   // 冷却中的源跳过；但若三个主力全部冷却，仍然照常尝试，避免瞬时故障
   // 被放大成“永久停摆”。
   const healthy = MATCH_SOURCES.filter((source) => !isSourceCoolingDown(source.name));
@@ -933,7 +1065,7 @@ async function matchTrack(track, queries) {
         const candidates = await searchSource(FALLBACK_SOURCE, query);
         for (const candidate of candidates) mergeCandidate(merged, candidate);
       } catch (error) {
-        errors.push('musicbrainz: ' + (error?.message ?? String(error)));
+        errors.push('musicbrainz: ' + String(thrownMessage(error) ?? error));
       }
       best = rankCandidates(track, merged)[0];
       if (best !== undefined && best.score >= MATCH_AUTO_SCORE) break;
@@ -1012,10 +1144,8 @@ const STATE_DIR = path.join(DSH_HOME, 'storages');
 const STATE_FILE = path.join(STATE_DIR, 'dsh-music-player.json');
 const LEGACY_STATE_FILE = fileURLToPath(new URL('./state.json', import.meta.url));
 
-function statusError(statusCode, message) {
-  const error = new Error(message);
-  error.statusCode = statusCode;
-  return error;
+function statusError(statusCode: number, message: string): StatusError {
+  return Object.assign(new Error(message), { statusCode });
 }
 
 /** WHATWG hostname (IPv6 keeps brackets) names the loopback authority. */
@@ -1088,9 +1218,7 @@ function authorize(action, targetPath, scopes) {
     const withSep = root.endsWith(path.sep) ? root : root + path.sep;
     if (resolved === root || resolved.startsWith(withSep)) return resolved;
   }
-  const error = new Error('authorize: ' + action + ' 的目标不在已声明 scope 内');
-  error.statusCode = 403;
-  throw error;
+  throw statusError(403, 'authorize: ' + action + ' 的目标不在已声明 scope 内');
 }
 
 function isUntrustedRequest(req) {
@@ -1131,7 +1259,7 @@ function sendJson(res, statusCode, value) {
 }
 
 async function readJson(req) {
-  const chunks = [];
+  const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
@@ -1184,10 +1312,10 @@ function expandHome(input) {
  * parsing thousands of files whose result would be discarded.
  */
 async function collectAudioFiles(dir, isCancelled) {
-  const files = [];
+  const files: ScannedFile[] = [];
   let truncated = false;
   let skippedPackages = 0;
-  const stack = [{ directory: dir, depth: 0 }];
+  const stack: ScanFrame[] = [{ directory: dir, depth: 0 }];
   let visited = 0;
   while (stack.length > 0 && visited < SCAN_VISIT_LIMIT) {
     if (typeof isCancelled === 'function' && isCancelled()) return { files, truncated: true, skippedPackages };
@@ -1196,6 +1324,9 @@ async function collectAudioFiles(dir, isCancelled) {
       break;
     }
     const current = stack.pop();
+    // 循环条件保证栈非空，这里只是把 `pop()` 的 `| undefined` 收窄掉；
+    // 真的落到 break 也不改变行为（栈空时本来就没有可访问的目录）。
+    if (current === undefined) break;
     visited += 1;
     let rows;
     try {
@@ -1258,8 +1389,8 @@ function fallbackArtist(filePath) {
   return dash > 0 ? base.slice(0, dash).trim() || null : null;
 }
 
-async function readMetadata(file) {
-  const track = {
+async function readMetadata(file: ScannedFile): Promise<Track> {
+  const track: Track = {
     path: file.path,
     name: path.basename(file.path),
     title: fallbackTitle(file.path),
@@ -1276,12 +1407,15 @@ async function readMetadata(file) {
     height: null,
     /** 是否已同时具备标题与歌手标签（“一键补全”据此挑选待补全曲目）。 */
     tagged: false,
+    /** 库内稳定 id（相对根目录的路径）；scanLibrary 扫描收尾时回填。 */
+    id: '',
   };
   try {
     const metadata = await parseFile(file.path, { duration: true, skipCovers: true });
     const common = metadata.common;
-    const hasTitle = typeof common.title === 'string' && common.title.trim().length > 0;
-    if (hasTitle) track.title = common.title.trim();
+    const rawTitle = common.title;
+    const hasTitle = typeof rawTitle === 'string' && rawTitle.trim().length > 0;
+    if (hasTitle) track.title = rawTitle.trim();
     const artist = common.artist ?? (Array.isArray(common.artists) ? common.artists[0] : undefined);
     const hasArtist = typeof artist === 'string' && artist.trim().length > 0;
     if (hasArtist) track.artist = artist.trim();
@@ -1295,7 +1429,7 @@ async function readMetadata(file) {
       const info = Array.isArray(metadata.format.trackInfo) ? metadata.format.trackInfo : [];
       const names = info.map((entry) => String(entry?.codecName ?? '')).join(' ');
       track.videoCodec = detectCodec(VIDEO_CODEC_PATTERNS, names);
-      track.audioCodec = detectCodec(AUDIO_CODEC_PATTERNS, names) ?? (typeof metadata.format.audioCodec === 'string' ? metadata.format.audioCodec : null);
+      track.audioCodec = detectCodec(AUDIO_CODEC_PATTERNS, names) ?? readFormatAudioCodec(metadata.format);
       // ffprobe 是权威来源：music-metadata 对某些 MP4 只给编码箱名、对 avi/ts 直接抛错。
       // 实测踩过：MPEG-4 Part 2 的 MP4 被误判成"可直出"，结果黑屏只有声音。
       const probed = videoCodecByFfprobe(file.path);
@@ -1364,7 +1498,7 @@ async function uniqueTargetPath(dir, fileName) {
  * 大 FLAC 上会阻塞事件循环数百毫秒（播放与流媒体一起卡）。正常路径走 worker，
  * 这里只在 worker 无法启动时兜底。
  */
-async function writeTagsInProcess(filePath, meta, cover, replaceCover) {
+async function writeTagsInProcess(filePath, meta, cover, replaceCover): Promise<TagWriteResult> {
   let file;
   try {
     file = TagFile.createFromPath(filePath);
@@ -1399,7 +1533,7 @@ async function writeTagsInProcess(filePath, meta, cover, replaceCover) {
  * 主线程只等消息；超时/异常自动终止并退回主线程兜底实现。
  */
 const TAG_WORKER_TIMEOUT_MS = 30 * 1000;
-let tagWorker = null;
+let tagWorker: Worker | null = null;
 let tagWorkerBroken = false;
 let tagJobSeq = 0;
 const tagJobs = new Map();
@@ -1443,10 +1577,10 @@ function ensureTagWorker() {
   return tagWorker;
 }
 
-function writeTagsInWorker(filePath, meta, cover, replaceCover) {
+function writeTagsInWorker(filePath, meta, cover, replaceCover): Promise<TagWriteResult> {
   const worker = ensureTagWorker();
   if (worker === null) return Promise.resolve({ tagged: false, reason: 'worker unavailable' });
-  return new Promise((resolve) => {
+  return new Promise<TagWriteResult>((resolve) => {
     const id = ++tagJobSeq;
     const timer = setTimeout(() => {
       if (!tagJobs.has(id)) return;
@@ -1475,7 +1609,7 @@ function writeTagsInWorker(filePath, meta, cover, replaceCover) {
  * 把匹配到的元数据写回音频文件；封面尽力而为，失败只报告、不中断流程。
  * replaceCover 默认 false：已有内嵌封面不会被曲库封面覆盖。
  */
-async function writeTags(filePath, meta, cover, replaceCover) {
+async function writeTags(filePath, meta, cover, replaceCover): Promise<TagWriteResult> {
   if (!tagWorkerBroken) {
     const result = await writeTagsInWorker(filePath, meta, cover, replaceCover);
     if (result.tagged || result.reason !== 'worker unavailable') return result;
@@ -1514,7 +1648,7 @@ async function mapLimit(items, limit, worker, isCancelled) {
   return results;
 }
 
-async function scanLibrary(dir, onProgress, isCancelled) {
+async function scanLibrary(dir, onProgress, isCancelled): Promise<LibraryResult | null> {
   const { files, truncated, skippedPackages } = await collectAudioFiles(dir, isCancelled);
   if (typeof isCancelled === 'function' && isCancelled()) return null;
   let parsed = 0;
@@ -1561,7 +1695,7 @@ function parseRange(header, size) {
  * keeps its file descriptor open until GC — hundreds of seeks in one session
  * would otherwise run the host into EMFILE and kill playback.
  */
-function pipeFile(res, filePath, options) {
+function pipeFile(res, filePath, options?) {
   const stream = createReadStream(filePath, options);
   // 竞态：res 可能在这之前就已经关闭（请求被 abort，而我们刚 await 过
   // 目录/文件 stat）。此时再挂 'close' 监听永远等不到事件，读流会一直
@@ -1662,12 +1796,12 @@ function createHost(ctx) {
   const systemArtToken = processTokens().art;
   const systemStreamToken = processTokens().stream;
   /** Current music directory (null = not chosen yet); persisted across restarts. */
-  let currentDir = null;
+  let currentDir: string | null = null;
   /** Scanned library cache; invalidated whenever the directory changes. */
-  let library = null;
-  let scanning = null;
+  let library: LibraryResult | null = null;
+  let scanning: Promise<LibraryResult | null> | null = null;
   /** Directory the in-flight scan belongs to (scan reuse key). */
-  let scanningDir = null;
+  let scanningDir: string | null = null;
   /** Monotonic scan generation: a stale scan finishing late must not clobber a
    *  newer directory's library (setDirectory A slow, then B fast), and a
    *  superseded scan stops parsing files whose result would be discarded. */
@@ -1722,6 +1856,13 @@ function createHost(ctx) {
   })();
 
   async function setDirectory(dir) {
+    // ⚠️ 必须先等 `ready`。`ready` 里那句 `currentDir = await loadState()` 会在
+    // await 恢复时**覆盖**下面刚设好的目录。原来只有 /library、/refresh、/delete
+    // 等路由自己 `await ready`，而 /dir 与 /pick 的成功分支没有 —— 激活后第一个
+    // 请求若是 POST /dir，目录会在 loadState() 落地时被清回 null，
+    // 表现是「设了目录，但列表一直是空的」。
+    // 放在这里而不是逐个路由补：调用者忘了就复发（与 prepareVideo 那次同一类教训）。
+    await ready;
     const resolved = path.resolve(expandHome(dir));
     let stat;
     try {
@@ -1751,10 +1892,10 @@ function createHost(ctx) {
    * 一遍会产生大量临时对象（GC 抖动、CPU 空转）。库对象与 scannedAt 不变时
    * 复用同一份数组；apply/delete 会改 scannedAt，从而自动失效。
    */
-  let payloadTracksSource = null;
-  let payloadTracksScannedAt = null;
-  let payloadTracks = null;
-  function payloadTracksFor(result) {
+  let payloadTracksSource: LibraryResult | null = null;
+  let payloadTracksScannedAt: number | null = null;
+  let payloadTracks: PayloadTrack[] | null = null;
+  function payloadTracksFor(result: LibraryResult) {
     if (payloadTracksSource === result && payloadTracksScannedAt === result.scannedAt && payloadTracks !== null) {
       return payloadTracks;
     }
@@ -1774,7 +1915,7 @@ function createHost(ctx) {
     return payloadTracks;
   }
 
-  function libraryPayload(result) {
+  function libraryPayload(result: LibraryResult | null) {
     const base = {
       dir: currentDir,
       scanning: scanning !== null,
@@ -1839,7 +1980,7 @@ function createHost(ctx) {
       if (cached === null) throw statusError(404, 'no embedded cover');
       return cached;
     }
-    let cover = null;
+    let cover: Cover | null = null;
     try {
       const metadata = await parseFile(track.path, { skipCovers: false, duration: false });
       const picture = Array.isArray(metadata.common.picture) ? metadata.common.picture[0] : undefined;
@@ -1975,7 +2116,7 @@ function createHost(ctx) {
           album: typeof body.album === 'string' ? body.album.trim() : '',
         };
         // 封面是可选增强：下载失败不影响标签写入与重命名。
-        let cover = null;
+        let cover: Cover | null = null;
         if (typeof body.cover === 'string' && body.cover.length > 0) {
           try {
             cover = await fetchArtwork(body.cover);

@@ -1,7 +1,249 @@
+/**
+ * ── 就地类型声明 ────────────────────────────────────────────────────────────
+ * 本文件**必须保持零 import**：客户端 bundle 由宿主在浏览器里 eval
+ * （`window.__ModuleLoader__`），import 解析不了（AGENTS.md §2.15）。所以宿主
+ * 注入的全局对象、payload 形状与 player API 全部就地声明在这里。
+ */
+
+/** 宿主注入的浏览器全局（shell 启动时写入；测试注入其中两项）。 */
+interface Window {
+  /**
+   * 宿主模块加载器：插件 bundle 由它 eval 注册。`factory` 的形参（`require`）
+   * 故意不给上下文类型：它是宿主的动态模块表，形状不可静态表达，只能保持
+   * 原来的隐式 any（`noImplicitAny` 关闭）。
+   */
+  __ModuleLoader__: { load(registration: { id: string; factory: unknown }): void };
+  /** Desktop 的 app 文档由 preload-app 注入（只有 { protocolVersion } 标记，无 IPC 能力）。 */
+  dshDesktop?: { protocolVersion?: string } | null;
+  /** jsdom 测试注入的假媒体元素工厂（jsdom 没有媒体实现）。 */
+  __dshMusicMedia?: () => HTMLVideoElement;
+  /** 页面级共享的 player 单例（见 createPlayer 上方注释）。 */
+  __dshMusicPlayer?: MusicPlayerApi;
+}
+
+/**
+ * React 组件在宿主 module loader 下只是运行时值（`require("react")` 的返回是
+ * 动态模块，形状不可静态表达）；这里只声明「可调用」这一必要形状。
+ */
+type RuntimeComponent = (props: unknown) => unknown;
+
+/** /api/library 的曲目（宿主 payloadTracksFor 产出的字段，见 src/host.ts）。 */
+interface MusicTrack {
+  id: string;
+  name: string;
+  title: string;
+  artist?: string | null;
+  duration?: number | null;
+  /** 是否已同时具备标题与歌手标签（“一键补全”据此挑选待补全曲目）。 */
+  tagged?: boolean;
+  /** 'audio' | 'video'：MV 只有在视频轨上才显示画面。 */
+  kind?: string | null;
+  /** 视频编码（用于判断能否直出，见 host 的 mvPlan）。 */
+  videoCodec?: string | null;
+}
+
+/** 在线补全结果（localStorage `dsh-music:meta`）：只覆盖显示，不写回文件。 */
+interface MetaEntry {
+  title?: string;
+  artist?: string;
+  album?: string;
+  cover?: string;
+}
+
+/** /api/match 的候选（宿主 rankCandidates 的产物）。 */
+interface MatchCandidate {
+  id?: string;
+  title?: string;
+  artist?: string;
+  album?: string;
+  cover?: string;
+  /** 首个来源（`sources` 缺失时回退用）。 */
+  source?: string;
+  /** 命中的全部来源。 */
+  sources?: string[];
+  score?: number;
+  /** 高置信度：宿主认为可以直接写回。 */
+  auto?: boolean;
+}
+
+/** MV 准备状态：null（非视频）| { id, state, progress, mode, error }。 */
+interface MvState {
+  id: string;
+  /** 'checking' | 'preparing' | 'ready' | 'failed'。 */
+  state: string;
+  progress: number;
+  /** 'direct' | 'remux' | 'transcode' | 'wasm' | null。 */
+  mode: string | null;
+  error: string | null;
+}
+
+/** 补全弹层：null = 关闭，否则 { id, loading, applying?, error, candidates, term }。 */
+interface MatchState {
+  id: string;
+  loading: boolean;
+  /** 正在写入文件（写标签 + 重命名）的进行中标志。 */
+  applying?: boolean;
+  error: string | null;
+  candidates: MatchCandidate[];
+  /** 服务端实际使用的搜索词（搜过之后回填）。 */
+  term: string;
+}
+
+/** 播放器 store 的状态快照；`set()` 的 patch 是它的部分字段。 */
+interface PlayerState {
+  dir: string | null;
+  tracks: MusicTrack[];
+  scannedAt: number | null;
+  loading: boolean;
+  picking: boolean;
+  scanning: boolean;
+  /**
+   * 宿主入口：`api`（经连接层 /api 栅栏 + 浏览器会话）或 `legacy`（降级到插件
+   * 自建的 /dsh-music 前缀）。降级是信任模型降级，必须让用户看得见。
+   */
+  hostEntry: "api" | "legacy";
+  mv: MvState | null;
+  /** 补全时顺带转格式：成功后是否把原件丢进废纸篓（默认否，只并存）。 */
+  convertDeleteOriginal: boolean;
+  scanParsed: number;
+  scanTotal: number;
+  truncated: boolean;
+  /** 扫描时跳过的 DRM 加密包（.movpkg）数量。 */
+  skippedPackages: number;
+  error: string | null;
+  current: number;
+  playing: boolean;
+  mode: "loop" | "one";
+  time: number;
+  duration: number;
+  volume: number;
+  query: string;
+  /** 在线补全结果：id → { title?, artist?, album?, cover? }。 */
+  meta: Record<string, MetaEntry>;
+  match: MatchState | null;
+  /** 一键补全：确认条 + 批处理进度。 */
+  pendingComplete: boolean;
+  completing: boolean;
+  completeTotal: number;
+  completeDone: number;
+  completeFailed: number;
+  completeSkipped: number;
+  /** 'title' | 'artist' | 'duration' | 'none'（localStorage 里是未校验的字符串）。 */
+  sortKey: string;
+  sortDir: "asc" | "desc";
+  /** 待确认删除的曲目下标（-1 = 无）。替代 window.confirm 的应用内确认。 */
+  pendingDelete: number;
+}
+
+/** localStorage `dsh-music:prefs`：原始 JSON，字段都可能缺失/类型不对。 */
+interface PlaybackPrefs {
+  mode?: string;
+  volume?: number;
+  sortKey?: string;
+  sortDir?: string;
+  /** 上次播放位置（换目录/刷新后回补）。 */
+  last?: { id: string; time: number } | undefined;
+}
+
+/** 可见列表（筛选 + 排序后的行序）里的一行。 */
+interface TrackRow {
+  track: MusicTrack;
+  index: number;
+}
+
+/** visibleRows() 的缓存，按 (tracks, query, sort, meta) 的 identity 失效。 */
+interface RowsCache {
+  tracks: MusicTrack[];
+  query: string;
+  sortKey: string;
+  sortDir: string;
+  meta: Record<string, MetaEntry>;
+  rows: TrackRow[];
+}
+
+/** 叠加在线补全后的展示信息（effective 的返回；不改动 state.tracks 本身）。 */
+interface TrackView {
+  id: string;
+  name: string;
+  title: string;
+  artist?: string | null;
+  album?: string | null;
+  duration?: number | null;
+  kind?: string | null;
+}
+
+/**
+ * 宿主 locale 翻译器（`ctx.locale.bind(NS)`）。字典里**参数化**的键返回构造函数
+ * 而不是文案，所以按实际用法逐键声明 —— 新增参数化键时 tsc 会直接报出来。
+ */
+interface DshTranslator {
+  (key: "confirm.delete"): (title: string) => string;
+  (key: "confirm.complete" | "stats" | "stats.drm"): (count: number) => string;
+  (key: "complete.progress"): (done: number, total: number, failed: number, skipped: number) => string;
+  (key: "scan.progress"): (parsed: number, total: number) => string;
+  (key: string, ...args: unknown[]): string;
+}
+
+/**
+ * createPlayer() 返回的 player 单例 API。每一个成员在 api0 里都有对应实现；
+ * 这里显式声明是为了让 `window.__dshMusicPlayer` 可静态检查（原来整个 API 是
+ * 隐式 any，任何拼写错误都要等运行时才发现）。`t` 由 apply() 注入，故可选。
+ */
+interface MusicPlayerApi {
+  t?: DshTranslator;
+  getState(): PlayerState;
+  subscribe(listener: () => void): () => void;
+  load(): Promise<void>;
+  refresh(): Promise<void>;
+  pick(): Promise<void>;
+  setDir(dir: string): Promise<void>;
+  play(index: number): void;
+  remove(index: number): void;
+  cancelRemove(): void;
+  confirmRemove(): Promise<void>;
+  toggle(): void;
+  /** 插件停用/卸载时停止播放并断开流（lifecycle 清理语义）。 */
+  halt(): void;
+  next(): void;
+  prev(): void;
+  seek(value: number): void;
+  /** 预热 /session（媒体直连基址）。 */
+  warmSession(): void;
+  /** MV 画面：React 侧把这个媒体元素搬进全屏播放器的舞台。 */
+  media(): HTMLVideoElement;
+  /** body 上的停靠位：视图卸载时把媒体元素搬回这里，避免被移出文档而暂停。 */
+  mediaPark(): HTMLDivElement | null;
+  retryVideo(track: MusicTrack): void;
+  setVolume(value: number): void;
+  toggleMode(): void;
+  setQuery(query: string): void;
+  toggleSort(key: string): void;
+  match(id: string, query?: string): Promise<void>;
+  closeMatch(): void;
+  applyMatch(candidate: MatchCandidate, writeFile: boolean): Promise<void>;
+  completeRequest(): void;
+  cancelComplete(): void;
+  stopComplete(): void;
+  completeAll(): Promise<void>;
+  clearMeta(id: string): void;
+  effective(track: MusicTrack | undefined): TrackView | undefined;
+  coverFor(track: MusicTrack | undefined): string;
+  /** 实时播放时钟（给平滑进度条用）。 */
+  now(): number;
+  /** 可见列表：渲染与播放推进共用的同一顺序（所见即所播）。 */
+  visibleRows(): TrackRow[];
+}
+
+/** module.exports 的形状（宿主只读这两个字段）。 */
+interface MusicPlayerExports {
+  apply?: (ctx: unknown) => void;
+  inject?: string[];
+}
+
 window.__ModuleLoader__.load({
   id: "@local/dsh-music-player",
   factory: (require) => {
-    var module = { exports: {} };
+    var module: { exports: MusicPlayerExports } = { exports: {} };
     var exports = module.exports;
     const React = require("react");
     const h = React.createElement;
@@ -17,9 +259,9 @@ window.__ModuleLoader__.load({
      * 用 try/catch 兜底：万一宿主没有该种子模块，退回自绘图标 + 原生 title，
      * 绝不因为一个装饰性依赖白屏。
      */
-    let Tooltip = null;
-    let DshInput = null;
-    let dsIcons = {};
+    let Tooltip: RuntimeComponent | null = null;
+    let DshInput: RuntimeComponent | null = null;
+    let dsIcons: Record<string, unknown> = {};
     try {
       const primitives = require("@deepseek-ai/dsh-client-ui-primitives");
       Tooltip = typeof primitives.Tooltip === "function" ? primitives.Tooltip : null;
@@ -72,7 +314,7 @@ window.__ModuleLoader__.load({
      */
     let downgradedToLegacy = false;
     /** 降级发生时的通知槽：状态对象在 api() 之后才创建，所以用晚绑定。 */
-    let onDowngrade = null;
+    let onDowngrade: (() => void) | null = null;
     /**
      * 这些端点的 404 **只可能**意味着一件事：路由不存在（宿主入口是旧版）—— 它们
      * 在任何健康宿主上都答 200 或业务错误码（409/400/403/500），**不会答 404**。
@@ -104,14 +346,14 @@ window.__ModuleLoader__.load({
      * 能力凭证，只认 token 不看 Host/Origin，token 只随鉴权过的 /session 发给本页。
      * 这里拿到的就是带 token 的绝对基址；Web 端继续用同源地址（本来就正常）。
      */
-    let systemArtBase = null;
+    let systemArtBase: string | null = null;
     /**
      * 媒体直连基址（token 版）。Desktop 页面是 dsh-app://，媒体 src 走 Desktop 转发，
      * 而转发会让流丢掉 Range/206 → 浏览器判定"不可 seek"，拖动/快进就回到 0 秒。
      * 用 token 版的绝对回环地址直连，Range 才是真的（和封面取图同一套机制）。
      */
-    let systemStreamBase = null;
-    let systemArtBasePromise = null;
+    let systemStreamBase: string | null = null;
+    let systemArtBasePromise: Promise<string | null> | null = null;
     /** 上次成功取到 /session 的时间；超过 TTL 就重取（宿主热重载会轮换 token）。 */
     let sessionBaseFetchedAt = 0;
     const SESSION_BASE_TTL_MS = 60 * 1000;
@@ -124,7 +366,7 @@ window.__ModuleLoader__.load({
       systemStreamBase = null;
       sessionBaseFetchedAt = 0;
     };
-    const loadSystemArtBase = (force = false) => {
+    const loadSystemArtBase = (force: boolean = false): Promise<string | null> => {
       // 缓存带 TTL：宿主每次热重载 createHost() 都会（曾经）轮换 token，而客户端把
       // 基址缓存了整个页面生命周期 —— 过期快照会让音频 403 到刷新页面为止。
       if (force) sessionBaseFetchedAt = 0;
@@ -704,7 +946,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       return minutes + ":" + String(seconds).padStart(2, "0");
     }
 
-    async function api(path, options) {
+    async function api(path: string, options?: RequestInit) {
       // 调用点写的是宿主端点名（/api/library…），基址本身已经带了 /api，
       // 这里把重复的 /api 段折叠掉，避免出现 /api/dsh-music/api/library。
       const suffix = path.replace(/^\/api/, "");
@@ -737,18 +979,20 @@ body:has(.dshm-root) [data-width-handle]{display:none}
     const PREFS_KEY = "dsh-music:prefs";
     /** Parsed-once cache: playback position is saved while audio plays, and a
      *  JSON.parse + stringify per save would land on the audio thread's path. */
-    let prefsCache = null;
-    function loadPrefs() {
+    let prefsCache: PlaybackPrefs | null = null;
+    function loadPrefs(): PlaybackPrefs {
       if (prefsCache !== null) return prefsCache;
+      let next: PlaybackPrefs = {};
       try {
         const parsed = JSON.parse(localStorage.getItem(PREFS_KEY) ?? "{}");
-        prefsCache = parsed && typeof parsed === "object" ? parsed : {};
+        next = parsed && typeof parsed === "object" ? parsed : {};
       } catch {
-        prefsCache = {};
+        // Private mode / 损坏的 JSON：prefs 是尽力而为。
       }
-      return prefsCache;
+      prefsCache = next;
+      return next;
     }
-    function savePrefs(patch) {
+    function savePrefs(patch: PlaybackPrefs) {
       const next = { ...loadPrefs(), ...patch };
       prefsCache = next;
       try {
@@ -763,7 +1007,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
      * localStorage：不写回音频文件、不改标签，只覆盖列表与播放条的显示。
      */
     const META_KEY = "dsh-music:meta";
-    function loadMeta() {
+    function loadMeta(): Record<string, MetaEntry> {
       try {
         const parsed = JSON.parse(localStorage.getItem(META_KEY) ?? "{}");
         return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
@@ -771,7 +1015,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         return {};
       }
     }
-    function persistMeta(meta) {
+    function persistMeta(meta: Record<string, MetaEntry>) {
       try {
         localStorage.setItem(META_KEY, JSON.stringify(meta));
       } catch {
@@ -829,7 +1073,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * 切回对话会让插件视图卸载，元素若在 React 树里就会被移出文档，而 HTML 规范
        * 对「媒体元素离开文档」的处理就是暂停 —— 这正是 MV 切走就停的原因。
        */
-      let mediaPark = null;
+      let mediaPark: HTMLDivElement | null = null;
       if (typeof audio.nodeType === "number" && typeof document !== "undefined" && document.body !== null) {
         mediaPark = document.createElement("div");
         mediaPark.className = "dshm-mvPark";
@@ -838,7 +1082,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         mediaPark.appendChild(audio);
       }
       const prefs = loadPrefs();
-      let state = {
+      let state: PlayerState = {
         dir: null,
         tracks: [],
         scannedAt: null,
@@ -878,19 +1122,20 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         completeDone: 0,
         completeFailed: 0,
         completeSkipped: 0,
-        sortKey: ["title", "artist", "duration"].includes(prefs.sortKey) ? prefs.sortKey : "none",
+        sortKey: typeof prefs.sortKey === "string" && ["title", "artist", "duration"].includes(prefs.sortKey)
+          ? prefs.sortKey : "none",
         sortDir: prefs.sortDir === "desc" ? "desc" : "asc",
         /** 待确认删除的曲目下标（-1 = 无）。替代 window.confirm 的应用内确认。 */
         pendingDelete: -1,
       };
       audio.volume = state.volume;
-      const listeners = new Set();
+      const listeners = new Set<() => void>();
       const emit = () => {
         for (const listener of listeners) listener();
       };
       // 入口降级 → 落到状态里，由视图渲染成一条可见提示（不静默）。
     onDowngrade = () => set({ hostEntry: "legacy" });
-    const set = (patch) => {
+    const set = (patch: Partial<PlayerState>) => {
         state = { ...state, ...patch };
         emit();
       };
@@ -915,7 +1160,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * its array index. A rescan can reorder/insert rows; re-mapping by id is
        * the only way the highlighted row keeps matching what is playing.
        */
-      let playingId = null;
+      let playingId: string | null = null;
 
       /** Stop playback and detach the stream (used before library replacement). */
       const stopAudio = () => {
@@ -995,7 +1240,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       };
 
       /** One outstanding library poll while a host-side scan is running. */
-      let pollTimer = null;
+      let pollTimer: ReturnType<typeof setTimeout> | null = null;
       /**
        * Teardown 之后的「不得再武装」闸门（A3-01）。
        *
@@ -1171,8 +1416,8 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * 后两种要等 ffmpeg 干活，轮询到 ready 再拿到缓存文件 URL（缓存命中就秒回）。
        */
       /** 已经升级过转码的视频轨（避免失败→升级→再失败的死循环）。 */
-      const mvEscalated = new Set();
-      const prepareVideo = async (track, forcedMode) => {
+      const mvEscalated = new Set<string>();
+      const prepareVideo = async (track, forcedMode?: string) => {
         // ⚠️ 必须先拿到媒体直连基址再拼 URL。mvCacheUrl() 在基址为空时会退回**相对**
         // 地址 `/api/dsh-music/mvfile?k=…`，而 Desktop 上相对地址要经 Electron
         // forwardWebRequest —— **那条路会丢 Range/206**，于是 <video> 认为流不可 seek，
@@ -1187,7 +1432,11 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             payload = await api("/api/mv?id=" + encodeURIComponent(track.id)
               + (typeof forcedMode === "string" ? "&mode=" + forcedMode : ""));
           } catch (error) {
-            set({ mv: { id: track.id, state: "failed", progress: 0, mode: null, error: String(error?.message ?? error) } });
+            // 与原来 `String(error?.message ?? error)` 逐字等价：catch 变量在
+            // useUnknownInCatchVariables 下是 unknown，用 typeof / in 收窄后取同一个值。
+            const detail = error !== null && (typeof error === "object" || typeof error === "function") && "message" in error
+              ? (error.message ?? error) : error;
+            set({ mv: { id: track.id, state: "failed", progress: 0, mode: null, error: String(detail) } });
             return null;
           }
           if (playingId !== track.id) return null;
@@ -1212,8 +1461,8 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * 音频继续由现有 <video> 播 /stream（本来就能播），所以不用碰 A/V 同步最难的那半。
        * 任何一步失败都返回 false，让调用方退回只读缓存转码 —— 绝不改用户的文件。
        */
-      let wasmCanvas = null;
-      let wasmAbort = null;
+      let wasmCanvas: HTMLCanvasElement | null = null;
+      let wasmAbort: { aborted: boolean } | null = null;
       const stopWasmVideo = () => {
         if (wasmAbort !== null) wasmAbort.aborted = true;
         wasmAbort = null;
@@ -1239,7 +1488,11 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           canvas.className = "dshm-mvCanvas";
           stage.querySelector(".dshm-mvCanvas")?.remove();
           stage.appendChild(canvas);
-          const ctx = canvas.getContext("2d");
+          // 这块 canvas 是上面刚 createElement 出来的、且从未请求过别的上下文，
+          // 所以 "2d" 上下文必然拿得到（getContext 只在类型不支持或已请求过其它
+          // 类型时返回 null）；非空断言因此可证，也没有改变任何失败路径的行为
+          // （原来的实现同样不做判空，只在拿不到时于绘制处抛错并静默停住画面）。
+          const ctx = canvas.getContext("2d")!;
           wasmCanvas = canvas;
           const token = { aborted: false };
           wasmAbort = token;
@@ -1335,7 +1588,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         return coverUrl(track === undefined ? "" : track.id);
       };
 
-      let rowsCache = null;
+      let rowsCache: RowsCache | null = null;
       const visibleRows = () => {
         const cache = rowsCache;
         if (cache !== null && cache.tracks === state.tracks && cache.query === state.query
@@ -1591,6 +1844,13 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           const track = effective(raw);
           // 补全的远端封面优先；没有补全才回退内嵌封面 / Apple Music 图标。
           const meta = raw === undefined ? undefined : state.meta[raw.id];
+          /**
+           * `track === undefined` 与 `raw === undefined` 等价（effective 对
+           * undefined 原样返回 undefined），但类型系统看不见这层等价。下面用
+           * 一个收窄过的 id 供 artwork 分支使用 —— 那两个分支里 track 必然存在，
+           * 所以 raw 也必然存在，运行结果与 `raw.id` 完全一致。
+           */
+          const rawId = raw === undefined ? "" : raw.id;
           const metaCover = meta !== undefined && typeof meta.cover === "string" && meta.cover.length > 0
             ? systemMediaUrl("/art", "u=" + encodeURIComponent(meta.cover))
             : null;
@@ -1604,10 +1864,10 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             ? []
             : metaCover !== null
               ? [{ src: absoluteUrl(metaCover) }]
-              : coverKnown.get(raw.id) === false && fallback !== null
+              : coverKnown.get(rawId) === false && fallback !== null
                 // canvas 兜底图本身就是 data: URL，Chromium 明确允许。
                 ? [{ src: fallback, sizes: "256x256", type: "image/png" }]
-                : [{ src: systemMediaUrl("/cover", "p=" + encodeURIComponent(raw.id) + "&v=" + (state.scannedAt ?? 0)) }];
+                : [{ src: systemMediaUrl("/cover", "p=" + encodeURIComponent(rawId) + "&v=" + (state.scannedAt ?? 0)) }];
           navigator.mediaSession.metadata = track === undefined ? null : new MediaMetadata({
             title: track.title,
             artist: track.artist ?? "",
@@ -1928,8 +2188,18 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         media: () => audio,
         /** body 上的停靠位：视图卸载时把媒体元素搬回这里，避免被移出文档而暂停。 */
         mediaPark: () => mediaPark,
-        /** MV 失败后手动重试（重新走一遍转码并挂源）。 */
+        /**
+         * MV 失败后手动重试（重置升级标记 → 进入 preparing → 重走转码并挂源）。
+         *
+         * ⚠️ 这三步**必须**留在这里，不能写在 MusicView 的 onClick 里：
+         * `mvEscalated` 与 `set` 都是 createPlayer() 的局部量，而 MusicView 在它外面，
+         * 从视图里引用会在**运行时抛 ReferenceError**，而且抛在 prepareVideo 之前 ——
+         * 表现就是「转码失败后点『重试』什么都没发生，只有控制台报错」。
+         * 这个缺陷在 TS 迁移前就存在（032e333 及更早），是第 12 轮类型检查顺手抓出来的。
+         */
         retryVideo: (track) => {
+          mvEscalated.delete(track.id);
+          set({ mv: { id: track.id, state: "preparing", progress: 0, mode: "transcode", error: null } });
           void prepareVideo(track, "transcode").then((url) => {
             if (url === null || playingId !== track.id) return;
             attachSource(url);
@@ -2009,7 +2279,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           if (picker === null || candidate === null || typeof candidate !== "object") return;
           const seq = ++matchSeq;
           const id = picker.id;
-          const entry = {};
+          const entry: MetaEntry = {};
           if (typeof candidate.title === "string" && candidate.title.length > 0) entry.title = candidate.title;
           if (typeof candidate.artist === "string" && candidate.artist.length > 0) entry.artist = candidate.artist;
           if (typeof candidate.album === "string" && candidate.album.length > 0) entry.album = candidate.album;
@@ -2147,7 +2417,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
                 // 标签与文件名都已规范：不重写、不重命名，算“已正确”
                 skipped += 1;
               } else {
-                const entry = {};
+                const entry: MetaEntry = {};
                 if (typeof candidate.title === "string" && candidate.title.length > 0) entry.title = candidate.title;
                 if (typeof candidate.artist === "string" && candidate.artist.length > 0) entry.artist = candidate.artist;
                 if (typeof candidate.album === "string" && candidate.album.length > 0) entry.album = candidate.album;
@@ -2199,7 +2469,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
      * (which re-runs this factory) reuses the live instance instead of spawning
      * a second <audio> that double-plays behind the new UI.
      */
-    const player = window.__dshMusicPlayer ?? (window.__dshMusicPlayer = createPlayer());
+    const player: MusicPlayerApi = window.__dshMusicPlayer ?? (window.__dshMusicPlayer = createPlayer());
     // 立刻问一次 /session：拿到 token 版的系统取图/媒体直连基址（Desktop 拖动/快进要靠它）。
     void player.warmSession();
 
@@ -2436,7 +2706,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 
     /** Track list. Memoised so the playback clock never re-renders the rows. */
     const TrackTable = React.memo(function TrackTable({ rows, current, sortKey, sortDir, player, t, meta, effective, coverFor, activeRowRef, playing }) {
-      const sortHeader = (key, labelKey, className) => h("th", {
+      const sortHeader = (key, labelKey, className?: string) => h("th", {
         className: (className ?? "") + " dshm-sortable" + (sortKey === key ? " dshm-sorted" : ""),
         onClick: () => player.toggleSort(key),
       }, t(labelKey), sortKey === key ? (sortDir === "asc" ? " ▲" : " ▼") : "");
@@ -2500,7 +2770,9 @@ body:has(.dshm-root) [data-width-handle]{display:none}
     function MusicView() {
       const state = useSyncExternalStore(player.subscribe, player.getState);
       const activeRowRef = useRef(null);
-      const t = player.t;
+      // player.t 由 apply() 在注册字典之后注入，而本视图只可能在 apply() 里
+      // ctx.slots.register 之后被渲染 —— 所以这里必然已经赋值（非空断言可证）。
+      const t = player.t!;
 
       useEffect(() => {
         if (state.dir === null && state.tracks.length === 0 && !state.loading && state.scannedAt === null) player.load();
@@ -2798,7 +3070,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       })();
       const playerCoverSrc = currentTrack !== undefined && !coverFailed ? player.coverFor(currentTrack) : null;
       const favoriteOn = currentTrack !== undefined && favorites.has(currentTrack.id);
-      const transportButton = (icon, label, onClick, extraClass) => withTipWrapped(h("button", {
+      const transportButton = (icon, label, onClick, extraClass?: string) => withTipWrapped(h("button", {
         type: "button",
         className: "dshm-playerTransportBtn" + (extraClass ?? ""),
         disabled: state.tracks.length === 0,
@@ -2883,8 +3155,8 @@ body:has(.dshm-root) [data-width-handle]{display:none}
                           onClick: (event) => {
                             event.stopPropagation();
                             if (currentTrack === undefined) return;
-                            mvEscalated.delete(currentTrack.id);
-                            set({ mv: { id: currentTrack.id, state: "preparing", progress: 0, mode: "transcode", error: null } });
+                            // 重置 mvEscalated / 置 preparing 都在 player.retryVideo 里做 ——
+                            // 那两个是 createPlayer() 的局部量，写在这里会 ReferenceError。
                             void player.retryVideo(currentTrack);
                           },
                         }, t("mv.retry")),

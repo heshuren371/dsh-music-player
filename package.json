@@ -61,7 +61,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "node scripts/typecheck-ratchet.mjs",
-    "test": "node scripts/check-build-fresh.mjs && node scripts/run-all.mjs",
+    "test": "node scripts/check-build-fresh.mjs && node scripts/check-strict.mjs && node scripts/run-all.mjs",
     "check:manifest": "node scripts/check-manifest.mjs"
   },
   "dependencies": {

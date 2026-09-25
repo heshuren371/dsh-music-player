@@ -15,6 +15,45 @@ const inject = [];
 const HOST_FILE = fileURLToPath(new URL('./host.js', import.meta.url));
 
 /**
+ * 热重载壳调用到的宿主实例结构。
+ *
+ * `host.js` 是按 mtime 动态 `import()` 的（路径带查询串，tsc 看不到模块内容，
+ * 只能拿到 `any`），所以这里就地声明入口真正用到的三个方法。没有这层声明时
+ * `let host = null` 会被推断成 evolving any：`host !== null` 分支被收窄成 `never`，
+ * `host.dispose()` 就报“Property 'dispose' does not exist on type 'never'”。
+ *
+ * `req` / `res` / `request` 声明为 `unknown`：入口只原样透传，形状由 host.js 决定。
+ */
+interface HostInstance {
+  handle(req: unknown, res: unknown): Promise<void>;
+  handleFetch(request: unknown): Promise<Response>;
+  dispose(): void;
+}
+
+/**
+ * `host.js` 的模块出口。同样是动态 `import()` 拿不到声明，就地声明。
+ * 有这层声明后 `module.createHost(ctx)` 不再是 `any`：赋值给 `host` 后控制流
+ * 收窄成 `HostInstance`，重载闭包的返回类型也就不是 `HostInstance | null`。
+ */
+interface HostModule {
+  createHost(ctx: unknown): HostInstance;
+}
+
+/**
+ * 从抛出物里读 HTTP 状态码，读不到就 500。
+ *
+ * `catch` 绑定的类型是 `unknown`（`useUnknownInCatchVariables`），这里逐层收窄，
+ * 既不用断言也不用 any；判定顺序与原来的 `Number.isSafeInteger(error?.statusCode)`
+ * 一致：非对象/函数、没有 `statusCode`、不是安全整数都退回 500。
+ */
+function statusCodeOf(error: unknown): number {
+  if (error === null || (typeof error !== 'object' && typeof error !== 'function')) return 500;
+  if (!('statusCode' in error)) return 500;
+  const statusCode: unknown = error.statusCode;
+  return typeof statusCode === 'number' && Number.isSafeInteger(statusCode) ? statusCode : 500;
+}
+
+/**
  * `connection.fetch` 上的精确路由表（path → methods）。
  *
  * 为什么必须是 /api 之下：Desktop 的 desktop-host 只把 `/`、`/.dsh/remote-stream`
@@ -74,9 +113,11 @@ const LEGACY_PREFIX = '/dsh-music';
  * 不再需要重启进程；读失败或载入失败会以 JSON 返回，不会静默失效。
  */
 function apply(ctx) {
-  let host = null;
+  /** 当前宿主实例；显式声明类型以免 evolving any 把 null 检查收窄成 never。 */
+  let host: HostInstance | null = null;
   let hostMtimeMs = -1;
-  let loading = null;
+  /** 在飞的重载：类型与 `host` 同一来源（IIFE 返回宿主实例）。 */
+  let loading: Promise<HostInstance> | null = null;
   let lastReloadAt = 0;
   /**
    * teardown 之后的闸门（A3-02）。
@@ -113,7 +154,7 @@ function apply(ctx) {
         host = null;
       }
       // 带 mtime 的查询串绕过 ESM 模块缓存：文件一变，下次请求就是新代码。
-      const module = await import(pathToFileURL(HOST_FILE).href + '?v=' + stat.mtimeMs);
+      const module: HostModule = await import(pathToFileURL(HOST_FILE).href + '?v=' + stat.mtimeMs);
       // 赋值前复查：这一步与上面的 await 之间可能已经发生过 teardown。
       if (disposed) throw new Error('插件已停用，不再创建宿主实例');
       host = module.createHost(ctx);
@@ -127,8 +168,8 @@ function apply(ctx) {
     }
   }
 
-  const failResponse = (error) => {
-    const statusCode = Number.isSafeInteger(error?.statusCode) ? error.statusCode : 500;
+  const failResponse = (error: unknown) => {
+    const statusCode = statusCodeOf(error);
     return new Response(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }), {
       status: statusCode,
       headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
@@ -145,7 +186,7 @@ function apply(ctx) {
         res.destroy(error instanceof Error ? error : undefined);
         return;
       }
-      const statusCode = Number.isSafeInteger(error?.statusCode) ? error.statusCode : 500;
+      const statusCode = statusCodeOf(error);
       res.writeHead(statusCode, {
         'content-type': 'application/json; charset=utf-8',
         'cache-control': 'no-store',

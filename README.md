@@ -162,8 +162,8 @@ cd .. && dsh plugin --profile web add link:./dsh-music-player
 
 ```bash
 pnpm run build         # src/*.ts → lib/*.js
-pnpm run typecheck     # 类型棘轮：错误数只许变少（当前基线 243）
-npm test               # 产物新鲜度 + 25 套回归
+pnpm run typecheck     # 类型棘轮：错误数只许变少（当前基线 0 —— 已经清到零）
+npm test               # 产物新鲜度 + 逐文件严格 + 25 套回归
 pnpm run check:manifest # dsh-plugin.json 对 pinned dsh-std Community v0.15 校验
 ```
 
@@ -184,13 +184,16 @@ CI（`.github/workflows/ci.yml`）在每次 push / PR 上跑同一组。**CI 故
 | `test-security.mjs` | 越界路径、跨站请求、SSRF、封面 MIME 白名单、token 分签与栅栏收窄 |
 | `test-mv-seek.mjs` | **MV 进度条必须能快进**：媒体源必须是 token 直连的**绝对地址**。相对地址在 Desktop 上经 Electron 转发会丢 Range/206，症状就是一拖就从头 |
 | `check-build-fresh.mjs` | `lib/*.js` 必须逐字节等于 `src/*.ts` 的编译结果（防「改了 src 忘了 build」） |
-| `typecheck-ratchet.mjs` | 类型错误数只许变少不许变多 |
+| `typecheck-ratchet.mjs` | 类型错误数只许变少不许变多（基线已收紧到 **0**） |
+| `check-strict.mjs` | 逐文件收严：名单里的文件（`http-bridge` / `tagwriter`）必须在 `noImplicitAny: true` 下零错误，且**名单不许为空**（空名单=恒绿）。清干净一个文件就加一个 |
 
 > ⚠️ **没有布局测量能力。** 客户端套件全部跑 jsdom，涉及「位置 / 宽度 / 是否溢出」的结论是靠**伪造 `scrollWidth`/`clientWidth`** 得出的。凡涉及真实盒模型的判断请标注为**未验证**。（早期 README 曾声称有 headless Chromium + CDP 门禁，那是不实主张。）
 
 ## 排查 / Troubleshooting
 
 **看不到「音乐」标签**：① 刷新页面 ② `dsh plugin --profile web ls` 里有 `@local/dsh-music-player` ③ profile 的 `dsh.profile.bundles` 里有包名 ④（link 方式）克隆目录里有 `node_modules/` ⑤ Desktop：装好后重启过应用。
+
+**Desktop 上改了插件看不到效果 / `Cmd+R` 没反应**：Desktop 主窗口**没有绑定任何重新加载快捷键**（应用菜单里只注册了 `toggleDevTools`，没有 `reload` 角色）。按 **`F12`** 打开 DevTools，在 Console 里执行 **`location.reload()`**；或直接重启应用。注意：`src/host.ts` 的改动会热重载自动生效，**`src/client.ts` 的改动必须重载渲染进程** —— 否则会出现「Web 上修好了、Desktop 上还是坏的」。详见 [docs/desktop.md](docs/desktop.md) §7。
 
 **换歌不出声 / 播放异常**：先看是不是 `/dsh-music/api` 那条 token 通路——`curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:<端口>/dsh-music/api/session"`。能力 token **按用途分签且是进程级**，正常应与宿主实例同寿命。
 
