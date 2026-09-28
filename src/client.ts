@@ -133,6 +133,16 @@ interface PlayerState {
   sortDir: "asc" | "desc";
   /** 待确认删除的曲目下标（-1 = 无）。替代 window.confirm 的应用内确认。 */
   pendingDelete: number;
+  /**
+   * 全屏播放器弹层三态（closed → open → closing）。**必须放在 player store 里**，
+   * 不能是视图局部 useState：`conversation.view` 在切到对话时会卸载本视图，
+   * 局部状态随之丢失，回来就只剩列表页（用户报的「切出去再切回来全屏播放器没了」）。
+   */
+  playerPhase: "closed" | "open" | "closing";
+  /** MV 就地放大：同 playerPhase，跨视图卸载保留。 */
+  mvBig: boolean;
+  /** 封面放大预览：同 playerPhase，跨视图卸载保留。 */
+  zoomOpen: boolean;
 }
 
 /** localStorage `dsh-music:prefs`：原始 JSON，字段都可能缺失/类型不对。 */
@@ -204,6 +214,20 @@ interface MusicPlayerApi {
   toggle(): void;
   /** 插件停用/卸载时停止播放并断开流（lifecycle 清理语义）。 */
   halt(): void;
+  /**
+   * 打开全屏播放器弹层。状态存在 player 单例里 —— 切到对话会让视图卸载，
+   * 回来时仍是全屏播放器（而不是列表页）。
+   */
+  openPlayer(): void;
+  /**
+   * 收起全屏播放器：先切 closing 播 200ms 退出动画再卸载。
+   * 定时器由 player 持有，视图卸载不会把它清掉（否则回来卡在 closing 态）。
+   */
+  closePlayer(): void;
+  /** MV 就地放大开关（跨视图卸载保留）。 */
+  toggleMvBig(): void;
+  /** 封面放大预览开关（跨视图卸载保留）。 */
+  setZoomOpen(open: boolean): void;
   next(): void;
   prev(): void;
   seek(value: number): void;
@@ -1154,6 +1178,13 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         sortDir: prefs.sortDir === "desc" ? "desc" : "asc",
         /** 待确认删除的曲目下标（-1 = 无）。替代 window.confirm 的应用内确认。 */
         pendingDelete: -1,
+        /**
+         * 全屏播放器弹层 + 两个子态（MV 放大 / 封面预览）都放在 player store 里：
+         * 视图会在切到对话时卸载，局部 useState 会一起丢（见 PlayerState 注释）。
+         */
+        playerPhase: "closed",
+        mvBig: false,
+        zoomOpen: false,
       };
       audio.volume = state.volume;
       const listeners = new Set<() => void>();
@@ -1190,8 +1221,15 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       let playingId: string | null = null;
 
       /** Stop playback and detach the stream (used before library replacement). */
+      /**
+       * 停止播放并断开流。**刻意不等渐变**：调用方含 halt()/卸载路径，必须立刻断开
+       * （§2.10）。先把瞬时音量落到 0 再 pause，至少不是「满幅被掐断」。
+       * 有停止按钮的交互式停止会走 toggle 的暂停路径（那条有淡出）。
+       */
       const stopAudio = () => {
         playingId = null;
+        cancelFade();
+        audio.volume = 0;
         audio.pause();
         audio.removeAttribute("src");
         audio.load();
@@ -1551,32 +1589,128 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * 「无法播放该文件」的红字（真机就是这个症状）。
        * 意图是 cue 就别调 play —— 而不是「播了再赶紧停」。
        */
+      /**
+       * 音量的短渐变 —— 消除切歌 / 起播 / 暂停时的**电流声**。
+       *
+       * 直接换 `src`、直接 `play()`、直接 `pause()` 都是**波形上的瞬间跳变**：输出从满幅
+       * 一步跨到 0（或反过来），耳机（尤其入耳式）会把它放大成「啪 / 嘶」的一声。
+       * 系统播放器（Apple Music 等）都做淡入淡出 —— 差距在这里，不在解码质量。
+       *
+       * 三条规则：
+       * - `state.volume` 永远是**用户设定值**；渐变只改 `audio.volume` 的**瞬时值**。
+       * - 任何会让声音突然消失的动作（换源 / 暂停）**先淡出**；起播之后**淡入**。
+       * - 渐变**可被取消**：快速连点切歌时旧渐变必须停下并让位，否则它会把音量写回旧目标
+       *   （与 §2.10「挂起后必须检查状态位」同族）。取消时 promise 以 `false` 结算 ——
+       *   **不能只清定时器不结算**，那会让 `await` 它的调用方永久挂住。
+       */
+      const FADE_OUT_MS = 70;
+      const FADE_IN_MS = 90;
+      let fadeSeq = 0;
+      let fadeTimer: ReturnType<typeof setInterval> | null = null;
+      let fadeSettle: ((done: boolean) => void) | null = null;
+      /** 取消在飞的渐变；被取消的那个 promise 以 `false` 结算（不会挂住调用方）。 */
+      const cancelFade = () => {
+        fadeSeq += 1;
+        if (fadeTimer !== null) {
+          clearInterval(fadeTimer);
+          fadeTimer = null;
+        }
+        if (fadeSettle !== null) {
+          const settle = fadeSettle;
+          fadeSettle = null;
+          settle(false);
+        }
+      };
+      /** 把瞬时音量在 ms 内线性推到 to。返回是否**正常走完**（false = 被更新的动作取消）。 */
+      const rampVolume = (to: number, ms: number): Promise<boolean> => {
+        cancelFade();
+        const seq = fadeSeq;
+        // 非有限值兜底：光秃秃的假元素可能压根没有 volume 属性，直接算会得到 NaN，
+        // 而 NaN 会被一路写进 audio.volume。真实元素一定有数值，这里是防御性的。
+        const from = Number.isFinite(audio.volume) ? audio.volume : 0;
+        const target = Number.isFinite(to) ? Math.max(0, Math.min(1, to)) : 0;
+        if (disposed || ms <= 0 || Math.abs(from - target) < 0.001) {
+          // 已卸载：不再渐变，直接落到目标（halt 之后不该再有渐变在写 audio.volume）。
+          audio.volume = target;
+          return Promise.resolve(true);
+        }
+        return new Promise((resolve) => {
+          const started = Date.now();
+          fadeSettle = resolve;
+          fadeTimer = setInterval(() => {
+            if (seq !== fadeSeq) return;          // 已被 cancelFade 结算，什么都不做
+            const t = Math.min(1, (Date.now() - started) / ms);
+            audio.volume = from + (target - from) * t;
+            if (t >= 1) {
+              if (fadeTimer !== null) {
+                clearInterval(fadeTimer);
+                fadeTimer = null;
+              }
+              const settle = fadeSettle;
+              fadeSettle = null;
+              if (settle !== null) settle(true);
+            }
+          }, 16);
+        });
+      };
+      /** 只换源、**不开播**（刷新后 cue 上一首用的就是这条）。 */
       const cueSource = (url) => {
         logAttach(url);
+        // cue 是暂停态：直接把瞬时音量归零，等用户按播放时由 toggle 淡入。
+        cancelFade();
+        audio.volume = 0;
         audio.src = url;
-        audio.volume = state.volume;
       };
 
       /** 换源并开播（音频与 MV 共用；MV 的 URL 由 /mv 决定）。 */
       const attachSource = (url) => {
         logAttach(url);
-        audio.src = url;
-        audio.volume = state.volume;
-        const promise = audio.play();
-        if (promise === undefined) return;
-        promise.catch((error) => {
-          // AbortError = 这次 play 被随后的 pause()/换源打断，不是失败（快速切歌、
-          // 立刻暂停都会走到这里）。把它当成「播不了」会误报红字。
-          if (error?.name === "NotAllowedError") {
-            set({ playing: false });
+        /** 挂源 + 起播 + 淡入。**必须同步执行**，调用方的时序依赖它。 */
+        const startNow = () => {
+          audio.src = url;
+          const promise = audio.play();
+          if (promise === undefined) {
+            audio.volume = state.volume;
             return;
           }
-          if (error?.name === "AbortError") {
-            set({ playing: false });
-            return;
-          }
-          set({ playing: false, error: translate("error.unsupported") });
-        });
+          // 起播后淡入到用户音量，避免第一帧就是满幅。
+          void promise.then(() => {
+            if (!disposed) void rampVolume(state.volume, FADE_IN_MS);
+          }).catch((error) => {
+            // AbortError = 这次 play 被随后的 pause()/换源打断，不是失败（快速切歌、
+            // 立刻暂停都会走到这里）。把它当成「播不了」会误报红字。
+            if (error?.name === "NotAllowedError") {
+              set({ playing: false });
+              return;
+            }
+            if (error?.name === "AbortError") {
+              set({ playing: false });
+              return;
+            }
+            set({ playing: false, error: translate("error.unsupported") });
+          });
+        };
+        // 「确定正在出声」才需要淡出。判据写成 `paused === false && volume > 0` 而不是
+        // `paused || volume <= 0.001`：后者在属性缺失（`paused === undefined`）时两个分支
+        // 都是 false，会误判成「正在播」而走异步路径（第 18 轮实测踩到）。
+        const audible = audio.paused === false && Number.isFinite(audio.volume) && audio.volume > 0.001;
+        if (!audible) {
+          // ⚠️ 没有声音要淡出时**必须同步起播**：这里 await 一下就会把 src/play 推迟到
+          // 一个微任务之后，起播时序整体后移（第 18 轮实测：6 套回归当场抓到）。
+          // 首播、暂停中切歌都走这条，行为与引入渐变之前完全一致。
+          cancelFade();
+          audio.volume = 0;
+          startNow();
+          return;
+        }
+        // 正在播：先淡出**再**换 src。不淡出就换源，Chromium 会在当前采样的位置直接掐断
+        // 旧流，耳机里就是一声「啪」—— 这正是要修的症状。代价是这一路 ~70ms。
+        // 用户点击带来的 sticky activation 仍然有效（本文件其它路径也早就 await 后才 play）。
+        void (async () => {
+          await rampVolume(0, FADE_OUT_MS);
+          if (disposed) return;
+          startNow();
+        })();
       };
 
       /**
@@ -2212,6 +2346,15 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         }
       });
 
+      /**
+       * 全屏播放器收起动画（200ms）的定时器。
+       *
+       * 归 player 所有、而不是归视图的 useEffect 所有：视图在切到对话时**会被卸载**，
+       * 挂在视图里的 timer 会被 cleanup 清掉，回来时 phase 永远停在 `closing`
+       * ——既收不拢也打不开。halt() 里清句柄 + disposed 闸门（同 §2.10）。
+       */
+      let playerCloseTimer: ReturnType<typeof setTimeout> | null = null;
+
       const api0 = {
         getState: () => state,
         subscribe: (listener) => {
@@ -2299,16 +2442,62 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             return;
           }
           if (audio.paused) {
+            // 从当前瞬时音量（cue 之后是 0）淡入到用户音量。
             const promise = audio.play();
-            if (promise !== undefined) promise.catch((error) => {
+            if (promise === undefined) {
+              audio.volume = state.volume;
+              return;
+            }
+            promise.then(() => {
+              if (!disposed) void rampVolume(state.volume, FADE_IN_MS);
+            }).catch((error) => {
               // 同 attachSource：AbortError 是被打断，不是格式不支持。
               if (error?.name === "NotAllowedError" || error?.name === "AbortError") return;
               set({ playing: false, error: translate("error.unsupported") });
             });
           } else {
-            audio.pause();
+            // 暂停也要淡出：直接 pause() 是满幅瞬间归零，同样是一声「啪」。
+            // 被后续动作取消时（rapid toggle）`ok` 为 false，就不要再暂停了。
+            void (async () => {
+              const ok = await rampVolume(0, FADE_OUT_MS);
+              if (ok && !disposed) audio.pause();
+            })();
           }
         },
+        /**
+         * 打开全屏播放器。若正处在 closing（用户刚点了收起就再点封面），
+         * 先撤销那个还在飞的关闭定时器，否则 200ms 后会被它强制关掉。
+         *
+         * ⚠️ 这里**不能**加 `disposed` 守卫：player 是 window 级单例，插件热重载后的
+         * 下一次 activation 复用它，而 `disposed` 置位后永不复位 —— 加了守卫会让
+         * 重载之后的全屏播放器**再也打不开**（比死锁更坏）。teardown 的清理语义
+         * 由 halt() 自己完成（停播、清句柄、复位状态），不靠拦 UI 操作。
+         */
+        openPlayer: () => {
+          if (playerCloseTimer !== null) {
+            clearTimeout(playerCloseTimer);
+            playerCloseTimer = null;
+          }
+          set({ playerPhase: "open" });
+        },
+        /** 收起全屏播放器：closing 播完退出动画再置 closed（定时器归 player）。 */
+        closePlayer: () => {
+          if (state.playerPhase !== "open" || playerCloseTimer !== null) return;
+          set({ playerPhase: "closing" });
+          playerCloseTimer = setTimeout(() => {
+            playerCloseTimer = null;
+            // ⚠️ 这里**禁止**用 `disposed` 早退（第 16 轮回归）：halt() 已经把句柄
+            // 清掉了，所以回调能跑到这里，唯一原因就是「teardown 之后又被显式打开过」
+            // —— 而 player 是 window 级单例、下一次 activation 继续用它（A3-03），
+            // `disposed` 一旦置位**永不复位**；早退会把 phase 永久钉死在 `closing`
+            // （覆盖层关不掉、`closePlayer` 又拒绝从 closing 出发 ⇒ 死锁）。
+            // 只认「还在 closing」这一步：openPlayer 撤销定时器后这里自然不触发。
+            if (state.playerPhase !== "closing") return;
+            set({ playerPhase: "closed" });
+          }, 200);
+        },
+        toggleMvBig: () => set({ mvBig: !state.mvBig }),
+        setZoomOpen: (open) => set({ zoomOpen: open === true }),
         /** 插件停用/卸载时停止播放并断开流（lifecycle 清理语义）。 */
         halt: () => {
           // 先立闸门：清句柄只能清掉「当前」那个定时器，清不掉在飞回调的再武装
@@ -2323,6 +2512,15 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           if (unseekableTimer !== null) {
             clearTimeout(unseekableTimer);
             unseekableTimer = null;
+          }
+          // 音量渐变也是定时器：不清掉它会在 teardown 之后继续写 audio.volume。
+          // cancelFade 会同时把在飞的那个 promise 结算掉（不会挂住 await 它的调用方）。
+          cancelFade();
+          // 收起动画的定时器同理：清句柄 + 复位 phase，下一代会话/下一次挂载
+          // 不会继承「全屏播放器还开着」的旧状态。
+          if (playerCloseTimer !== null) {
+            clearTimeout(playerCloseTimer);
+            playerCloseTimer = null;
           }
           // 作废在途的 match/apply，并停掉批量循环：否则卸载后它还会继续
           // 逐首打接口、写文件（实测每 600ms 一次，停不下来的后台任务）。
@@ -2341,6 +2539,9 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             completing: false,
             pendingComplete: false,
             match: null,
+            playerPhase: "closed",
+            mvBig: false,
+            zoomOpen: false,
           });
           if ("mediaSession" in navigator) {
             try {
@@ -2385,6 +2586,8 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           });
         },
         setVolume: (value) => {
+          // 用户拖动优先：取消在飞的渐变，否则下一帧就把现值覆盖回去。
+          cancelFade();
           audio.volume = value;
           set({ volume: value });
           savePrefs({ volume: value });
@@ -3012,38 +3215,20 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       // 全屏播放器（Apple Music 风格）：点底部封面打开，Esc / 收起按钮关闭
       // 弹层三态：closed → open → closing（留 200ms 播完退出动画再卸载，对应
       // Apple Music 弹层的 modalZoomIn / modalZoomOut）。
-      const [playerPhase, setPlayerPhase] = useState("closed");
+      // **状态必须在 player store 里，不能是这里的 useState**：切到对话时
+      // conversation.view 会卸载本视图，局部状态一起丢，回来就只剩列表页
+      // （用户报的「切出去再切回来，全屏播放器不留存」）。退出动画的定时器
+      // 同理归 player（见 closePlayer），否则视图卸载会清掉它、卡在 closing。
+      const playerPhase = state.playerPhase;
       const playerOpen = playerPhase !== "closed";
-      const openPlayer = () => setPlayerPhase("open");
-      const closePlayer = () => setPlayerPhase((phase) => (phase === "open" ? "closing" : phase));
-      useEffect(() => {
-        if (playerPhase !== "closing") return undefined;
-        const timer = setTimeout(() => setPlayerPhase("closed"), 200);
-        return () => clearTimeout(timer);
-      }, [playerPhase]);
       // 收藏（DSH 无此能力，插件自带一份本地记录）
       const [favorites, setFavorites] = useState(loadFavorites);
       // 队列行的「⋯」菜单当前展开在哪首歌上
 
       const [queueMenu, setQueueMenu] = useState(null);
-      /** 封面放大预览（只给音频封面）：纯图片，没有播放状态要照顾。 */
-      const [zoomOpen, setZoomOpen] = useState(false);
-      /** MV 放大：点 MV 画面就让视频铺大（播放器不退出，控制条还在下面）。 */
-      const [mvBig, setMvBig] = useState(false);
-      /**
-       * 切换 MV 放大：除了 setState，同时直接把类名打到播放器根上 —— 类名是纯展示，
-       * 这样即便 React 的批量更新时机和我们预期不一致，画面大小也一定跟着点击走。
-       */
-      const toggleMvBig = () => {
-        setMvBig((value) => {
-          const next = !value;
-          const root = mvStageRef.current?.closest(".dshm-player");
-          if (root !== null && root !== undefined && root.classList !== undefined) {
-            root.classList.toggle("dshm-player--mvbig", next);
-          }
-          return next;
-        });
-      };
+      /** 封面放大预览（只给音频封面）与 MV 就地放大：同样放进 player store 跨卸载保留。 */
+      const zoomOpen = state.zoomOpen;
+      const mvBig = state.mvBig;
       /** MV 画面槽（媒体元素会被搬进来）与隐藏停靠位（弹层关着时停在这儿）。 */
       const mvStageRef = useRef(null);
       const mvParkRef = useRef(null);
@@ -3086,16 +3271,19 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         if (!playerOpen) return undefined;
         const onKeyDown = (event) => {
           if (event.key !== "Escape") return;
-          if (mvBig) { toggleMvBig(); return; }            // Esc：先还原 MV 大小
-          if (zoomOpen) { setZoomOpen(false); return; }   // 再关封面预览，最后才关播放器
-          closePlayer();
+          // 现场读 store 而不是闭包捕获：这个 effect 只在 playerOpen 变化时重挂，
+          // 捕获 mvBig / zoomOpen 会读到旧值，Esc 的手感就取决于上一次渲染。
+          const live = player.getState();
+          if (live.mvBig) { player.toggleMvBig(); return; }    // Esc：先还原 MV 大小
+          if (live.zoomOpen) { player.setZoomOpen(false); return; } // 再关封面预览，最后才关播放器
+          player.closePlayer();
         };
         window.addEventListener("keydown", onKeyDown);
         return () => window.removeEventListener("keydown", onKeyDown);
       }, [playerOpen]);
       // 删除确认条在主视图里；弹层开着会把它盖住，所以进入确认态就自动收起弹层
       useEffect(() => {
-        if (state.pendingDelete >= 0) closePlayer();
+        if (state.pendingDelete >= 0) player.closePlayer();
       }, [state.pendingDelete]);
       useEffect(() => setCoverFailed(false), [currentTrack?.id, state.meta]);
 
@@ -3285,7 +3473,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             "aria-label": t("player.close"),
             onClick: (event) => {
               event.stopPropagation();
-              closePlayer();
+              player.closePlayer();
             },
           }, ICONS.chevronDown), t("player.close"), "bottom"),
           // 参考 macOS Music：右上角是「喇叭图标 + 长条滑杆」
@@ -3315,7 +3503,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
               ? h("div", {
                   className: "dshm-mvStage dshm-zoomable",
                   ref: mvStageRef,
-                  onClick: (event) => { event.stopPropagation(); toggleMvBig(); },
+                  onClick: (event) => { event.stopPropagation(); player.toggleMvBig(); },
                   // 双击进系统全屏（原生 requestFullscreen，插件不自己造全屏）
                   onDoubleClick: (event) => { event.stopPropagation(); const m = player.media(); if (m?.requestFullscreen !== undefined) void m.requestFullscreen(); },
                 },
@@ -3354,7 +3542,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
                   className: "dshm-playerArt dshm-zoomable",
                   src: playerCoverSrc,
                   alt: "",
-                  onClick: (event) => { event.stopPropagation(); setZoomOpen(true); },
+                  onClick: (event) => { event.stopPropagation(); player.setZoomOpen(true); },
                   onError: () => setCoverFailed(true),
                 })
               : h("div", { className: "dshm-playerArtFallback" }, ICONS.note),
@@ -3392,7 +3580,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
                 onClick: (event) => {
                   event.stopPropagation();
                   if (currentTrack === undefined) return;
-                  closePlayer();
+                  player.closePlayer();
                   player.match(currentTrack.id);
                 },
               }, ICONS.ellipsis), t("player.match")),
@@ -3433,7 +3621,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
                 disabled: busy || state.tracks.length === 0,
                 onClick: (event) => {
                   event.stopPropagation();
-                  closePlayer();
+                  player.closePlayer();
                   player.completeRequest();
                 },
               }, ICONS.sparkle, t("action.completeAll")), t("action.completeAll")),
@@ -3494,7 +3682,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
                         className: "dshm-queueMenuItem",
                         onClick: () => {
                           setQueueMenu(null);
-                          closePlayer();
+                          player.closePlayer();
                           player.match(entry.track.id);
                         },
                       }, ICONS.sparkle, t("player.match")),
@@ -3520,7 +3708,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             type: "button",
             className: "dshm-nowCoverBtn",
             "aria-label": t("player.open"),
-            onClick: () => openPlayer(),
+            onClick: () => player.openPlayer(),
           },
             currentTrack !== undefined && !coverFailed
               ? h("img", {
@@ -3707,7 +3895,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         fullPlayer,
         // 放大预览：封面看大图，MV 直接把画面搬进这一层（尺寸夹在窗口内，不超出 desktop）
         zoomOpen && !isVideo && playerCoverSrc !== null
-          && h("div", { className: "dshm-lightbox", onClick: () => setZoomOpen(false) },
+          && h("div", { className: "dshm-lightbox", onClick: () => player.setZoomOpen(false) },
             h("img", { className: "dshm-lightboxImg", src: playerCoverSrc, alt: "" }),
           ),
         matchOverlay,

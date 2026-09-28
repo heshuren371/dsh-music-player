@@ -932,3 +932,214 @@ manifest PASS · `git diff --check` clean · AGENTS.md 53,978 B（82.1%）· REA
 `typecheck` 0（基线 0）· `ALL 26 SUITES PASS` · `check-build-fresh` 一致 · `check-strict` 通过 ·
 manifest PASS · `git diff --check` clean · README 137 行 / 8,563 B / 0 emoji ·
 AGENTS.md 54,719 B（83.5% of 64 KiB）
+
+---
+
+## 5.22 第 16 轮：切到对话再切回音乐，全屏播放器不留存
+
+### 5.22.1 用户报的症状（线上体验问题）
+
+全屏播放器开着时切到「对话」（或切走再切回音乐标签），回来看到的是**音乐列表页**，
+全屏播放器没了；MV 的画面也不在舞台上。
+
+### 5.22.2 成因（这次不是猜的）
+
+DSH 的 `conversation.view` **只在被选中时挂载**（`cordis-client-runner` 的 slot 目录注释：
+"it exists while that entry is mounted"；`apps/web/tests/built-boot.expected.e2e.ts:184` 也断言
+未选中时 `[data-slot="conversation.view"]` 为 null）。插件的视图因此在切换时**整体卸载**，
+局部 `useState` 随之丢失：
+
+- `playerPhase`（全屏播放器三态）→ 回来是 `closed`，渲染成列表页
+- `mvBig` / `zoomOpen` → 一起丢
+- 退出动画的 200ms 定时器挂在视图 `useEffect` 里 → 若在 closing 期间卸载，
+  cleanup 会清掉它，回来**卡在 closing**（既收不拢也打不开）
+
+注意：媒体元素本身没问题 —— 卸载时的 cleanup 已把它停到 `document.body` 的
+`.dshm-mvPark`（否则离开文档即暂停，这是仓库已有的设计）。缺的是**回来时把它搬回舞台的
+状态依据**。
+
+### 5.22.3 修法
+
+| 位置 | 改动 |
+| --- | --- |
+| `src/client.ts` `PlayerState` | 新增 `playerPhase` / `mvBig` / `zoomOpen` 三个字段（跨视图挂载保留） |
+| `src/client.ts` `createPlayer()` | 新增 `openPlayer()` / `closePlayer()` / `toggleMvBig()` / `setZoomOpen()`；退出动画定时器改为 `playerCloseTimer`（归 player） |
+| `src/client.ts` `halt()` | 清 `playerCloseTimer` 句柄，并把三个字段复位（不跨 activation 转移） |
+| `src/client.ts` `MusicView` | 三个局部 `useState` 改为读 store；Esc 改为现场读 `player.getState()`（原来闭包只依赖 `playerOpen`，`mvBig`/`zoomOpen` 读到的是旧值） |
+| `src/client.ts` `toggleMvBig` | 删掉「顺手 toggle DOM class」的补丁：类名改为由 `state.mvBig` 一处渲染（重挂载才会自动恢复） |
+
+### 5.22.4 门禁与负向对照
+
+新增 `scripts/test-view-persistence.mjs`（已注册进 `scripts/run-all.mjs`，套件 26 → 27）：
+
+1. 挂载 → 播视频轨 → 开全屏 → 点画面放大
+2. `root.unmount()`（模拟切到对话）→ store 仍 `open`；媒体停在 body 的 `.dshm-mvPark`
+3. 重新挂载 → 全屏播放器 / `--mvbig` 布局 / **同一个 `<video>` 回到新舞台**（且全页只有 1 个 video）
+4. 收起动画跨卸载仍走完（`closing` → 卸载 → 260ms 后 `closed`）
+5. `halt()` 把三态复位
+
+**夹具保真度**：媒体元素用**真实 `<video>` DOM 节点**（只补 jsdom 未实现的 `play/pause/load`）。
+用 `FakeAudio`（没有 `nodeType`）会让搬运路径整体跳过 —— 那种夹具下第 3 条断言恒绿。
+
+**负向对照**：`git stash push -- src/client.ts`（回到第 15 轮的视图局部 `useState` 版本）→
+`pnpm run build` → 该套件 **5 条 FAIL 后在第 151 行抛未捕获 TypeError 中断**（当时套件没有
+空值保护，`.dshm-playerTop ...` 取到 null 就断，故没打印总账）。这 5 条含三条用户症状：
+`coming back restores the full player instead of the list page`、
+`the restored player still shows the track that was playing`、
+`the same media element is moved back into the new stage`。
+**§5.22.6 已更正此处的「6 条」并给套件补了空值保护**，现在对照能跑完并打印总账。
+`git stash pop` + 重建产物后全绿。对照必须重建产物（§9 第 5 条）。
+
+### 5.22.5 验证
+
+**静态与套件**（本机 Node v24，仓库根）：`pnpm run build` + `typecheck` 0（基线 0）·
+`npm test` = `check-build-fresh` 一致 + `check-strict` 通过 + `ALL 27 SUITES PASS` ·
+`check:manifest` PASS（未动 manifest，仍跑）· `git diff --check` clean。
+
+**真机 GUI 复核**（ego-browser 打开 `http://127.0.0.1:3080`，即用户正在用的 DSH Web GUI，
+152 首曲库；先 `setVolume(0)` 静音再操作，结束时已暂停）：
+
+| 操作 | 读数 |
+| --- | --- |
+| 播「11」→ 点底部封面 | `phase=open`，`.dshm-player` 在，标题「11」 |
+| 切「对话」（视图卸载） | `.dshm-root=false`、`.dshm-player=false`，但 `phase=open`、**`playing=true`**（声音没断） |
+| 切回「音乐」 | `.dshm-player` **回来**，标题仍是「11」，进度从 0:02 走到 0:04（截图可证） |
+| 收起 | `phase=closing` + `.dshm-player--closing` → 400ms 后 `closed` 且卸载 |
+| 收起动画期间切走再回来 | `phase=closed`、无残留 `--closing` 覆盖层（定时器归 player 生效） |
+| 播 MV「东风破」→ 点画面放大 → 切走再回来 | `mvBig=true`、`.dshm-player--mvbig` 在、`mediaInStage=true`（同一个 `<video>` 回到新舞台） |
+
+**未验证的部分**（如实说明）：**没有**做页面刷新后的持久化 —— 刷新会重开 player 单例，
+全屏态按设计复位为 `closed`（本轮只解决「视图卸载/重挂载」，不解决「整页重载」）；
+Desktop（Electron）宿主形态未实测，只在 Web GUI 上跑过。
+
+### 5.22.6 第 16 轮的对抗复核与自纠（先修 #1 再交付）
+
+第 16 轮改完后做了一次**独立对抗复核**（另一个 agent，只读；探针在 `/tmp/negcheck/`）。
+它证伪了「可以直接交付」：同一改动**引入了一个新的高severity 回归**，已修复并补门禁。
+
+#### #1【高｜本改动新增】`disposed` 守卫把 `phase` 永久钉在 `closing`
+
+- **机理**：退出动画定时器回调原来写成 `if (disposed) return;` —— 而 `halt()` 已经把句柄
+  清掉，回调能跑到**只可能**是「teardown 之后又被显式打开过」；`disposed` 一旦置位**永不复位**，
+  而 player 是 window 级单例、下一代 activation 继续复用它（A3-03）。于是
+  `openPlayer → closePlayer` 之后 `closing` 再也出不去（`closePlayer` 又只在 `phase === "open"`
+  时才动手）⇒ 覆盖层 `dshm-player dshm-player--closing` 常驻、Esc 也救不回来。
+- **复现**：复核者的 `probe3.mjs`（真实第二次 `plugin.apply()`）与 `probe-old.mjs`
+  （同 activation 先 `halt()` 再 open→close）都复现；HEAD 版本全 PASS ⇒ 是**本轮新增**。
+  现有套件当时是绿的，因为它在 `halt()` 之后只断言 `phase === 'closed'`，**从未再走一次 open→close**。
+- **修法**：回调判据从 `disposed` 改成「**还在 closing 才收口**」
+  （`if (state.playerPhase !== "closing") return;`；`openPlayer` 撤销定时器的路径自然不触发）。
+  **明确不采纳**「给 `openPlayer` 补 `disposed` 守卫」的建议 —— 那会让插件热重载后
+  全屏播放器**再也打不开**（`disposed` 永不复位），比死锁更坏；teardown 语义由 `halt()`
+  自己完成（停播 / 清句柄 / 复位三态），不靠拦 UI 操作。两处都写了代码注释防复发。
+- **门禁**：套件补两条 —— ① `teardown.dispose()` → `openPlayer()` → `closePlayer()` →
+  300ms 后必须 `closed`；② **真实第二次 activation**（第二次 `plugin.apply()` + 重挂载）
+  开全屏后必须能收口（`overlay=false && phase==='closed'`）。
+  **负向对照**：把 `if (disposed) return;` 写回去 → `pnpm run build` →
+  这两条**恰好变红**（`phase=closing`、`overlay=true`，`2 CHECK(S) FAILED`），其余全绿；
+  恢复后 `ALL PASS`（23 项）。顺带给套件加了点击前判空，负向对照不再抛未捕获异常、
+  能打印总账（§5.22.4 的「6 条」更正为「5 条 + 中断」即由此而来）。
+
+#### #2【中｜推断，非本轮引入】媒体「离开文档即暂停」的窗口 —— 真机实测**未能复现**
+
+复核者指出：视图挂载期间媒体停在 React 树内的 park，卸载时先随子树离开文档、passive cleanup
+才搬到 body park，理论上存在暂停窗口（jsdom 观察不到）。本仓库没有布局测量能力，但**有真实浏览器**：
+ego-browser 播 MV「东风破」→ 开全屏 → 放大 → 切「对话」→ 1.8s / 3.3s 两次采样 →
+切回来采样，结果 `playing=true`、`paused=false` 全程成立，`currentTime` 4.7 → 6.6 → 8.1 → 9.7
+（未归零、未中断），且同一个 `<video>` 回到新舞台。⇒ 在 Web GUI 上该窗口不产生暂停
+（cleanup 与删除在同一任务内完成，规范要求「稳定状态」才判离文档）。
+**Desktop（Electron）未实测**，仍标注未验证。
+
+#### #3【低｜已修】文档路径写错
+
+`AGENTS.md §2.17` 原写「`lib/client.ts` 的 `PlayerState`」——`lib/` 下只有 `.js`，真源是
+`src/client.ts`。已改，并同步把「`disposed` 死锁」沉淀成 §2.17 的第四条规则。
+
+#### #4【低｜已修】本节 5.22.4 的负向对照读数不实
+
+复核者独立重做后指出「6 条 FAIL」不可复现（实为 5 条后中断）。已按实际读数更正（见上）。
+
+#### 复核确认「未能证伪」的项
+
+死代码 / 未使用变量（`typecheck` 0 + `test-audit` 33 methods all used）· `playerCloseTimer`
+守卫除 #1 外无第二处漏网 · closing 期间再点封面能撤销定时器 · closing 期间 `pendingDelete`
+自动收起不卡死 · 200ms 内重挂载能正常收口 · Esc 三分支顺序保持 · 删掉「顺手 toggle DOM class」
+不影响（HEAD 的 className 本就由 `mvBig` 推导）· 不存在「留在 body 回不到舞台」的顺序。
+
+---
+
+## 5.23 第 18 轮 —— 入耳式耳机里的「电流声」（切歌 / 起播爆音）
+
+**用户报告**：戴入耳式耳机听本插件的音乐，**每次切歌或起播都有一声电流声 / 爆音**；
+系统 Apple Music 怎么切都不会有。
+
+### 5.23.1 根因：音频通路全是硬切换，没有任何淡入淡出
+
+`grep -n "fade\|ramp\|gain" src/client.ts` ⇒ **0 命中**（只命中无关英文文本）。逐个看音频状态
+改动点，全是瞬间跳变：
+
+| 位置 | 硬切换 |
+| --- | --- |
+| `attachSource` | `audio.src = <新流>` + `audio.volume = state.volume` + `play()`：旧流在**任意采样处**被掐断，新流以**满幅**起播 |
+| `cueSource` | 同上（不含 play） |
+| `toggle` | `audio.pause()`：全幅一步归零 |
+| `stopAudio` | `pause()` + `load()`：双重硬停 |
+
+爆音的物理成因是**波形的瞬间不连续**：输出从满幅一步跨到 0（或反过来）。
+Apple Music 之所以不会，是因为它做淡入淡出（且音频图常驻）。**这不是解码质量问题。**
+
+### 5.23.2 修法：音量短渐变（淡出 → 换源/暂停 → 淡入）
+
+- `rampVolume(to, ms)`：16ms 步进线性推 `audio.volume`；**`state.volume` 始终是用户设定值**，
+  渐变只改**瞬时值**，不写 state / prefs。
+- `cancelFade()`：取消在飞渐变，**并把它的 promise 以 `false` 结算**。
+- `attachSource`：正在出声 → 先淡出 70ms → 换源 → `play()` → 起播后淡入 90ms；
+  **没有声音可淡 → 完全同步起播**（见下）。
+- `toggle` 的暂停路径：先淡出再 `pause()`；被后续动作取消时（`ok === false`）**不暂停**。
+- `setVolume`：先 `cancelFade()` 再设值（用户拖动优先）。
+- `stopAudio` / `halt()`：先 `cancelFade()` + 瞬时音量落 0，然后**立刻**断开（不等渐变）。
+
+### 5.23.3 三条实测教训（都留了代价）
+
+1. **把起播塞进 `await` 之后 → 6 套既有回归当场变红。** 第一版无论是否在播都走
+   `await fadeOutBeforeCut()`，起播时序整体后移一个微任务；`progress bar` / `resume after cut` /
+   `refresh remap` / `restore race` / `teardown` / `delete flow` 六个套件报
+   `playCount=0` / `src=`。**修法：没在播时完全同步起播**（与引入渐变之前逐字一致）。
+2. **判据写错会一直走错分支。** 我最初写 `audio.paused || audio.volume <= 0.001` ——
+   夹具的假元素**没有** `paused` / `volume` 属性时 `undefined || (undefined <= 0.001)` 两个分支
+   都是 false，于是「暂停中」被判成「正在播」，异步路径永远生效。
+   改成「**确定正在出声**才淡出」：`paused === false && Number.isFinite(volume) && volume > 0.001`。
+3. **我自己的断言也可能是假的。** 第一版 A1 断言「`play()` 之后 src 必须**同一 tick** 挂上」，
+   它红了 —— 一查才发现本仓库的起播路径**本来就不是同步挂源**（先 await session/库）。
+   改成有判别力的形式：「30ms 内必须挂上，且之前不得有**多步**淡出」。
+
+### 5.23.4 门禁 `scripts/test-audio-fade.mjs`（15 条断言）
+
+夹具是**记录操作顺序**的假媒体元素（`paused` / `volume` 都是真属性，每次写入记 `{op, v}`），
+因为要断言的正是**谁先谁后**。覆盖：A 首播不等淡出（30ms 内挂源 + 之前最多一次归零写入）·
+B 播放中换源前必须**多步**淡到 ~0 且单调 · C 换源后淡回用户值 · D 暂停前先淡出 ·
+E **淡入进行中**改音量不被覆盖 · F 连切后音量正确且渐变已结算（不挂住）·
+G `halt()` 后不得再写 `audio.volume` 且已静音。
+
+**三条负向对照，各自精确变红**（每次都 `tsc` 重建产物，§9 第 5 条）：
+
+| 对照 | 结果 |
+| --- | --- |
+| `attachSource` 永不淡出（`audible = false`） | `FAIL B2 … steps=1` |
+| 暂停退回直接 `audio.pause()` | `FAIL D1 … pause@0 fade=[]` |
+| `setVolume` 不取消在飞渐变 | `FAIL E1 … volume=1.000 want=0.33` |
+
+> **E 的第一版没有判别力**：我把「改音量」和「换源」放在同一刻，那次淡入的目标本来就是新音量，
+> 取不取消 `cancelFade` 都能过（对照 C 一度 **ALL PASS**）。改成在**淡入途中**（t≈120ms）改音量
+> 之后，对照才精确变红。**这正是 §6.1 第 7 条要求做对照的原因 —— 不做对照我不会发现它。**
+
+### 5.23.5 验证边界（必须如实说）
+
+jsdom **没有音频输出**。本套件验的是「**不产生瞬间跳变**」的**机制与时序**，
+**不代表真实听感已经验证**。真实结论需要戴耳机人工确认 —— 这一条写进了 `AGENTS.md §2.18`。
+
+### 5.23.6 验证
+
+`typecheck` 0（基线 0）· **`ALL 28 SUITES PASS`**（新增 `test-audio-fade`，已注册进 `run-all`）·
+`check-build-fresh` 一致 · `check-strict` 通过 · manifest PASS · `git diff --check` clean ·
+AGENTS.md 59,828 B（91.3%）· README 同步为 28 套

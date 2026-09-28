@@ -16,7 +16,7 @@ DSH 的本地音乐播放器插件，**Web + Desktop 同一份包**。`src/*.ts`
 
 ```bash
 pnpm run build && pnpm run typecheck   # 编译 + 类型棘轮（基线 0，含死代码开关）
-npm test                               # 产物新鲜度 + 逐文件严格 + 26 套回归
+npm test                               # 产物新鲜度 + 逐文件严格 + 28 套回归
 pnpm run check:manifest                # 只在动了 dsh-plugin.json 时必跑
 ```
 
@@ -37,7 +37,7 @@ pnpm run check:manifest                # 只在动了 dsh-plugin.json 时必跑
 
 1. 改了 `src/` → 跑过 `pnpm run build`
 2. `pnpm run typecheck` 0 错误（含 `noUnusedLocals`/`noUnusedParameters`：死代码直接红）
-3. `npm test` 26 套全绿
+3. `npm test` 28 套全绿
 4. 新增功能/修复 → **在 `scripts/run-all.mjs` 注册了回归套件**（没注册等于没门禁）
 5. 新增断言 → **做过对照**：把缺陷改回去，断言必须变红（§6.1 第 7 条）
 6. 改了文档 → README ≤ 220 行，深度材料进 `docs/`（§7.2）
@@ -200,7 +200,10 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
   ```
   grep -rn "<apiVersion>" <pinned>/docs/proposals/ <pinned>/packages/
   ```
-  当前状态（第 7 轮实测，搜索面已用已知为真的 `conversation.view` 校准）：`webserver.dsh/v1alpha1` 与 `browser.ui.dsh/v1alpha1` 在 **references 全树 0 命中**、在 **DSH 0.1.7-rc.2 运行时 0 个文件命中**。基线里真实存在的 UI 坐标是 `ui.dsh/v1alpha1` / `ContributionHost`（`ui-contribution.zh.md:55`），adapter 的 web surface 是 `web.ui.dsh/v1alpha1`（基线 6 个文件）——**但这两个在 DSH 运行时同样 0 命中**（宿主只用字符串 slot `conversation.view`，104 个文件命中）。⇒ 本插件**不消费**任何 Community 协议契约，`requires.contracts` 为空是诚实状态（`A4-03`）。
+  实测结论（第 7 轮，搜索面已用已知为真的 `conversation.view` 校准）：`webserver.dsh/v1alpha1` 与
+  `browser.ui.dsh/v1alpha1` 在 references 全树与 DSH 运行时**均 0 命中**；基线里真实存在的
+  `ui.dsh/v1alpha1` / `web.ui.dsh/v1alpha1` 在 DSH 运行时**同样 0 命中**（宿主只用字符串 slot
+  `conversation.view`）。⇒ 本插件**不消费**任何 Community 契约，`requires.contracts` 为空是**诚实状态**（`A4-03`）。
 - **`fallback` 只是「optional 时的降级说明」，不能把不存在的坐标洗成合规声明。** 给一个不存在的坐标补 `fallback`（`D-05` 曾如此处置）**不构成修复** —— 它让声明看起来完整，实际协商层永远拿不到 definition。
 - **声明无 definition 的扩展 ≠ 声明能力**：`manifest.zh.md:62` 明确「Host 不理解某项扩展时…**不能声称对应功能已经生效**」。pinned 投影对无 definition 的扩展只产出 `unknown-extension` **warning**（`A4-02`）。因此 `x-dev.dsh-std.extensions` 里的两个 id **不是**能力声明，插件的主功能（会话视图 + 宿主传输）在 manifest 上是**未声明**的。第 9 轮的做法是**不声明**而不是假声明，并把真实绑定记录进 `x-dsh-music-player.ui`（`A4-02` 已修）。
 - **extension id 必须有运行时对应**：两个扩展 id（`local.dsh-music-player.browser` / `.music-view`）在 `lib/` 下**逐个 grep 均 0 命中**；真正的注册点分别是 `package.json` 的 `exports["./client"]` + `dsh.client.platform` 与 `lib/client.js:3200`（`ctx.slots.register`）。声明 id 与运行时注册 id **对不上就是死声明**。（第 8 轮已把原第三个 `.routes` 条目移出，改为顶层的 `x-dsh-music-player.transport` 登记表。）
@@ -215,7 +218,8 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 2. **基址钉回环字面量，不得回显请求 Host**：原来 `lib/host.js` 的 `/session` 直接用请求 Host 拼基址 —— 第 9 轮改为 `loopbackAuthority(req)`：只取 Host 的**端口**，主机名固定 `127.0.0.1`（`A5-03` 已修）。
 3. **被豁免 Host/Origin 栅栏的端点**（`lib/host.js` 的 `system-*`）**不得承担读能力**，且其凭证**不得进入任何持久通道**（日志、文件、localStorage）。豁免必须**只到 Origin / Sec-Fetch 为止** —— 第 9 轮新增 `isLoopbackHostRequest`，Host 非回环一律 403（`A5-03` 已修）。
 
-> 这三条合起来解释 `A5-03`：token 通道**既不走平台会话鉴权、也不走插件栅栏**，唯一防线是 token 保密性 —— 而 token 已在**世界可读**文件里（`A2-01`）⇒ 同机任意进程可 `GET /dsh-music/api/system-stream?t=…&p=<任意曲目>` 读库内任意文件，无 cookie / 无 Origin。
+> `A5-03` 的教训：token 通道**既不走平台鉴权、也不走插件栅栏**，唯一防线是 token 保密性。
+> 所以 token **不得**进入任何世界可读的位置（`A2-01` 就是把它写进了 `/tmp`）。
 
 ### 2.13 错误不得被报告为成功（第 5 轮沉淀）
 
@@ -310,12 +314,57 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 - **夹具的保真度也是判别力的一部分**：假媒体元素若缺了真实元素一定有的属性
   （`currentSrc` / `seekable`），被测路径会失真甚至恒绿。写夹具时先问「真实元素这里长什么样」。
 
-> **§2.16 的第 14 轮补充**：修「不可 seek」这种**症状**时，**修法必须按「当前这条源是什么类型」推导，
-> 不能按期望的播放模式（`track.kind`）猜**。真机故障：`.mov` 走 WASM 旁路时元素播的是
-> `/stream?p=<视频文件>`（音轨），而 `track.kind` 仍是 `"video"` —— 按 kind 去 `prepareVideo()`
-> 会去等一次可能几分钟的转码，自愈于是永远卡住、源从未被换掉（日志表现为 `url` 一直不变）。
-> 另：**只在「出问题时」记日志是不够的**，要在**行为发生的那一刻**记（这里是在挂源时记
-> 「挂的是不是 token 源」），否则排查时看不到「挂源那一刻的状态」。
+> **第 14 轮补充（通用形态）**：修**症状**时，**修法必须按「当前这条源是什么类型」推导，
+> 不能按期望的播放模式（`track.kind`）猜** —— 真机故障是 `.mov` 走 WASM 旁路时元素播的是音轨
+> 而 `track.kind` 仍是 `"video"`，按 kind 去等转码 ⇒ 自愈永远卡住。另：**只在出问题时记日志不够**，
+> 要在**行为发生的那一刻**记（挂源时记「挂的是不是 token 源」），否则看不到当时状态。
+
+### 2.17 视图局部状态活不过 `conversation.view` 的卸载（第 16 轮沉淀）
+
+DSH 的 `conversation.view` **只在被选中时挂载**（切到「对话」即卸载，切回来是一次全新挂载）。
+这条接缝有三个必须一起记住的后果：
+
+- **要跨视图切换保留的 UI 状态，禁止放视图局部 `useState`**。全屏播放器三态 `playerPhase`、
+  MV 放大 `mvBig`、封面预览 `zoomOpen` 修复前全是局部 state，切走再回来就回到列表页
+  （用户报的直接症状）。它们现在放进 **player 单例 store**（`src/client.ts` 的 `PlayerState`）。
+- **视图驱动的定时器必须归资源所有者，不能归视图的 effect**。收起动画那 200ms 若挂在视图里，
+  卸载会把它 cleanup 掉，`phase` 永远停在 `closing`；定时器因此移进 `createPlayer()`
+  （`playerCloseTimer`），并在 `halt()` 里清句柄 + 复位状态（同 §2.10）。
+- **重挂载后要把外部资源搬回来**：MV 的 `<video>` 卸载时停在 body 停靠位（离开文档即暂停），
+  回来时必须按**恢复后的** `playerPhase` 搬进新舞台；断言要覆盖「同一个元素、不是新建第二个」。
+- **UI 过渡的定时器禁止用 `disposed` 早退**：`halt()` 已经清掉句柄，所以回调能跑到，唯一可能是
+  「teardown 之后又被显式打开过」；而 player 是 window 级单例、下一代 activation 继续用它
+  （A3-03），`disposed` 置位后**永不复位** ⇒ 早退会把 `phase` 永久钉在 `closing`
+  （覆盖层关不掉，`closePlayer` 又拒绝从 closing 出发 = 死锁）。判据改成「还在 closing 才收口」。
+  同理**禁止**给 `openPlayer` 加 `disposed` 守卫：那会让插件重载后的全屏播放器再也打不开
+  （比死锁更坏）。teardown 语义由 `halt()` 自己完成，不靠拦 UI 操作。
+
+> 门禁 `test-view-persistence.mjs`：挂载 → 开全屏（含 MV 放大）→ 卸载 → store 仍 `open`
+> 且媒体停在 body → 重挂载 → 全屏 / 放大布局 / 同一个 `<video>` 全回来；收起动画跨卸载仍走完；
+> `halt()` 复位；**外加**「teardown 之后 open→close 仍收口」与「真实第二次 activation 能开能关」
+> 两条（防 `disposed` 死锁回归）。夹具用**真实 `<video>` DOM 节点**（假元素没有 `nodeType`，
+> 搬运路径会整体跳过 ⇒ 断言恒绿，§9 第 4 条）。细节与负向对照见台账 §5.22。
+
+### 2.18 音频通路不得硬切换 —— 否则是耳机里的「电流声」（第 18 轮沉淀）
+
+症状：**入耳式耳机里每次切歌 / 起播都有一声爆音**，系统播放器（Apple Music）没有。根因不是
+解码质量，而是**波形上的瞬间跳变**（换 `src` / `play()` / `pause()` 都让输出一步跨到 0 或满幅）；
+修复方式是**淡入淡出**。
+
+- **任何让声音突然消失的动作必须先淡出，起播之后必须淡入。** `state.volume` 始终是**用户设定值**；
+  渐变只改 `audio.volume` 的**瞬时值**，不得写回 state 或 prefs。
+- **渐变必须可取消，且取消时要结算 promise。** 只清定时器不 settle，会让 `await` 它的调用方
+  **永久挂住**（与 §2.10「清 timer ≠ 阻止再武装」同族）。
+- **「没有声音要淡出」的路径必须保持同步** —— 判据写成「**确定正在出声**」：
+  `paused === false && volume > 0.001`。**禁止**写成 `paused || volume <= 0.001`：
+  属性缺失时（`paused === undefined`）两个分支都是 false，会把「暂停中」误判成「正在播」
+  而走异步路径，起播时序整体后移。
+- **用户拖动音量优先于任何在飞渐变**（不取消就会被下一帧覆盖回去）。
+- **卸载路径不等渐变**：`stopAudio` / `halt()` 必须先取消渐变、再把瞬时音量落到 0，然后立刻断开（§2.10）。
+- **验证边界（必须如实说）**：jsdom **没有音频输出**，门禁只能验「不产生瞬间跳变」的**机制与时序**；
+  **真实听感必须人工确认**，不得声称「已验证无爆音」。
+
+> 门禁 `test-audio-fade.mjs`（断言清单见 §6.3，三条负向对照见台账 §5.23）。
 
 ## 3. 可跑门禁
 
@@ -324,13 +373,13 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 ```bash
 pnpm run build                # src/*.ts → lib/*.js（改了 src 必须跑）
 pnpm run typecheck            # 类型棘轮：错误数只许变少（基线 0）
-npm test                      # 产物新鲜度 + 逐文件严格 + 26 套回归
+npm test                      # 产物新鲜度 + 逐文件严格 + 28 套回归
                               # = check-build-fresh && check-strict && run-all
 pnpm run check:manifest       # dsh-plugin.json 对 pinned Community v0.15 校验
 git diff --check              # 空白/冲突标记
 ```
 
-`.github/workflows/ci.yml` 在每次 push / PR 上跑同一组门禁（`pnpm install --frozen-lockfile` → `typecheck` → 全部 `lib/*.js` 与 `scripts/*.mjs` 的 `node --check` → `npm test`（= 新鲜度 + 逐文件严格 + 26 套）→ manifest 校验 → 冲突标记扫描）。**CI 故意不先 build**：新鲜度门禁只在 `lib/` 未被就地覆盖时才有判别力。**CI 绿不等于 manifest 校验过**：CI 里没有 vendor 基线，`check:manifest` 会走 SKIP 分支并打 `::warning::` —— SKIP 不是通过（见上）。
+`.github/workflows/ci.yml` 在每次 push / PR 上跑同一组门禁（`pnpm install --frozen-lockfile` → `typecheck` → 全部 `lib/*.js` 与 `scripts/*.mjs` 的 `node --check` → `npm test`（= 新鲜度 + 逐文件严格 + 28 套）→ manifest 校验 → 冲突标记扫描）。**CI 故意不先 build**：新鲜度门禁只在 `lib/` 未被就地覆盖时才有判别力。**CI 绿不等于 manifest 校验过**：CI 里没有 vendor 基线，`check:manifest` 会走 SKIP 分支并打 `::warning::` —— SKIP 不是通过（见上）。
 
 - **只要动了 `dsh-plugin.json` 或 manifest 相关字段，`check:manifest` 是必跑项。** 它用固定 revision 的 `@dsh-std/manifest` 校验，不是照 `main` 分支。基线找不到时它以 **SKIP** 退出（exit 0 + 明确警告），**那不是通过**——用 `DSH_STD_MANIFEST=/path/to/@dsh-std/manifest/lib/index.js` 指过去。
 - 新增功能**必须**在 `scripts/run-all.mjs` 的 `suites` 里注册回归套件；没注册等于没有门禁。
@@ -372,14 +421,14 @@ git diff --check              # 空白/冲突标记
 | 13 | Desktop MV 拖不动：回落判据**过窄**（只认 404） | `/session` 专属回环回落（§2.16） |
 | 14 | 自愈**修错对象**（按 `track.kind` 猜） | 改按**源类型**推导；补「挂源那一刻」的诊断 |
 | 15 | 刷新误报「无法播放」；死代码 / 泄漏 / 进程审计 | `cueSource` + 放行 `AbortError`；死代码门禁；`test-leak` |
+| 16 | 切走再切回全屏播放器不留存（视图卸载） | UI 状态移入 player store；动画定时器归 player；`test-view-persistence` |
+| 17 | README 改写为 DSH 官方体例 | 137 行 / 0 emoji / 细节交给 `docs/`；体例沉淀进 §7.2 |
+| 18 | 入耳式耳机切歌/起播的「电流声」 | 音频通路补淡入淡出；`test-audio-fade`（3 条负向对照） |
 
-**当前状态（第 15 轮收口）**
-
-- 高危 **13 → 0**；存量只剩中/低与**明确接受项**（见 §10）
-- 套件 18 → **26**（`ALL 26 SUITES PASS`）；每条新门禁都做过对照（回退修复必须变红）
-- 类型错误 **243 → 0**，棘轮基线锁在 **0**；死代码开关永久开启
-- **审计维度已全覆**：manifest+composition · lifecycle · permission+storage · 门禁有效性 · 声明面/注册面
-- 自推翻的记录（不得覆盖，只能新写）：`D-05` 曾误标「已修」、`A1-02` 的冷却设计、第 13 轮自愈的修法
+**当前状态（第 18 轮）**：高危 **13 → 0**，存量只剩中/低与**明确接受项**（见 §10）；
+套件 18 → **28**（`ALL 28 SUITES PASS`，每条新门禁都做过对照）；类型错误 **243 → 0** 且基线锁在 0；
+审计维度已全覆（manifest+composition · lifecycle · permission+storage · 门禁有效性 · 声明面/注册面）。
+自推翻的记录（**不得覆盖，只能新写**）：`D-05` 曾误标「已修」、`A1-02` 的冷却设计、第 13 轮自愈的修法。
 
 
 ## 6. 审计与迭代协议
@@ -430,6 +479,8 @@ git diff --check              # 空白/冲突标记
 | `存储失败不得报成功` | 只读 `$DSH_HOME` 时，断言响应含**稳定未持久化错误码**，而不是 `200 + 数据` | 5 | `A5-09` |
 | `恒绿断言扫描` | 静态禁止 `check(…, true)` 字面真断言；「跳过」必须能与「通过」区分（非零退出或显式 skip 计数） | 2 | `A2-10`/`A2-11`/`A2-13` |
 | `门禁诊断可用` | `run-all.mjs` 失败时必须打印失败套件的 stderr | 2 | `A2-12` |
+| `视图卸载不丢全屏播放器` | **第 16 轮已实现**（`test-view-persistence.mjs`）：开全屏（含 MV 放大）→ 卸载视图 → store 仍 `open` 且媒体停在 body → 重新挂载 → 全屏播放器 / 放大布局 / 同一个 `<video>` 全部回来；收起动画跨卸载仍走完；`halt()` 复位 | 16 | §2.17 |
+| `音频不得硬切换` | **第 18 轮已实现**（`test-audio-fade.mjs`）：首播 30ms 内挂源（不等淡出）；播放中换源前必须**多步**淡到 ~0；换源后淡回用户值；暂停前先淡出；淡入途中改音量不被覆盖；连切后渐变已结算；`halt()` 后不再写 `audio.volume` | 18 | §2.18 |
 
 ## 7. 文档分层与关系
 
@@ -478,6 +529,8 @@ git diff --check              # 空白/冲突标记
 | I-11 | 类型错误只许变少；允许清单只许加 | 类型质量倒退 | `typecheck-ratchet`、`check-strict` | §2.15 |
 | I-12 | 不留死代码 | 维护成本与误读 | `noUnusedLocals` / `noUnusedParameters` | §2.15 |
 | I-13 | 每个断言都必须**能变红**（禁恒绿） | 门禁形同虚设 | 人工对照 + §9 | §6.1 §6.2 |
+| I-14 | 跨视图切换要保留的 UI 状态只在 player store；视图驱动的定时器归资源所有者 | 切回音乐页看到列表页 / 卡在 closing | `test-view-persistence` | §2.17 |
+| I-15 | 音频通路不得硬切换（换源 / 起播 / 暂停都要淡入淡出），且无声音可淡时必须保持同步 | 耳机里的「电流声」/ 起播时序整体后移 | `test-audio-fade` | §2.18 |
 
 ## 9. 已知陷阱速查
 

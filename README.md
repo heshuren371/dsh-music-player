@@ -72,7 +72,7 @@ cd .. && dsh plugin --profile web add link:./dsh-music-player
 - 系统集成：MediaSession（媒体键与 macOS 控制中心 / 锁屏「正在播放」）以及换曲原生通知
 - Apple 离线包（`.movpkg`）是 FairPlay 加密的 HLS，任何第三方播放器都无法解密，扫描时整体跳过并在统计里说明
 
-刻意不做随机播放与歌词页。全屏播放器带封面取色背景、「接下来播放」队列与跑马灯歌名；播放条与进度条按 macOS Music 重做。
+刻意不做随机播放与歌词页。全屏播放器带封面取色背景、「接下来播放」队列与跑马灯歌名；播放条与进度条按 macOS Music 重做。切到「对话」再切回音乐时，全屏播放器（含 MV 放大与封面预览）保持原样，不会退回列表页。
 
 ## 权限与依赖
 
@@ -98,7 +98,7 @@ cd .. && dsh plugin --profile web add link:./dsh-music-player
 ```sh
 pnpm run build          # src/*.ts → lib/*.js
 pnpm run typecheck      # 类型棘轮：错误数只许变少（基线 0，含死代码开关）
-npm test                # 产物新鲜度 + 逐文件严格 + 26 套回归
+npm test                # 产物新鲜度 + 逐文件严格 + 28 套回归
 pnpm run check:manifest # dsh-plugin.json 对 pinned dsh-std Community v0.15 校验
 ```
 

@@ -28,6 +28,8 @@ const suites = [
   { name: 'apply tags + rename (host)', file: 'scripts/test-apply.mjs', node: [] },
   { name: 'online metadata match (client)', file: 'scripts/test-match-client.mjs', node: [] },
   { name: 'client shell: icons / tooltips / OS media', file: 'scripts/test-client-shell.mjs', node: [] },
+  { name: 'view persistence (full player survives view remount)', file: 'scripts/test-view-persistence.mjs', node: [] },
+  { name: 'click-free audio transitions (fade in/out)', file: 'scripts/test-audio-fade.mjs', node: [] },
   { name: 'static audit (dead code / css shadowing / i18n)', file: 'scripts/test-audit.mjs', node: [] },
   { name: 'MV / music video (scan / plan / ffmpeg remux)', file: 'scripts/test-mv.mjs', node: [] },
   { name: 'host hot reload', file: 'scripts/test-hot-reload.mjs', node: [] },
