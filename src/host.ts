@@ -1743,10 +1743,52 @@ async function streamTrack(library, idParam, req, res) {
  * 按 Range 语义把一个本地文件喂给响应（/stream 与 MV 缓存文件共用）。
  * 支持 206 分段、416 越界、以及完整 200 —— 播放器拖进度全靠它。
  */
+/**
+ * 媒体响应的 CORS 头 —— 让**桌面版**能把媒体接进 Web Audio。
+ *
+ * 为什么需要：桌面渲染进程的页面 origin 是 `dsh-app://app`，而媒体在
+ * `http://127.0.0.1:<port>`，属**跨源**。Web Audio 的 `createMediaElementSource`
+ * 对跨源媒体只有在 CORS 通过时才出声 —— 否则是**静音**（比电流声更糟）。
+ * 常驻音频图是消除切歌「电流声」的唯一办法（原因见 client.ts 的 ensureAudioGraph）。
+ *
+ * 只回显**窄名单**里的 origin：桌面应用 origin 与回环 origin。**刻意不用 `*`** ——
+ * token 通道的唯一防线是 token 保密性（AGENTS.md §2.12），`*` 会让任何一个拿到 token
+ * 的网页都能跨源读取库内字节。不在名单里就**一个头都不发**，行为与改动前完全一致。
+ */
+const MEDIA_ALLOWED_ORIGIN = /^(dsh-app:\/\/app|https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?)$/;
+
+function mediaCorsHeaders(req) {
+  const origin = req.headers.origin;
+  if (typeof origin !== 'string' || !MEDIA_ALLOWED_ORIGIN.test(origin)) return {};
+  return {
+    'access-control-allow-origin': origin,
+    'access-control-expose-headers': 'content-length, content-range, accept-ranges',
+    vary: 'origin',
+  };
+}
+
+/** 跨源媒体预检：`Range` 不是 CORS 安全列表头，Chromium 会先发 OPTIONS。 */
+function mediaPreflight(req, res) {
+  const cors = mediaCorsHeaders(req);
+  if (Object.keys(cors).length === 0) {
+    res.writeHead(403, { 'content-type': 'text/plain' });
+    res.end();
+    return;
+  }
+  res.writeHead(204, {
+    ...cors,
+    'access-control-allow-methods': 'GET, HEAD, OPTIONS',
+    'access-control-allow-headers': 'range',
+    'access-control-max-age': '600',
+  });
+  res.end();
+}
+
 function serveFileRange(filePath, mime, stat, req, res) {
+  const cors = mediaCorsHeaders(req);
   const range = parseRange(req.headers.range, stat.size);
   if (range !== null && range.unsatisfiable === true) {
-    res.writeHead(416, { 'content-range': `bytes */${stat.size}` });
+    res.writeHead(416, { 'content-range': `bytes */${stat.size}`, ...cors });
     res.end();
     return;
   }
@@ -1757,6 +1799,7 @@ function serveFileRange(filePath, mime, stat, req, res) {
       'content-range': `bytes ${range.start}-${range.end}/${stat.size}`,
       'accept-ranges': 'bytes',
       'cache-control': 'no-cache',
+      ...cors,
     });
     pipeFile(res, filePath, { start: range.start, end: range.end });
     return;
@@ -1766,6 +1809,7 @@ function serveFileRange(filePath, mime, stat, req, res) {
     'content-length': stat.size,
     'accept-ranges': 'bytes',
     'cache-control': 'no-cache',
+    ...cors,
   });
   pipeFile(res, filePath);
 }
@@ -2032,6 +2076,19 @@ function createHost(ctx) {
     }
     pathname = canonicalEndpoint(pathname);
 
+    // 跨源媒体预检（Desktop 的媒体接进 Web Audio 时会先发 OPTIONS + Range）。
+    // 只对媒体端点应答，其余路径仍然落到下面的 404/405 兜底。
+    // `system-stream` 是**桌面版实际走的那条**（token 直连），漏掉它预检会被 404 掉、
+    // 浏览器随即拒绝媒体请求 = 静音。三个媒体端点都要应答。
+    if (
+      req.method === 'OPTIONS' &&
+      (pathname === '/api/dsh-music/stream' ||
+        pathname === '/api/dsh-music/mvfile' ||
+        pathname === '/api/dsh-music/system-stream')
+    ) {
+      mediaPreflight(req, res);
+      return;
+    }
     if (pathname === '/api/dsh-music/library' && req.method === 'GET') {
       // Non-blocking: report scan progress instead of waiting for the scan.
       await ready;
