@@ -875,3 +875,60 @@ audio.pause();       // 紧接着同步 pause
 
 `typecheck` 0（基线 0）· `ALL 26 SUITES PASS` · `check-build-fresh` 一致 · `check-strict` 通过 ·
 manifest PASS · `git diff --check` clean · AGENTS.md 53,978 B（82.1%）· README 182 行
+
+---
+
+## 5.21 第 17 轮 —— README 改写为 DSH 官方体例
+
+**性质**：文档工程轮（无代码改动）。**要求**：参考 DSH 官方
+[`README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/master/README.zh.md) 的写法。
+
+### 5.21.1 官方体例的五个特征（逐条对齐）
+
+逐字读了官方 `README.zh.md`（98 行）后提取出的形态，我们逐条照做：
+
+| 特征 | 官方做法 | 我们的做法 |
+| --- | --- | --- |
+| 标题 | 只有项目名 | `# dsh-music-player` |
+| 首段 | 2 段：是什么 + 怎么嵌进宿主 | 同样 2 段（`facets.host.entry` 激活 + `ctx.connection.fetch` / `ctx.slots.register` 注册面） |
+| 状态节 | `## 开发者预览`，明说「未来将出现破坏兼容性的变更」 | `## 兼容性状态` + 同口径的警告 + `范围不等于证据` |
+| 命令 | ```sh 围栏、最小步骤、`<a id="...">` 锚点 | 同 |
+| **无 emoji** | 全篇 0 个 | 从旧 README 去掉了 `⚠️` 与 `↔`，现在 0 个 |
+| 链接出去 | 每节 2–4 句就把细节交给 `docs/` | 端点表、结构树、门禁表全部移出 README |
+| agent 指针 | 「面向 agent：请遵循 [AGENTS.md](AGENTS.md)。」 | 保留同句，并指向 §0 |
+
+### 5.21.2 移出 README 的内容（不删除，只换位置）
+
+- **完整的 18 条端点表** → [`docs/compatibility.md`](docs/compatibility.md) 新增 §9「端点面」
+  （含 §9.1「为什么 system-* 不在 connection.fetch 上」与 §9.2「三种通道的信任边界」）
+- **结构树** → 删除（`docs/desktop.md` 与 §0.3 的「五个文件各管什么」已覆盖同样信息）
+- **门禁台账表** → 只留一句 + 指向 §6.3
+
+结果：**137 行 / 8,563 B**（旧版 182 行 / 13,459 B），且**事实零丢失** ——
+用脚本复查 12 个关键事实（Node 范围 / `0.1.7-rc.2` / 安装命令 / `pnpm run dev` / 26 套 /
+18 个端点 / `fs.delete` / `.movpkg` / transcode / MusicBrainz / AGENTS.md / MIT）全部仍在，
+9 个相对链接全部可解析，2 张截图全部存在。
+
+### 5.21.3 未做的一件事（如实说明）
+
+官方 README.zh.md 首行是 `[English](README.md) | 中文` 语言切换器 —— 那是因为它有
+`README.md`（英文）与 `README.zh.md`（中文）**两份**。本仓库只有一份 `README.md`，
+**没有伪造这个切换器**（指向不存在的文件比没有更坏）。若将来需要英文版，再补
+`README.en.md` 并加上切换器。
+
+### 5.21.4 把体例沉淀成规则
+
+`AGENTS.md §7.2` 新增一条，避免下一轮又被写回散乱形态：
+
+> **README 的写法对齐 DSH 官方 `README.zh.md`**：纯中文标题、无 emoji、每节 2–4 句 +
+> 链接到 `docs/`、装/跑命令用 ```sh 围栏、需要被外部引用的节加 `<a id="..."></a>` 锚点。
+> **不要在 README 里做功能堆砌**。
+
+同时按「文档与代码一致」的要求同步了 §7.1 分层地图里 `README.md` 与 `docs/compatibility.md`
+两行的「放什么 / 不放什么」——它们描述的是版面事实，README 变了就必须跟着变。
+
+### 5.21.5 验证
+
+`typecheck` 0（基线 0）· `ALL 26 SUITES PASS` · `check-build-fresh` 一致 · `check-strict` 通过 ·
+manifest PASS · `git diff --check` clean · README 137 行 / 8,563 B / 0 emoji ·
+AGENTS.md 54,719 B（83.5% of 64 KiB）

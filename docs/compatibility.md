@@ -121,3 +121,44 @@
 | 库外路径 / `..` 逃逸 | 拒绝（`scripts/test-stream.mjs`、`test-security.mjs` 覆盖） |
 
 > 注明：MV 套件（`scripts/test-mv.mjs`）会真实调用 ffmpeg；**匹配套件是离线测试**——`scripts/test-match.mjs:5` 自述 hermetic，并在 `:45-108` 替换 `globalThis.fetch`（只放行 `127.0.0.1`/`localhost`），`scripts/test-match-client.mjs:80-81` 同样打桩。DSH STORE 的静态检查本身不执行这些脚本。
+
+## 9. 端点面
+
+宿主把每个端点注册为 `ctx.connection.fetch` 上的**精确 `/api` Fetch 路由**（Web 与 Desktop 共用同一条接缝）。共 **18 个端点**，与 `lib/host.js` 的分派表、`lib/index.js` 的 `FETCH_ROUTES`、`dsh-plugin.json` 的登记表由 `scripts/test-route-consistency.mjs` 强制**三向集合相等**。
+
+| 路由 | 方法 | 说明 |
+| --- | --- | --- |
+| `/library` | GET | 当前目录 + 曲目列表（含 `scanning` / `scanTotal` / `truncated`） |
+| `/refresh`、`/dir`、`/pick` | POST | 重扫 / 设目录 / 弹原生选择器（`/dir` 体：`{ "dir": "..." }`） |
+| `/session` | GET | 下发系统取图 / 取媒体用的能力 token 与回环基址 |
+| `/stream?p=<id>` | GET | 音频流（Range / 206，越界 403） |
+| `/cover?p=<id>` | GET | 内嵌封面（内存缓存，无封面 404） |
+| `/match?p=<id>` | GET | 多源匹配候选（`q` 可覆盖搜索词） |
+| `/art?u=<url>` | GET | 封面代理（主机白名单 + 逐跳校验重定向 + 字节封顶 + 缓存） |
+| `/apply` | POST | 写标签并按「歌手 - 原名」重命名 |
+| `/delete` | POST | 删除曲目**含本地文件**（仅限库内） |
+| `/caps` | POST | 上报客户端视频解码能力 |
+| `/mv?id=<id>` | GET | MV 播放计划（direct / remux / transcode） |
+| `/mvconvert`、`/mvlib`、`/mvfile` | — | 触发转换 / MV 库视图 / MV 文件流（Range） |
+| `/system-art?t=<token>`、`/system-stream?t=<token>` | GET | **仅旧前缀可达**：Chromium 内部取封面 / 取媒体 |
+
+### 9.1 为什么最后两个不在 `connection.fetch` 上
+
+它们服务 Chromium **内部**发起的请求（带 `Origin: dsh-app://app`、不带会话 cookie、由 macOS 的
+`NowPlayingInfoCenter` 触发），而平台 `/api` 路由会**先判 Host/Origin 栅栏、再要求浏览器会话**
+（`admit()`），这类请求必然被拒。
+
+**代价**：宿主没有 `webServer` 时（0.1.6 形态的 desktop-host）这两个端点不可达。这是设计约束，
+不是漏改 —— 它们保留在插件自建的 `/dsh-music` 旧前缀上，并记为具名例外
+（`lib/index.js` 的 `LEGACY_ONLY_ROUTES`）。
+
+### 9.2 信任边界
+
+| 通道 | 鉴权方式 |
+| --- | --- |
+| `/api/dsh-music/*` | 连接层 Host/Origin 栅栏 + 浏览器会话（平台 `admit()`） |
+| `/dsh-music/api/*`（旧前缀） | 插件自建的等价检查（回环 Host + Origin/Sec-Fetch） |
+| `/dsh-music/api/system-*` | 栅栏的**显式例外**：靠 URL 里的能力 token，且要求 Host 为回环字面量 |
+
+因此 `system-*` 的 token 保密性是唯一防线，且它**按用途分签**（`art` / `stream` 各一个独立随机值，
+交叉使用 403），并且是**进程级**的（宿主热重载不轮换，否则客户端缓存的媒体 URL 会集体失效）。
