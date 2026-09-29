@@ -232,13 +232,26 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
   const player = win.__dshMusicPlayer;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   for (let i = 0; i < 60 && player.getState().tracks.length < 2; i += 1) await act(async () => { await sleep(25); });
-  return { log, player, media: el, attrs: () => attrs, sleep, origin, state: () => player.getState() };
+  /** 有界轮询：等到条件成立或超时。**不改变断言口径**，只是不再赌固定 sleep 够长。 */
+  const waitFor = async (pred, timeoutMs = 2000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (pred()) return true;
+      await sleep(10);
+    }
+    return pred();
+  };
+  return { log, player, media: el, attrs: () => attrs, sleep, waitFor, origin, state: () => player.getState() };
 }
 
 // B1/B2/B3：建图一次、常驻、增益接管音量
 {
   const b = await boot({ fakeCtx: {} });
-  await act(async () => { b.player.play(0); await b.sleep(220); });
+  await act(async () => {
+    b.player.play(0);
+    await b.waitFor(() => b.log.some((o) => o.op === 'createSource'));      // 建图（最多 2s）
+    await b.waitFor(() => Math.abs(b.media.volume - b.state().volume) < 1e-6); // 淡入完成
+  });
   const ctxCount = b.log.filter((o) => o.op === 'ctx').length;
   const srcCount = b.log.filter((o) => o.op === 'createSource').length;
   check('B1: 起播时建**一个** AudioContext 并把媒体接进去', ctxCount === 1 && srcCount === 1, 'ctx=' + ctxCount + ' source=' + srcCount);
@@ -251,7 +264,11 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
     'gain=' + JSON.stringify(gainAfter) + ' state=' + b.state().volume);
 
   const before = b.log.filter((o) => o.op === 'ctx').length;
-  await act(async () => { b.player.play(1); await b.sleep(250); });
+  await act(async () => {
+    b.player.play(1);
+    await b.waitFor(() => b.log.filter((o) => o.op === 'src').length >= 2);   // 第二首已挂源
+    await b.waitFor(() => Math.abs(b.media.volume - b.state().volume) < 1e-6);
+  });
   check('B4: 换歌**不重建** AudioContext（常驻才是消除设备重协商的关键）',
     b.log.filter((o) => o.op === 'ctx').length === before, 'ctx 次数 ' + before + ' → ' + b.log.filter((o) => o.op === 'ctx').length);
   check('B5: 同源媒体**不设** crossOrigin（设了反而会因同源无 ACAO 而失败）',
@@ -263,7 +280,11 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
 // B7：兜底开关
 {
   const b = await boot({ fakeCtx: {}, search: '?musicGraph=0' });
-  await act(async () => { b.player.play(0); await b.sleep(200); });
+  await act(async () => {
+    b.player.play(0);
+    await b.waitFor(() => b.log.some((o) => o.op === 'play'));              // 已经起播（回退路径）
+    await b.waitFor(() => Math.abs(b.media.volume - b.state().volume) < 1e-6);
+  });
   check('B7: `?musicGraph=0` 能关掉音频图（出问题时的兜底开关）',
     b.log.filter((o) => o.op === 'ctx').length === 0 && b.media.volume > 0,
     'ctx=' + b.log.filter((o) => o.op === 'ctx').length + ' volume=' + b.media.volume);
@@ -272,7 +293,11 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
 // B8：建图失败必须自动回退，不能把播放搞坏
 {
   const b = await boot({ fakeCtx: { throwOnSource: true } });
-  await act(async () => { b.player.play(0); await b.sleep(220); });
+  await act(async () => {
+    b.player.play(0);
+    await b.waitFor(() => b.log.some((o) => o.op === 'play'));
+    await b.waitFor(() => Math.abs(b.media.volume - b.state().volume) < 1e-6);
+  });
   check('B8: createMediaElementSource 失败 → 回退到元素音量，播放照常',
     b.media.paused === false && b.media.volume > 0,
     'paused=' + b.media.paused + ' volume=' + b.media.volume);
@@ -281,10 +306,17 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
 // B9/B10：桌面跨源 —— 先直连（不出声风险为 0），探测确认后再建图
 {
   const b = await boot({ fakeCtx: {}, origin: 'http://127.0.0.1:3080', pageOrigin: 'http://127.0.0.1:3999' });
-  await act(async () => { b.player.play(0); await b.sleep(80); });
+  await act(async () => {
+    b.player.play(0);
+    await b.waitFor(() => b.log.some((o) => o.op === 'src'));   // 第一首已挂源（仍走直连）
+  });
   check('B9: 跨源且尚未确认 CORS 时**不建图**（先直连，后台探一次再说）',
     b.log.filter((o) => o.op === 'ctx').length === 0, 'ctx=' + b.log.filter((o) => o.op === 'ctx').length);
-  await act(async () => { b.player.play(1); await b.sleep(250); });
+  await act(async () => {
+    b.player.play(1);
+    await b.waitFor(() => b.log.some((o) => o.op === 'createSource'));
+    await b.waitFor(() => Math.abs(b.media.volume - b.state().volume) < 1e-6);
+  });
   check('B10: 探测确认 CORS 后**建图并常驻**（这才是桌面版最终走的路）',
     b.log.filter((o) => o.op === 'ctx').length === 1 && b.log.filter((o) => o.op === 'createSource').length === 1,
     'ctx=' + b.log.filter((o) => o.op === 'ctx').length + ' source=' + b.log.filter((o) => o.op === 'createSource').length);
