@@ -141,6 +141,7 @@ function makeFakeAudioContext(log, { throwOnSource = false, state = 'running' } 
     constructor() {
       log.push({ op: 'ctx' });
       this.state = state;
+      this.sampleRate = 48000;   // 固定采样率就是常驻音频图的全部意义，夹具必须给出来
       this.currentTime = 1;
       this.destination = { id: 'destination' };
       this.gain = {
@@ -230,6 +231,11 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
   const root = createRoot(win.document.createElement('div'));
   await act(async () => { root.render(React.createElement(View)); });
   const player = win.__dshMusicPlayer;
+  // 抓 console.info：常驻音频图的「在行为发生的那一刻」诊断必须可见，且不得含凭据。
+  const infoLines = [];
+  const realInfo = console.info;
+  console.info = (...args) => { infoLines.push(args.map(String).join(' ')); };
+  const restoreInfo = () => { console.info = realInfo; };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   for (let i = 0; i < 60 && player.getState().tracks.length < 2; i += 1) await act(async () => { await sleep(25); });
   /** 有界轮询：等到条件成立或超时。**不改变断言口径**，只是不再赌固定 sleep 够长。 */
@@ -241,7 +247,7 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
     }
     return pred();
   };
-  return { log, player, media: el, attrs: () => attrs, sleep, waitFor, origin, state: () => player.getState() };
+  return { log, player, media: el, attrs: () => attrs, sleep, waitFor, origin, infoLines, restoreInfo, state: () => player.getState() };
 }
 
 // B1/B2/B3：建图一次、常驻、增益接管音量
@@ -275,6 +281,14 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
     b.attrs().crossorigin === undefined, 'crossorigin=' + b.attrs().crossorigin);
   check('B6: halt() 释放设备流（suspend，不是 close）',
     (b.player.halt(), b.log.some((o) => o.op === 'suspend')));
+  b.restoreInfo();
+  const graphInfo = b.infoLines.filter((l) => l.includes('常驻音频图已启用'));
+  check('B12: 建图时留下「行为发生那一刻」的诊断（含 ctx 的 sampleRate）',
+    graphInfo.length === 1 && graphInfo[0].includes('sampleRate=48000'),
+    graphInfo[0] ?? '(无)');
+  // §2.9：诊断不得把凭据带出去（URL 里的 t=<token> 是能力凭证）。
+  check('B13: 诊断行**不含凭据**（没有 t= / 没有 URL）',
+    b.infoLines.every((l) => !/t=|https?:\/\//.test(l)), JSON.stringify(b.infoLines.slice(0, 3)));
 }
 
 // B7：兜底开关

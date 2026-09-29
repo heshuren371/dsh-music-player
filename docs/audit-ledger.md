@@ -1297,3 +1297,71 @@ crossOrigin→B11）· `check-build-fresh` 一致 · `check-strict` 通过 · ma
   这也是我在 §5.26.3 里说的方向性错误。
 - **「修好了」需要证据**。本轮我只做到「更稳 + 下次可诊断」，**没有**找到根因；
   台账如实标注状态为**未定因**，不写成「已修」。
+
+---
+
+## 5.27 第 20 轮 —— 调研 Musish（结论：**帮不到**）+ 补 sampleRate 诊断
+
+### 5.27.1 用户提供的线索：`github.com/Musish/Musish`
+
+Musish 是知名的开源 Apple Music **Web 客户端**，正好也是「在浏览器里放 Apple Music」的场景，
+所以值得查它有没有处理设备协商的代码。**结论：没有，而且原因很说明问题。**
+
+实测（`git clone --depth 1`，HEAD `9846878`，最后提交 2020-08-30）：
+
+| 在 Musish 里搜 | 结果 |
+| --- | --- |
+| `AudioContext` | **0 处** |
+| `createMediaElementSource` | **0 处** |
+| 自建 `<audio>` / `<video>` / `new Audio(` | **0 处** |
+| 媒体 `crossOrigin` | 0 处（唯一命中是 Font Awesome 的 `<link crossorigin>`） |
+| `fade` | 16 处 —— **全是 CSS `@keyframes fadein` 的 UI 动画**，与音频无关 |
+| 它自己的音频 API 面 | 只有 `music.player.play()` / `player.volume` / `player.seekToTime()` |
+| 音频相关配置 | 仅 `bitrate: MusicKit.PlaybackBitrate.HIGH` |
+
+⇒ 它把**全部播放**委托给闭源的 **MusicKit JS**。**Apple 那套「不爆音」的管线就在 MusicKit JS
+内部，而它是闭源的**；Musish 只是 UI 外壳。**所以这个方向拿不到我们想要的东西**（记在这里，
+避免以后重复调研）。
+
+### 5.27.2 但调查带来一个**独立确认**：我们的修法就是 Web 音频的标准做法
+
+对照 **howler.js**（Web 音频播放器的事实标准库，本地音乐 Web 客户端普遍使用）：
+
+- `Howler.ctx = new AudioContext()` —— **进程级一个常驻 ctx**，不是每个声音一个
+- `Howler.masterGain = ctx.createGain()` + `connect(ctx.destination)` —— 一个总增益
+- 每个声音 `connect(Howler.masterGain)`；音量走 `masterGain.gain.setValueAtTime(vol, ctx.currentTime)`
+  —— **采样级调度**
+- 源码注释明确写了采样率的坑：*"Bugs in the browser … can cause the sampleRate to change from
+  44100 to 48000. By calling Howler.unload(), we create a new AudioContext with the correct sampleRate."*
+
+⇒ **常驻 ctx + 总增益 + 采样级渐变**正是第 19 轮实现的架构，不是猜的。
+
+### 5.27.3 由此补的一条诊断（本轮唯一代码改动）
+
+**`AudioContext.sampleRate` 在创建时就固定**（howler 为此专门 close 重建 ctx）。这意味着
+「**设备在页面打开之后才换**（插上耳机）」的场景，ctx 可能钉在旧设备/旧采样率上 ——
+而正是这位用户的使用方式。
+
+以前这个数字**没有暴露**，外部无法判断。现在建图时留一行**无凭据**诊断：
+
+```
+[dsh-music-player] 常驻音频图已启用：sampleRate=48000Hz state=running（所有媒体重采样到这条流，输出设备格式不再变）
+```
+
+回退路径同样各留一行（无 AudioContext / 建图失败 / 跨源 CORS 探测结果）。这符合 §2.16
+「在行为发生的那一刻记」——**只看失败是不够的，成功那一刻的状态也要能看到**。
+
+门禁 `test-audio-graph` 新增两条把它们钉死：
+**B12** 建图时必须留下含 `sampleRate` 的诊断；**B13** 诊断行**不得含 URL 或 `t=`**
+（§2.9：能力 token 就在 query 里）。
+
+### 5.27.4 类型棘轮当场抓到一处
+
+`catch (error)` 里 `error.name` 报 `TS2339` —— `useUnknownInCatchVariables` 是打开的
+（§2.15），catch 变量必须**先收窄**（`error instanceof Error`）。类型基线 0 让它立刻变红。
+
+### 5.27.5 验证
+
+`typecheck` 0 · **`ALL 29 SUITES PASS`** · `check-build-fresh` 一致 · `check-strict` 通过 ·
+manifest PASS · `diff --check` clean。**真实听感仍未验证**（jsdom 没有音频设备），
+诊断的目的正是让用户与我能从外部判断机制是否生效。
