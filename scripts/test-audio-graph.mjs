@@ -19,6 +19,14 @@ import os from 'node:os';
 import path from 'node:path';
 
 let failures = 0;
+// 崩溃必须显式变成一条 FAIL：否则进程带着非零码死掉却没有任何输出，
+// 「失败但看不到原因」在 CI 上尤其致命（本地/CI 都吃过这个亏）。
+const crash = (where, error) => {
+  failures += 1;
+  console.log('FAIL ' + where + ' crashed | ' + (error && error.stack ? error.stack.split('\n').slice(0, 3).join(' ⏎ ') : String(error)));
+};
+process.on('uncaughtException', (error) => { crash('uncaughtException', error); process.exit(1); });
+process.on('unhandledRejection', (error) => { crash('unhandledRejection', error); process.exit(1); });
 const check = (label, ok, detail) => {
   if (!ok) failures += 1;
   console.log((ok ? 'PASS ' : 'FAIL ') + label + (detail === undefined ? '' : ' | ' + detail));
@@ -74,6 +82,9 @@ const check = (label, ok, detail) => {
     if (body && body.scanning !== true && body.tracks.length > 0) { lib = body; break; }
     await new Promise((r2) => setTimeout(r2, 50));
   }
+  check('A0: 库扫描在 30s 内完成（否则后面的断言无从谈起）', lib !== null && lib.tracks.length > 0,
+    lib === null ? 'scan timeout' : 'tracks=' + lib.tracks.length);
+  if (lib === null || lib.tracks.length === 0) { server.close(); process.exit(1); }
   const trackId = lib.tracks[0].id;
   const session = await (await fetch(base + '/api/session')).json();
   const token = /t=([^&]+)/.exec(session.systemStreamBase)[1];

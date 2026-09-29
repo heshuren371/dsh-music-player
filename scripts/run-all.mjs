@@ -42,7 +42,15 @@ for (const suite of suites) {
   const ok = run.status === 0;
   if (!ok) failed += 1;
   console.log((ok ? 'PASS ' : 'FAIL ') + suite.name + ' (' + (Date.now() - started) + ' ms)');
-  if (!ok) console.log(run.stdout ?? '' + run.stderr ?? '');
+  if (!ok) {
+    // ⚠️ 这里原来是 `run.stdout ?? '' + run.stderr ?? ''` —— 运算符优先级让它等价于
+    // `stdout ?? ('' + stderr)`，于是 **stderr 永远打不出来**。崩溃/异常都走 stderr，
+    // 结果是「失败但看不到原因」（A2-12「门禁诊断可用」正是要防这个）。
+    console.log(run.stdout ?? '');
+    if ((run.stderr ?? '') !== '') console.log('--- stderr ---\n' + run.stderr);
+    if (run.error !== undefined) console.log('--- spawn error ---\n' + String(run.error));
+    if (run.signal !== null) console.log('--- killed by signal ' + run.signal + ' ---');
+  }
 }
 console.log(failed === 0 ? 'ALL ' + suites.length + ' SUITES PASS' : failed + '/' + suites.length + ' SUITES FAILED');
 process.exit(failed === 0 ? 0 : 1);
