@@ -206,17 +206,12 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
   真实存在的 `ui.dsh/v1alpha1` / `web.ui.dsh/v1alpha1` 在 **DSH 运行时全部 0 命中**（宿主只用
   字符串 slot `conversation.view`）⇒ 本插件**不消费**任何 Community 契约，`requires.contracts`
   为空是**诚实状态**（`A4-03`）。
-- **`fallback` 不能把不存在的坐标洗成合规声明**：补 `fallback` 只是让声明「看起来完整」，
-  协商层永远拿不到 definition（`D-05` 曾如此误处置）。
-- **声明无 definition 的扩展 ≠ 声明能力**（`manifest.zh.md:62`）：pinned 投影只给
-  `unknown-extension` warning。本仓库的做法是**不声明**而不是假声明，真实绑定记在
-  `x-dsh-music-player.ui`（`A4-02`）。
-- **extension id 必须有运行时对应**：声明 id 与运行时注册 id（`package.json` 的
-  `exports["./client"]` + `ctx.slots.register`）**对不上就是死声明**。
-- **`prefix` 与精确路由不能混用**：声明 prefix 必须等于 `webServer.register` 的 path
-  （本仓库声明过 `prefix=/api/dsh-music` 而实际是 16 条精确路由 —— `A4-05` 仍待修）。
-- **`requires.contracts` 至少一条 `required`**：否则 preflight 永不阻塞，插件能在**没注册任何
-  端点**的情况下「激活成功」（`A4-03`）。
+- **`fallback` 不能把不存在的坐标洗成合规声明**（`D-05` 曾如此误处置）。
+- **声明无 definition 的扩展 ≠ 声明能力**（`manifest.zh.md:62`，投影只给 warning）：本仓库
+  **不声明**而不是假声明，真实绑定记在 `x-dsh-music-player.ui`（`A4-02`）。
+- **extension id 必须有运行时对应**，否则是死声明。
+- **`prefix` 不能与精确路由混用**：声明的 prefix 必须等于 `webServer.register` 的 path（`A4-05`）。
+- **`requires.contracts` 至少一条 `required`**，否则 preflight 永不阻塞（`A4-03`）。
 
 ### 2.12 自建 bearer token 三律（第 5 轮沉淀）
 
@@ -225,8 +220,10 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 1. **按用途分签**：一个 token **不得**同时授权两类权限。第 9 轮已拆成 `systemArtToken` /
    `systemStreamToken` 两个独立随机值，交叉使用 403（`A5-02` 已修）。**仍待修**：token 不过期、
    无轮换、不按 session 区分，唯一撤销边界仍是 `createHost()` 闭包销毁。
-2. **基址钉回环字面量，不得回显请求 Host**：原来 `lib/host.js` 的 `/session` 直接用请求 Host 拼基址 —— 第 9 轮改为 `loopbackAuthority(req)`：只取 Host 的**端口**，主机名固定 `127.0.0.1`（`A5-03` 已修）。
-3. **被豁免 Host/Origin 栅栏的端点**（`lib/host.js` 的 `system-*`）**不得承担读能力**，且其凭证**不得进入任何持久通道**（日志、文件、localStorage）。豁免必须**只到 Origin / Sec-Fetch 为止** —— 第 9 轮新增 `isLoopbackHostRequest`，Host 非回环一律 403（`A5-03` 已修）。
+2. **基址钉回环字面量，不得回显请求 Host**：`loopbackAuthority(req)` 只取 Host 的**端口**，主机名
+   固定 `127.0.0.1`（`A5-03`）。
+3. **被豁免栅栏的端点**（`system-*`）**不得承担读能力**，凭证**不得进入任何持久通道**；豁免只到
+   Origin / Sec-Fetch 为止，Host 非回环一律 403（`A5-03`）。
 
 > `A5-03` 的教训：token 通道**既不走平台鉴权、也不走插件栅栏**，唯一防线是 token 保密性。
 > 所以 token **不得**进入任何世界可读的位置（`A2-01` 就是把它写进了 `/tmp`）。
@@ -373,10 +370,9 @@ pause `{in=120,out=120}` · stop `{in=120,out=300}`。**本仓库采用同一组
 - **建图后必须把元素音量置中性**：建图前写的是元素音量（首播时是 0），建图后增益在图里 ——
   不置中性就是「元素 0 × 增益」= **第一次起播静音**（比电流声严重，被本轮门禁抓到）。
 - **音频图 `halt()` 只 suspend 不 close** —— close 之后这个媒体元素再也接不回音频图。
-- **`AudioContext` 的 `sampleRate` 创建时即固定**（howler.js 为此专门 close 重建 ctx）：所以 ctx
-  必须在**第一次播放时**才建，并把 `sampleRate`/`state` 打进诊断（§2.16），否则「打开页面之后才
-  插耳机」这类场景无法从外部判断。诊断**只记数字与状态**，绝不记 URL/token（§2.9，门禁 B13 钉死）。
-- **`location` 一律写 `window.location`**：bundle 由宿主 eval，裸 `location` 的解析取决于宿主作用域。
+- **`AudioContext.sampleRate` 创建时即固定** ⇒ ctx 必须在**第一次播放时**才建，并把
+  `sampleRate`/`state` 打进诊断（只记数字与状态，绝不记 URL/token；门禁 B13）。
+- **`location` 一律写 `window.location`**（bundle 由宿主 eval）。
 
 ### 2.20 ReplayGain：标签是**不可信输入**，增益必须走**独立节点**（第 21 轮沉淀）
 
@@ -407,7 +403,7 @@ pause `{in=120,out=120}` · stop `{in=120,out=300}`。**本仓库采用同一组
   它会继续跑到结束（I-06 孤儿进程）；`rgJob` 状态必须放在 **createHost 内**（module 级可变状态
   在热重载下会被不可回收的 ESM 条目永久钉住，§2.2）。
 - **失败原因要分类且不含路径**（`ffmpeg-not-found` / `spawn-error` / `timeout` /
-  `loudness-not-readable:exit=N,len=N` / `silent-track`）：全失败时这才是可诊断的信息（§2.8 脱敏）。
+  `loudness-not-readable:exit=N,len=N` / `silent-track`，§2.8 脱敏）。
 
 > **§2.7 的「四个副本」实际是五个**：`Track` 类型 → **`PayloadTrack` 白名单投影** →
 > `lib/index.js` 的 `FETCH_ROUTES`（仅端点）→ `dsh-plugin.json` → 客户端 `MusicTrack`。
@@ -621,14 +617,13 @@ node scripts/check-whitespace.mjs   # 空白/冲突标记（`npm test` 已包含
 11. **「本地全绿」≠「已进仓库」** —— 第 16 轮的修复在工作区放了两轮没提交，而文档已在声称完成，
     第 17 轮推出去的代码里没有它（台账 §5.24）。**每轮收口必须看 `git status --short`**；
     `git add -A` 之后只列出少数文件，本身就是异常信号。
-13. **GC 时机敏感的断言测的不是「保留量」** —— 第 24 轮 CI 实测：`arrayBuffers` 在**单次**
-    `gc()` 后读到的增长，随 GC 时机漂移（同一个 commit：本地 60.0MB / CI 83.9MB，cap 64MB ⇒
-    「本地绿、CI 红」）。修法是**改测量**而不是放宽阈值：① 测量进程自己别留大临时对象
-    （24×6MB 的 `await r.arrayBuffer()` = 144MB 噪声源 → 改流式排空）；② 反复强制 GC 取**稳态最小值**；
-    ③ 没有 `--expose-gc` 时**明说 SKIP**，不冒充通过。对照仍必须红（关掉宿主上限 → 144MB → FAIL）。
 12. **禁止用 `git checkout <路径>` 撤销「临时改坏文件做对照」** —— 索引里是上一次 commit 的版本，
     这条命令会**连未提交的真改动一起回滚**。第 21 轮就这么丢掉过整个 `src/client.ts` 的
     ReplayGain 实现（台账 §5.30）。**做对照前后一律 `cp 文件 /tmp/xxx.bak` 再还原**。
+13. **GC 时机敏感的断言测的不是「保留量」** —— 同一 commit：本地 60.0MB / CI 83.9MB（cap 64MB）
+    ⇒「本地绿、CI 红」。修法是**改测量**，不是放宽阈值：① 测量进程自己别留大临时对象
+    （24×6MB 的 `await r.arrayBuffer()` = 144MB 噪声 → 改流式排空）；② 反复 GC 取**稳态最小值**；
+    ③ 没有 `--expose-gc` 时**明说 SKIP**。对照仍必须红（关掉宿主上限 → 144MB → FAIL）。
 
 ## 10. 明确接受的设计取舍（**不要「顺手修好」**）
 
