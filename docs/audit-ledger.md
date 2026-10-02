@@ -1713,3 +1713,52 @@ UI 是播放器里一个 `EQ` 按钮在预设间循环（曲线与预设都持�
 > **`AGENTS.md` 预算警告**：本轮后又到 **64,377 B（64 KiB 的 98.2%）**。已连续三轮靠临时压缩维持，
 > 下一次必须做**结构性下移**（把 §2.11–§2.14 的历史规则整段移到 `docs/`），否则迟早撞上
 > 静默截断（§11）。
+
+---
+
+## 5.35 第 24 轮 —— CI 让一条**临界抖动**断言翻红（改测量，不放宽阈值）
+
+### 5.35.1 现象
+
+均衡器的 commit（`34b8791`）**本地 30 套全绿，CI 红**：
+
+```
+FAIL cover cache byte cap bounds retained buffers (< 64MB) | arrayBuffers growth=83.9MB
+1/30 SUITES FAILED   （失败套件：perf / memory / fd）
+```
+
+**与均衡器无关**（该套件驱动的是**宿主** HTTP 面；均衡器全在客户端）。同一个 commit 本地读数是
+**60.0MB**、cap **64MB** —— 余量只有 4MB：这是一条**本来就临界**的断言，CI 的 GC 时机把它推过了线。
+
+### 5.35.2 根因：测的不是「保留量」
+
+```js
+gc(); const before = process.memoryUsage().arrayBuffers;
+for (const t of covLib.tracks) { const r = await fetch(...); await r.arrayBuffer(); }   // 24×6MB
+gc(); const growth = (usage.arrayBuffers - before) / 1024 / 1024;
+```
+
+`await r.arrayBuffer()` 在**测量进程自己**留下 24 个 6MB ArrayBuffer（144MB 临时占用）。单次 `gc()`
+收不干净 ⇒ 读数 = 「宿主真实保留量」+「GC 没来得及收的垃圾」，随 GC 时机漂移。
+
+### 5.35.3 修法（**测量改了，cap 没动**）
+
+1. **流式排空**响应（`for await (const chunk of r.body)`），不留大临时对象；
+2. **反复强制 GC 取稳态最小值**（最多 12 轮）——断言对象是「保留量」；
+3. **没有 `--expose-gc` 时明说 SKIP**，不冒充通过。
+
+结果：**30.0MB，连跑三次完全一致**（= 宿主 32MB 上限的真实保留量，`COVER_CACHE_BYTES_LIMIT`），
+cap 仍是 64MB（2× 余量）。
+
+### 5.35.4 对照（证明断言没被放宽）
+
+| 对照 | 结果 |
+| --- | --- |
+| 把宿主 `COVER_CACHE_BYTES_LIMIT` 抬到 4GB（等于取消上限） | **144.0MB → FAIL** ✅ |
+| 恢复 | 30.0MB → PASS ✅ |
+| 不加 `--expose-gc` 运行 | 明确 `SKIP`（并说明需要该开关）✅ |
+
+### 5.35.5 沉淀
+
+新增 §9 陷阱 13：**GC 时机敏感的断言测的不是保留量**；修法是改**测量**（排除自身噪声 + 取稳态 +
+缺测量能力时明说 SKIP），**不是放宽阈值**（§6.2）。

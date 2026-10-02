@@ -78,11 +78,30 @@ await j('/api/dir', { method: 'POST', headers: { 'content-type': 'application/js
 const covLib = await waitScan();
 gc();
 const buffersBefore = process.memoryUsage().arrayBuffers;
-for (const t of covLib.tracks) { const r = await fetch(base + '/api/cover?p=' + encodeURIComponent(t.id)); await r.arrayBuffer(); }
-gc();
-const growth = (process.memoryUsage().arrayBuffers - buffersBefore) / 1024 / 1024;
+// ⚠️ **不要** `await r.arrayBuffer()`：24 个 6MB 响应会在**测量进程自己**留下 144MB 临时占用，
+// 单次 `gc()` 收不干净 —— 读数于是随 GC 时机漂移。实测：本地 60.0MB / CI **83.9MB**（cap 64MB），
+// 一条「本地绿、CI 红」的抖动断言。改成**流式排空**（chunk 拿到即丢），只让宿主缓存那部分留下。
+for (const t of covLib.tracks) {
+  const r = await fetch(base + '/api/cover?p=' + encodeURIComponent(t.id));
+  for await (const chunk of r.body) void chunk.length;
+}
 console.log('-- ' + COVERS + ' x 6MB covers requested (raw payload ' + (COVERS * 6) + 'MB) --');
-check('cover cache byte cap bounds retained buffers (< 64MB)', growth < 64, 'arrayBuffers growth=' + growth.toFixed(1) + 'MB');
+// 断言的**对象是保留量**（宿主封面上限 32MB + Node 开销），不是 GC 时机：反复强制 GC 直到读数
+// 稳定，取稳态**最小值**。cap 不放宽 —— 没有这条上限时这里会是 ~144MB（对照见台账）。
+if (typeof globalThis.gc !== 'function') {
+  console.log('SKIP cover cache byte cap bounds retained buffers —— 需要 --expose-gc 才能测「保留量」' +
+    '（run-all 已带该开关；此处不冒充通过）');
+} else {
+  let growth = Infinity;
+  for (let i = 0; i < 12; i += 1) {
+    gc();
+    await new Promise((r) => setTimeout(r, 60));
+    growth = Math.min(growth, (process.memoryUsage().arrayBuffers - buffersBefore) / 1024 / 1024);
+    if (growth < 40) break;
+  }
+  check('cover cache byte cap bounds retained buffers (< 64MB)', growth < 64,
+    'arrayBuffers growth=' + growth.toFixed(1) + 'MB（稳态最小值）');
+}
 
 // ── 3. aborted streams must not leak descriptors ─────────────────────────────
 const fdCount = async () => { try { return (await fs.readdir('/dev/fd')).length; } catch { return -1; } };
