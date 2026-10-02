@@ -187,7 +187,10 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 
 ### 2.10 客户端 activation 归属与「teardown 后不得再启动」（第 3 轮沉淀）
 
-- **一个 activation instance 的资源不得被下一个 instance 复用**（`lifecycle.zh.md:125`、`:127`）：**禁止**用 `window.*` 这类全局槽位把上一代的 player / timer / handler 交给下一代。若确有必要（例如避免 HMR 双开 `<audio>`），必须**在 manifest 或 README 显式声明这是跨 activation 共享资源**，并让每代的 disposer 只作用于**自己那一代**。→ 现状：`lib/client.js:2104` 的 `window.__dshMusicPlayer` 属未声明的隐式转移（`A3-03`）。
+- **一个 activation instance 的资源不得被下一个复用**（`lifecycle.zh.md:125`、`:127`）：**禁止**用
+  `window.*` 这类全局槽位把上一代的 player / timer / handler 交给下一代。确有必要时必须**显式声明
+  为跨 activation 共享资源**，且每代的 disposer 只作用于**自己那一代**。→ `window.__dshMusicPlayer`
+  是未声明的隐式转移（`A3-03`）。
 - **disposer 必须作用于「自己的」实例**：对共享对象调 `dispose()`/`halt()` 会停掉新实例仍在使用的东西。
 - **`await` 挂起后恢复的代码路径必须检查 `disposed` 状态位**：只把引用置 `null` **不够** —— 挂起的异步分支会把它重新赋值。本仓库有两条这样的路径：`lib/index.js:98-127`（`ensureHost` 两个挂起点，第 8 轮已修）与 `lib/client.js:934-957`（轮询回调，第 8 轮已修）。→ `A3-02`。
 - **「清 timer」与「阻止再武装」是两件事**：teardown 里 `clearTimeout` 只能清掉**当前**那个句柄；若回调在飞期间句柄已被置 null，`clearTimeout` 落空，回调的 `catch` 会再武装。守卫若依赖 `set()` 未复位的状态（如 `scanning`），teardown 必须**显式复位该状态**。→ `A3-01`（历史 bug 的同族复发形态）。
@@ -202,10 +205,10 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
   ```
   grep -rn "<apiVersion>" <pinned>/docs/proposals/ <pinned>/packages/
   ```
-  实测结论（第 7 轮，搜索面已用已知为真的 `conversation.view` 校准）：`webserver.dsh/v1alpha1` 与
-  `browser.ui.dsh/v1alpha1` 在 references 全树与 DSH 运行时**均 0 命中**；基线里真实存在的
-  `ui.dsh/v1alpha1` / `web.ui.dsh/v1alpha1` 在 DSH 运行时**同样 0 命中**（宿主只用字符串 slot
-  `conversation.view`）。⇒ 本插件**不消费**任何 Community 契约，`requires.contracts` 为空是**诚实状态**（`A4-03`）。
+  实测（第 7 轮，搜索面已用真实存在的 `conversation.view` 校准）：`webserver.dsh/v1alpha1`、
+  `browser.ui.dsh/v1alpha1`，以及基线里真实存在的 `ui.dsh/v1alpha1` / `web.ui.dsh/v1alpha1`，
+  在 **DSH 运行时全部 0 命中**（宿主只用字符串 slot `conversation.view`）。
+  ⇒ 本插件**不消费**任何 Community 契约，`requires.contracts` 为空是**诚实状态**（`A4-03`）。
 - **`fallback` 只是「optional 时的降级说明」，不能把不存在的坐标洗成合规声明。** 给一个不存在的坐标补 `fallback`（`D-05` 曾如此处置）**不构成修复** —— 它让声明看起来完整，实际协商层永远拿不到 definition。
 - **声明无 definition 的扩展 ≠ 声明能力**：`manifest.zh.md:62` 明确「Host 不理解某项扩展时…**不能声称对应功能已经生效**」。pinned 投影对无 definition 的扩展只产出 `unknown-extension` **warning**（`A4-02`）。因此 `x-dev.dsh-std.extensions` 里的两个 id **不是**能力声明，插件的主功能（会话视图 + 宿主传输）在 manifest 上是**未声明**的。第 9 轮的做法是**不声明**而不是假声明，并把真实绑定记录进 `x-dsh-music-player.ui`（`A4-02` 已修）。
 - **extension id 必须有运行时对应**：两个扩展 id（`local.dsh-music-player.browser` / `.music-view`）在 `lib/` 下**逐个 grep 均 0 命中**；真正的注册点分别是 `package.json` 的 `exports["./client"]` + `dsh.client.platform` 与 `lib/client.js:3200`（`ctx.slots.register`）。声明 id 与运行时注册 id **对不上就是死声明**。（第 8 轮已把原第三个 `.routes` 条目移出，改为顶层的 `x-dsh-music-player.transport` 登记表。）
@@ -228,7 +231,8 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 `storage.zh.md:83`「失败的 cleanup 不得报告为已完成」是**通用形态**，适用所有持久化/副作用路径：
 
 - **吞掉写失败后仍返回成功是违规**。现状 `A5-09`：`saveState` 全量吞错（`lib/host.js:1042-1044`）后 `/dir` 仍返回 `200 + dir`（`:1769-1776`）。
-- **持久化层必须能区分稳定错误码**（`storage.zh.md:87-93` 的 `PERMISSION_NOT_GRANTED` / `INVALID_KEY` / `INVALID_VALUE` / `QUOTA_EXCEEDED` / `STORAGE_UNAVAILABLE` 目前**一个都没有**），不能只靠"有没有抛异常"来表达。
+- **持久化层必须有稳定错误码**（`storage.zh.md:87-93` 的五个码目前**一个都没有**），不能只靠
+  「有没有抛异常」表达。
 
 ### 2.14 能力 token 必须与 activation 生命周期对齐（第 10 轮沉淀）
 
@@ -238,7 +242,7 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 - **消费者必须能自愈**：缓存要带 TTL，并在**失败时**作废重取；否则症状会停在「刷新前一直坏」。
 - **判断症状归属的一条经验**：`/api/mv` 返回的是**相对地址**（走平台会话、不经 token），而**音频永远走 token 直连** —— 所以「**音乐不能播、MV 能播**」几乎总是 token 通道的问题，不是流本身的问题。排查时先直接 `curl` 那条 token URL 验证 200/206。
 
-> 第 10 轮的线上故障就是这一条被违反：token 原本是 `createHost()` 里的 `randomUUID()`，开发期每次保存 `lib/host.js` 都轮换一次。
+> 第 10 轮线上故障即此条被违反：token 曾是 `createHost()` 里的 `randomUUID()`。
 
 ### 2.15 TypeScript：真源、产物与类型棘轮（第 11 轮沉淀）
 
@@ -254,15 +258,13 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 | 编译器选项 | 当前 | 理由 |
 | --- | --- | --- |
 | `strictNullChecks` | **开** | 零额外代价（实测：关掉它一处错误都不少），而且它正是能防住本仓库两个真实线上故障的那一项 —— token 缓存可能为 null（音频全 403）、媒体基址未就绪（MV 拼出相对地址、丢 Range、进度条一拖就回 0） |
-| `noImplicitAny` | **暂关** | TS 7 默认开启。第 12 轮把全仓类型错误清到 0 之后，实测再开它仍会多出 **343** 处（305 处是未标注的函数参数）—— 一次性补完的回归风险不值得。改由下面的**逐文件允许清单**分批收严 |
+| `noImplicitAny` | **暂关** | TS 7 默认开启；全开仍多 **343** 处（305 处是未标注参数），一次性补完风险大。改由下面的**逐文件允许清单**单向收严 |
 | `noImplicitThis` / `strictBindCallApply` / `useUnknownInCatchVariables` / `noFallthroughCasesInSwitch` / `alwaysStrict` | **开** | 都是零/极低代价项 |
 
-- 剩余类型错误由 `npm run typecheck`（`scripts/typecheck-ratchet.mjs`）守住：基线在 `scripts/typecheck-baseline.json`。**第 12 轮已把全仓降到 0 并把基线收紧到 0** —— 此后任何新增类型错误都会直接变红。
-- **禁止为了让棘轮变绿而放宽 `tsconfig.json` 的档位或上调基线**（与 §6.2「禁止放宽断言」同理）。要过门禁只有一条路：把类型补对。
+- 类型棘轮：基线在 `scripts/typecheck-baseline.json`，**第 12 轮已降到 0 并锁死**，此后任何新增
+  类型错误直接变红。**禁止为了让棘轮变绿而放宽档位或上调基线**（同 §6.2）—— 只有把类型补对一条路。
 
 **逐文件收严允许清单（第 12 轮）**
-
-全量开 `noImplicitAny` 还不现实（第 12 轮实测仍剩 **343** 处，其中 305 处是未标注的函数参数），但**已经干净的文件可以单独钉死**：
 
 - `tsconfig.strict.json` 的 `include` 是一份**允许清单**，清单里的文件必须在 `noImplicitAny: true` 下零错误；
 - 门禁 `scripts/check-strict.mjs` 已接进 `npm test` 与 CI。当前名单：`src/http-bridge.ts`、`src/tagwriter.ts`。
@@ -316,10 +318,8 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 - **夹具的保真度也是判别力的一部分**：假媒体元素若缺了真实元素一定有的属性
   （`currentSrc` / `seekable`），被测路径会失真甚至恒绿。写夹具时先问「真实元素这里长什么样」。
 
-> **第 14 轮补充（通用形态）**：修**症状**时**修法必须按「当前这条源是什么类型」推导，
-> 不能按期望的播放模式（`track.kind`）猜**（真机故障：`.mov` 走 WASM 旁路时元素播的是音轨而
-> `track.kind` 仍是 `"video"`，按 kind 去等转码 ⇒ 自愈永远卡住）。另：**只在出问题时记日志不够**，
-> 要在**行为发生的那一刻**记，否则看不到当时状态。
+> **通用形态**：修**症状**时，**修法必须按「当前这条源是什么类型」推导，不能按期望的播放模式
+> （`track.kind`）猜**。另：**只在出问题时记日志不够**，要在**行为发生的那一刻**记。
 
 ### 2.17 视图局部状态活不过 `conversation.view` 的卸载（第 16 轮沉淀）
 
@@ -347,17 +347,28 @@ DSH 的 `conversation.view` **只在被选中时挂载**（切到「对话」即
 > 两条（防 `disposed` 死锁回归）。夹具用**真实 `<video>` DOM 节点**（假元素没有 `nodeType`，
 > 搬运路径会整体跳过 ⇒ 断言恒绿，§9 第 4 条）。细节与负向对照见台账 §5.22。
 
-### 2.18 音频通路不得硬切换（第 18 轮沉淀）
+### 2.18 过渡必须淡入淡出，且时长要够长（第 18 轮起；第 20 轮按 fooyin 校准）
 
-换 `src` / `play()` / `pause()` 都会让输出瞬间跳变；**纯音量层面的**爆音靠淡入淡出消除。
+**fooyin**（开源本地音乐播放器）的引擎默认值是权威参考（`include/core/engine/fadingdefs.h`）：
+manualChange `{in=300,out=300}` · autoChange `{in=700,out=700}` · **seek `{in=120,out=120}`** ·
+pause `{in=120,out=120}` · stop `{in=120,out=300}`。**本仓库采用同一组数值**，不自行调小。
 
+- **常驻输出流与过渡淡入淡出不是二选一，两个都要。** fooyin 同时做：输出会话常驻 +「terminal
+  resampling for output compatibility」（`audiopipeline.h:228`，**默认开**，master output format +
+  SoX 重采样器），**并且**每次过渡都淡入淡出（含 seek）。第 18 轮只做了淡出淡入（且太短）、
+  第 19 轮只做了常驻流 —— 各是一半。
+- **时长决定遮蔽力**：70ms 与 300ms 是完全不同的效果（设备重协商的瞬态可持续几十毫秒，短淡入
+  盖不住）。**禁止**为了「手感更脆」把过渡调到 200ms 以下 —— 门禁 H1/H2 会红。
+- **拖动进度也要淡**（fooyin 120ms）。本仓库**只在常驻音频图接管增益时**做：图未启用时用元素
+  音量延迟 seek 会让拖动发粘、且没有采样级保证；那条路径保持既有的**同步** seek 语义。
 - **要消失先淡出，起播后淡入。** `state.volume` 始终是**用户设定值**，渐变只改**瞬时值**。
 - **渐变必须可取消，取消时要结算 promise**（只清定时器不 settle 会让 `await` 它的调用方
-  **永久挂住**，与 §2.10 同族）。
+  **永久挂住**，与 §2.10 同族）。快速连点/连拖时**最后一次赢**。
 - **「没有声音要淡出」的路径必须保持同步**，判据是「**确定正在出声**」：
   `paused === false && volume > 0.001`。**禁止**写成 `paused || volume <= 0.001` —— 属性缺失时
   两个分支都是 false，会把「暂停中」误判成「正在播」而走异步路径，起播时序整体后移。
-- **用户拖动音量优先于任何在飞渐变**；**卸载路径不等渐变**（§2.10）。
+- **用户拖动音量优先于任何在飞渐变**；**卸载路径不等渐变**（§2.10；stop 的 300ms 淡出在这里
+  刻意不等待）。
 
 ### 2.19 「电流声」的真因是**设备被反复重建**，必须常驻同一条输出流（第 19 轮沉淀）
 
@@ -383,8 +394,6 @@ DSH 的 `conversation.view` **只在被选中时挂载**（切到「对话」即
   该约束由门禁 B13 钉死。
 - **`location` 一律写 `window.location`**：bundle 由宿主 eval，「裸 `location` 能否解析」取决于
   宿主作用域。
-- **验证边界**：jsdom 没有音频设备，门禁只验机制（常驻一条流 / 跨源前提 / 分级回退）；
-  **真实听感必须人工确认**。
 
 ## 3. 可跑门禁
 
@@ -427,15 +436,14 @@ git diff --check              # 空白/冲突标记
 > `AGENTS.md` 有 **64 KiB 注入预算**，撞上后**尾部会被静默截断**（已实测），
 > 所以细节一律放 `docs/`（§7.2、§11）。
 
-**一句话历史**：13 条高危 —— `A1-01`/`A1-02`/`A1-03`、`A2-01`/`A2-02`/`A2-03`、`A3-01`、
-`A4-02`/`A4-03`/`A4-06`、`A5-02`/`A5-03`/`A5-04` —— **已于第 8/9 轮全部清零**；此后转入「线上故障」轮次。
+**一句话历史**：13 条高危（`A1-01…A1-03`、`A2-01…A2-03`、`A3-01`、`A4-02`/`A4-03`/`A4-06`、
+`A5-02…A5-04`）**已于第 8/9 轮清零**；此后转入「线上故障」轮次。
 
 **逐轮要点见台账**（第 7–19 轮的维度、证据与结论都在 `docs/audit-ledger.md` 的 §5.11–§5.25）。
 
-**当前状态（第 19 轮）**：高危 **13 → 0**，存量只剩中/低与**明确接受项**（见 §10）；
-套件 18 → **29**（`ALL 29 SUITES PASS`，每条新门禁都做过对照）；类型错误 **243 → 0** 且基线锁在 0；
-审计维度已全覆（manifest+composition · lifecycle · permission+storage · 门禁有效性 · 声明面/注册面）。
-自推翻的记录（**不得覆盖，只能新写**）：`D-05` 曾误标「已修」、`A1-02` 的冷却设计、第 13 轮自愈的修法。
+**当前状态（第 20 轮）**：高危 **13 → 0**，只剩中/低与**明确接受项**（§10）；套件 18 → **29**
+（全绿、每条新门禁都做过对照）；类型错误 **243 → 0** 且基线锁 0；审计维度全覆。
+自推翻的记录（**不得覆盖，只能新写**）：`D-05` 误标「已修」、`A1-02` 的冷却设计、第 13 轮自愈的修法。
 
 
 ## 6. 审计与迭代协议
@@ -490,7 +498,7 @@ git diff --check              # 空白/冲突标记
 | `恒绿断言扫描` | 静态禁止 `check(…, true)` 字面真断言；「跳过」必须能与「通过」区分（非零退出或显式 skip 计数） | 2 | `A2-10`/`A2-11`/`A2-13` |
 | `门禁诊断可用` | `run-all.mjs` 失败时必须打印失败套件的 stderr | 2 | `A2-12` |
 | `视图卸载不丢全屏播放器` | **第 16 轮已实现**（`test-view-persistence.mjs`）：开全屏（含 MV 放大）→ 卸载视图 → store 仍 `open` 且媒体停在 body → 重新挂载 → 全屏播放器 / 放大布局 / 同一个 `<video>` 全部回来；收起动画跨卸载仍走完；`halt()` 复位 | 16 | §2.17 |
-| `音频不得硬切换` | **第 18 轮已实现**（`test-audio-fade.mjs`）：首播 30ms 内挂源（不等淡出）；播放中换源前必须**多步**淡到 ~0；换源后淡回用户值；暂停前先淡出；淡入途中改音量不被覆盖；连切后渐变已结算；`halt()` 后不再写 `audio.volume` | 18 | §2.18 |
+| `音频不得硬切换` | **第 18 轮已实现，第 20 轮按 fooyin 校准**（`test-audio-fade.mjs`）：首播 30ms 内挂源（不等淡出）；换源前必须**多步**淡到 ~0；换源后淡回用户值；暂停前先淡出；淡入途中改音量不被覆盖；连切后渐变已结算；`halt()` 后不再写 `audio.volume`；**H1** 手动切歌淡出 ≥200ms（fooyin 300）· **H2** 曲末自动 ≥500ms（fooyin 700）· **seek** 淡出→seek→淡回（`test-audio-graph` B14/B15） | 18/20 | §2.18 |
 | `音频常驻输出流 + 媒体 CORS` | **第 19 轮已实现**（`test-audio-graph.mjs`）：起播建**一个**常驻 AudioContext 且换歌不重建；元素音量置中性、增益在图里；同源**不设** crossOrigin / 跨源**必须**带；未确认 CORS 前**不建图**；建图失败与 `?musicGraph=0` 均回退；`halt()` 只 suspend。宿主侧：窄名单回显 ACAO（非名单**一个头都不给**）、媒体端点应答 `OPTIONS` 预检、平台路由拒绝跨源预检 | 19 | §2.19 |
 
 ## 7. 文档分层与关系
@@ -541,7 +549,7 @@ git diff --check              # 空白/冲突标记
 | I-12 | 不留死代码 | 维护成本与误读 | `noUnusedLocals` / `noUnusedParameters` | §2.15 |
 | I-13 | 每个断言都必须**能变红**（禁恒绿） | 门禁形同虚设 | 人工对照 + §9 | §6.1 §6.2 |
 | I-14 | 跨视图切换要保留的 UI 状态只在 player store；视图驱动的定时器归资源所有者 | 切回音乐页看到列表页 / 卡在 closing | `test-view-persistence` | §2.17 |
-| I-15 | 音频通路不得硬切换（换源 / 起播 / 暂停都要淡入淡出），且无声音可淡时必须保持同步 | 耳机里的「电流声」/ 起播时序整体后移 | `test-audio-fade` | §2.18 |
+| I-15 | 每次过渡都淡入淡出（换源 / 启播 / 暂停 / **seek**），时长取 fooyin 默认（300/700/120ms）；无声音可淡时必须保持同步 | 耳机里的「电流声」/ 起播时序整体后移 | `test-audio-fade`、`test-audio-graph` | §2.18 |
 | I-16 | 音频必须有**常驻固定采样率**的输出流；跨源接 Web Audio 必须先确认 CORS；建图后元素音量置中性 | 切歌/起播的「电流声」/ 静音 / 首次起播无声 | `test-audio-graph` | §2.19 |
 
 ## 9. 已知陷阱速查

@@ -1603,8 +1603,29 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        *   （与 §2.10「挂起后必须检查状态位」同族）。取消时 promise 以 `false` 结算 ——
        *   **不能只清定时器不结算**，那会让 `await` 它的调用方永久挂住。
        */
-      const FADE_OUT_MS = 70;
-      const FADE_IN_MS = 90;
+      /**
+       * 过渡淡入淡出的时长取自 **fooyin**（开源本地音乐播放器）的引擎默认值：
+       * `include/core/engine/fadingdefs.h` —— manualChange{in=300,out=300} ·
+       * autoChange{in=700,out=700} · seek{in=120,out=120} · pause{in=120,out=120} ·
+       * stop{in=120,out=300}。
+       *
+       * 关键情报：fooyin **同时**做了两件事 —— ① 输出会话常驻 + 「terminal resampling
+       * for output compatibility」（`audiopipeline.h:228`，默认开，master output format +
+       * SoX 重采样器）；② **每一次过渡都淡入淡出**（含 seek）。
+       * 也就是：常驻输出流与过渡淡入淡出**不是二选一**，两个都要。
+       * 我们第 18 轮做了②但太短（70/90ms）且漏了 seek，第 19 轮做了① —— 现在补齐。
+       */
+      const FADE_CHANGE_OUT_MS = 300;
+      const FADE_CHANGE_IN_MS = 300;
+      const FADE_AUTO_OUT_MS = 700;      // 曲末自动接下一首，给更长
+      const FADE_AUTO_IN_MS = 700;
+      const FADE_PAUSE_MS = 120;
+      const FADE_SEEK_MS = 120;
+      /** 本次换曲要用的时长（由 playIndex 按「手动 / 自动」写入）。 */
+      let changeFadeOutMs = FADE_CHANGE_OUT_MS;
+      let changeFadeInMs = FADE_CHANGE_IN_MS;
+      /** 曲末自动续播标记：只由 ended 处理器置位，playIndex 消费后立刻复位。 */
+      let advanceIsAuto = false;
       let fadeSeq = 0;
       let fadeCancelTimer: (() => void) | null = null;
       let fadeSettle: ((done: boolean) => void) | null = null;
@@ -1825,7 +1846,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           }
           // 起播后淡入到用户音量，避免第一帧就是满幅。
           void promise.then(() => {
-            if (!disposed) void rampVolume(state.volume, FADE_IN_MS);
+            if (!disposed) void rampVolume(state.volume, changeFadeInMs);
           }).catch((error) => {
             // AbortError = 这次 play 被随后的 pause()/换源打断，不是失败（快速切歌、
             // 立刻暂停都会走到这里）。把它当成「播不了」会误报红字。
@@ -1857,7 +1878,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         // 旧流，耳机里就是一声「啪」—— 这正是要修的症状。代价是这一路 ~70ms。
         // 用户点击带来的 sticky activation 仍然有效（本文件其它路径也早就 await 后才 play）。
         void (async () => {
-          await rampVolume(0, FADE_OUT_MS);
+          await rampVolume(0, changeFadeOutMs);
           if (disposed) return;
           startNow();
         })();
@@ -1969,6 +1990,11 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       const playIndex = (index) => {
         const track = state.tracks[index];
         if (track === undefined) return;
+        // 手动切歌 vs 曲末自动接下一首：fooyin 给后者更长的过渡（700ms vs 300ms）。
+        const auto = advanceIsAuto;
+        advanceIsAuto = false;
+        changeFadeOutMs = auto ? FADE_AUTO_OUT_MS : FADE_CHANGE_OUT_MS;
+        changeFadeInMs = auto ? FADE_AUTO_IN_MS : FADE_CHANGE_IN_MS;
         resumeAttempts = 0;
         skipAttempts = 0;
         lastFailureAt = 0;
@@ -2378,6 +2404,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           const promise = audio.play();
           if (promise !== undefined) promise.catch(() => {});
         } else {
+          advanceIsAuto = true;   // 曲末自动接下一首：用更长的过渡（fooyin autoChange）
           next();
         }
       });
@@ -2599,7 +2626,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
               return;
             }
             promise.then(() => {
-              if (!disposed) void rampVolume(state.volume, FADE_IN_MS);
+              if (!disposed) void rampVolume(state.volume, FADE_PAUSE_MS);
             }).catch((error) => {
               // 同 attachSource：AbortError 是被打断，不是格式不支持。
               if (error?.name === "NotAllowedError" || error?.name === "AbortError") return;
@@ -2609,7 +2636,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             // 暂停也要淡出：直接 pause() 是满幅瞬间归零，同样是一声「啪」。
             // 被后续动作取消时（rapid toggle）`ok` 为 false，就不要再暂停了。
             void (async () => {
-              const ok = await rampVolume(0, FADE_OUT_MS);
+              const ok = await rampVolume(0, FADE_PAUSE_MS);
               if (ok && !disposed) audio.pause();
             })();
           }
@@ -2713,7 +2740,20 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           skipAttempts = 0;
           lastFailureAt = 0;
           logSeek(value);
-          set({ time: seekAudio(value) });
+          // 拖动进度同样是波形上的硬跳变 —— fooyin 对 seek 也做 120ms 淡入淡出
+          // （fadingdefs.h::CrossfadingValues::seek）。
+          // **只在常驻音频图接管增益时**才这么做：图未启用时保持「立即 seek」，因为用元素
+          // 音量做延迟会让拖动明显发粘，而且没有采样级保证（也会改掉既有测试依赖的同步语义）。
+          if (gainNode === null) {
+            set({ time: seekAudio(value) });
+            return;
+          }
+          void (async () => {
+            const ok = await rampVolume(0, FADE_SEEK_MS);
+            if (!ok || disposed) return;   // 被更新的拖动接管：这一次不 seek（最后一次赢）
+            set({ time: seekAudio(value) });
+            if (!disposed) void rampVolume(state.volume, FADE_SEEK_MS);
+          })();
         },
         /** 预热 /session（媒体直连基址）；页面挂载时调一次即可。 */
         warmSession: () => { void loadSystemArtBase(); },

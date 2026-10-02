@@ -52,7 +52,7 @@ class FakeMedia extends dom.window.EventTarget {
     this.seekable = { length: 1, start: () => 0, end: () => 200 };
   }
   get src() { return this._src; }
-  set src(value) { this._src = value; ops.push({ op: 'src', v: value }); }
+  set src(value) { this._src = value; ops.push({ op: 'src', v: value, t: Date.now() }); }
   get currentSrc() { return this._src; }
   get volume() { return this._volume; }
   set volume(value) { this._volume = value; ops.push({ op: 'volume', v: value }); }
@@ -91,6 +91,17 @@ const root = createRoot(dom.window.document.createElement('div'));
 await act(async () => { root.render(React.createElement(View)); });
 const player = dom.window.__dshMusicPlayer;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** 有界轮询：等到条件成立或超时。**不放宽任何断言**，只是不再赌固定 sleep 够长
+ *  （fooyin 的过渡时长是 300/700ms，固定 220ms 会误报）。 */
+const waitFor = async (pred, timeoutMs = 3000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pred()) return true;
+    await sleep(10);
+  }
+  return pred();
+};
+const atUserVolume = () => Math.abs(media.volume - userVolume()) < 0.02;
 for (let i = 0; i < 60 && player.getState().tracks.length < 4; i += 1) await act(async () => { await sleep(25); });
 
 let failures = 0;
@@ -116,14 +127,40 @@ check('A1: first play assigns src within 30ms (must NOT wait for a fade-out)',
 check('A2: nothing was audible → no fade RAMP before the first src (最多一次归零写入)',
   aSrcAt < 0 ? false : before(aSrcAt, 'volume').length <= 1,
   'volume ops before src=' + JSON.stringify(before(aSrcAt, 'volume')));
-await act(async () => { await sleep(220); });
-await act(async () => { await sleep(220); });
+await act(async () => { await waitFor(() => atUserVolume()); });
 check('A3: volume faded in to the user setting after start',
   Math.abs(media.volume - userVolume()) < 0.02, 'volume=' + media.volume + ' want=' + userVolume());
 
 // ── B/C. 播放中换源：先淡出到 ~0，再换 src，然后淡回 ─────────────────────────
 clear();
-await act(async () => { player.play(1); await sleep(260); });
+// ── H. 过渡时长必须**够长**才有遮蔽力（fooyin：手动切歌 300ms，曲末自动 700ms）──────
+// 没有这条断言，把时长改回 70ms 也不会有任何门禁变红。
+const manualStart = Date.now();
+await act(async () => {
+  player.play(1);
+  await waitFor(() => ops.filter((o) => o.op === 'src').length >= 2);   // 第二首已挂源
+  await waitFor(() => atUserVolume());                                  // 且已淡回用户音量
+});
+// ⚠️ B 段开头 `clear()` 过 ops，所以「第二首的 src」是切段后的**索引 0**（不是 1）。
+const manualSrcOps = ops.filter((o) => o.op === 'src');
+const manualSrcAt = manualSrcOps.length > 0 ? manualSrcOps[0].t - manualStart : -1;
+check('H1: 手动切歌的淡出够长（≥200ms，fooyin 默认 300ms；改回 70ms 会红）',
+  manualSrcAt >= 200 && manualSrcAt <= 900, 'src 距调用 ' + manualSrcAt + 'ms');
+
+// ⚠️ H2 必须在 halt()（G 段）**之前**跑：teardown 之后 ended 不会再换源。
+{
+  const autoStart = Date.now();
+  const srcBefore = ops.filter((o) => o.op === 'src').length;
+  await act(async () => {
+    media.dispatchEvent(new dom.window.Event('ended'));
+    await waitFor(() => ops.filter((o) => o.op === 'src').length > srcBefore, 3000);
+    await waitFor(() => atUserVolume());   // 淡入也要走完，否则后续段落读到的是「半途音量」
+  });
+  const after = ops.filter((o) => o.op === 'src');
+  const autoSrcAt = after.length > srcBefore ? after[srcBefore].t - autoStart : -1;
+  check('H2: 曲末自动切歌用更长的过渡（≥500ms，fooyin autoChange 700ms）',
+    autoSrcAt >= 500, 'src 距 ended ' + autoSrcAt + 'ms');
+}
 const bSrcAt = ops.findIndex((o) => o.op === 'src');
 const volsBeforeSrc = before(bSrcAt, 'volume').map((o) => o.v);
 check('B1: switching while playing fades the old stream out before the new src',
@@ -138,7 +175,7 @@ check('C1: volume faded back up to the user setting after the switch',
 
 // ── D. 暂停：pause() 之前必须已淡出 ─────────────────────────────────────────
 clear();
-await act(async () => { player.toggle(); await sleep(220); });
+await act(async () => { player.toggle(); await waitFor(() => ops.some((o) => o.op === 'pause')); });
 const dPauseAt = ops.findIndex((o) => o.op === 'pause');
 const volsBeforePause = before(dPauseAt, 'volume').map((o) => o.v);
 check('D1: pausing fades out before pausing (a hard pause clicks too)',
@@ -150,13 +187,14 @@ check('D1: pausing fades out before pausing (a hard pause clicks too)',
 // 因为那次淡入的目标本来就是新音量。**必须在淡入途中改**才测得到：
 // 换源 → 淡出 70ms → 起播 → 淡入 90ms，在 t≈120ms 时改音量，正落在淡入区间里。
 // 若不取消，淡入会把音量继续推到它启动时捕获的旧目标（用户设定值 1）。
-await act(async () => { player.toggle(); await sleep(220); });   // 恢复播放并淡入
+await act(async () => { player.toggle(); await waitFor(() => atUserVolume()); });   // 恢复播放并淡入
 clear();
 await act(async () => {
   player.play(3);
-  await sleep(120);                // 淡入进行中
+  // 等到「有一次渐变正在进行」再改音量（300/700ms 的过渡下，固定 120ms 可能落在淡出段）。
+  await waitFor(() => ops.some((o) => o.op === 'ramp' || o.op === 'volume'), 500);
   player.setVolume(0.33);          // 用户拖动
-  await sleep(220);                // 让（若有 bug 的）淡入走完
+  await waitFor(() => Math.abs(media.volume - 0.33) < 0.02, 2000);   // 让（若有 bug 的）渐变走完
 });
 check('E1: a user volume change is not overwritten by an in-flight fade',
   Math.abs(media.volume - 0.33) < 0.02, 'volume=' + media.volume.toFixed(3) + ' want=0.33');
@@ -174,7 +212,7 @@ await act(async () => {
   player.play(2);
   // 把用户音量设回去，同时观察最终值
   player.setVolume(userVolume() || 0.8);
-  await sleep(350);
+  await waitFor(() => Math.abs(media.volume - (userVolume() || 0.8)) < 0.02);
   settleFlag.done = true;
 });
 check('F1: rapid switching still ends at the user volume',
@@ -185,7 +223,7 @@ check('F3: player is actually playing after the burst', media.paused === false, 
 // ── G. halt()：取消渐变，之后不得再写 audio.volume ──────────────────────────
 player.halt();
 clear();
-await act(async () => { await sleep(250); });
+await act(async () => { await sleep(400); });   // 断言的是「不再写」：等得越久越严格
 check('G1: nothing writes audio.volume after halt()',
   ops.filter((o) => o.op === 'volume').length === 0, JSON.stringify(ops.filter((o) => o.op === 'volume')));
 check('G2: halt() muted the element before stopping (no full-scale cut)',

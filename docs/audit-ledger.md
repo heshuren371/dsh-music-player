@@ -1365,3 +1365,63 @@ Musish 是知名的开源 Apple Music **Web 客户端**，正好也是「在浏�
 `typecheck` 0 · **`ALL 29 SUITES PASS`** · `check-build-fresh` 一致 · `check-strict` 通过 ·
 manifest PASS · `diff --check` clean。**真实听感仍未验证**（jsdom 没有音频设备），
 诊断的目的正是让用户与我能从外部判断机制是否生效。
+
+---
+
+## 5.28 第 20 轮 —— fooyin（Qt/C++ 本地播放器）给了**决定性对照**，并校准了过渡时长
+
+### 5.28.1 调研对象
+
+用户给的第二个仓库：`github.com/fooyin/fooyin`（HEAD `ef118e3`，2026-09-30，815 cpp / 861 h）。
+它与 Musish **完全不同**：Musish 只是调用闭源 SDK 的外壳，而 fooyin 有**真正的播放器内核**
+（`src/core/engine/`：pipeline / DSP 链 / 解码 / 输出插件 / 过渡编排）。
+
+### 5.28.2 它同时做了我们分两轮才各做一半的两件事（这是本轮最重要的发现）
+
+| fooyin 的做法 | 出处 | 对应我们 |
+| --- | --- | --- |
+| 输出设备是一个**长会话**，被管线持续喂数据：`negotiateFormat()` → `init(format)` → `start()` → `write()`… → `uninit()` | `include/core/engine/audiooutput.h` 的 lifecycle 注释 | 第 19 轮的**常驻 AudioContext** |
+| **「terminal resampling for output compatibility」，默认开**（`createSetting<OutputAutoResample>(true,…)`）；有 master output format 与可选重采样器（默认首选 SoX） | `include/core/engine/pipeline/audiopipeline.h:228`、`src/core/internalcoresettings.cpp:169`、`pipelinerenderer.cpp` 的 `m_outputResampler` / `m_masterOutputFormat` | 第 19 轮「所有媒体重采样进同一条固定采样率输出流」 |
+| **每一次过渡都淡入淡出**，含 **seek** | `include/core/engine/fadingdefs.h`、`output/outputfader.cpp`（逐样本 `data[i] *= gain`，按 sampleRate 换算包络） | 第 18 轮的淡入淡出 |
+
+⇒ **结论修正**：第 18 轮（淡入淡出）与第 19 轮（常驻输出流）**不是互相替代，而是两个都要**；
+而且 fooyin 的时长比我原来的**长 3–4 倍**，还多了 **seek 也要淡**。
+
+### 5.28.3 按 fooyin 默认值校准（本轮代码改动）
+
+`fadingdefs.h` 的默认值 → 直接采用：
+`manualChange{300/300}` · `autoChange{700/700}` · `seek{120/120}` · `pause{120/120}` · `stop{120/300}`。
+
+| 项 | 改前 | 改后 | 依据 |
+| --- | --- | --- | --- |
+| 手动切歌淡出/淡入 | 70 / 90ms | **300 / 300ms** | `CrossfadingValues::manualChange` |
+| 曲末自动接下一首 | 同上 | **700 / 700ms** | `CrossfadingValues::autoChange`（`ended` → `advanceIsAuto`） |
+| 暂停 / 恢复 | 70 / 90ms | **120 / 120ms** | `FadingValues::pause` |
+| **拖动进度** | **无** | **120ms 淡出 → seek → 120ms 淡回** | `CrossfadingValues::seek` |
+
+seek 的淡入淡出**只在常驻音频图接管增益时**启用：图未启用时用元素音量做延迟会让拖动发粘、
+且没有采样级保证，那条路径保持既有的**同步** seek 语义（既有套件也因此不受影响）。
+
+### 5.28.4 门禁（把「够长」与「seek 也要淡」钉死）
+
+- `test-audio-fade.mjs` **H1**：手动切歌 `src` 距调用 **≥200ms**（实测 301–313ms）；
+  **H2**：`ended` 触发的自动切歌 **≥500ms**（实测 707–712ms）。
+  **没有这两条，把时长改回 70ms 不会有任何门禁变红。**
+- `test-audio-graph.mjs` **B14/B15**：seek 必须「淡出 → seek → 淡回」且顺序正确。
+- 三条负向对照各自精确变红：时长 70ms→H1 红（84ms）· 自动不区分→H2 红（302ms）·
+  seek 立即执行→B14/B15 红。
+
+### 5.28.5 本轮我自己的四个错（都记下来）
+
+1. **锚点缩进靠「带缩进前缀的显示」判断**，结果两处都写错（`sed 's/^/  /'` 会加 2 空格）。
+   → 教训：**取锚点要用 `⟦` 之类的中性标记，或直接看 `grep -n` 的原始行**。
+2. **`clear()` 之后索引算错**：B 段开头清空过 `ops`，所以「第二首的 src」是索引 0 而不是 1。
+3. **把 H2 放在 `halt()` 之后**：teardown 之后 `ended` 不会再换源 → 断言必然拿不到新 src（崩）。
+   → 教训：**涉及事件的断言必须放在 teardown 之前**。
+4. **H2 只等「挂源」没等「淡入完成」**，导致后续段落读到半途音量（C1/D1 误红）。
+
+### 5.28.6 验证
+
+`typecheck` 0 · **`ALL 29 SUITES PASS`** · 三条对照精确变红 · `check-build-fresh` 一致 ·
+`check-strict` 通过 · manifest PASS · `diff --check` clean。
+**真实听感仍未验证**（jsdom 没有音频设备）—— 这一条继续如实标注。

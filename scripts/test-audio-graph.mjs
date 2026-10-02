@@ -188,11 +188,13 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
   // 于是 play() 改的是外层、断言读的是副本（§9 陷阱 4：夹具保真度 = 断言判别力）。
   const attrs = {};
   const el = {
-    _src: '', _volume: 1, paused: true, currentTime: 0, duration: 200, readyState: 4,
+    _src: '', _volume: 1, _t: 0, paused: true, duration: 200, readyState: 4,
     error: null, preload: '',
     get src() { return this._src; },
     set src(v) { log.push({ op: 'src', v }); this._src = v; },
     get currentSrc() { return this._src; },
+    get currentTime() { return this._t; },
+    set currentTime(v) { log.push({ op: 'seek', v }); this._t = v; },
     // 真实元素的 `crossOrigin` 是**反射 IDL 属性**：赋值即写 attribute。夹具必须照做，
     // 否则断言读 attribute 恒为 undefined（本套件第三次栽在夹具保真度上，§9 陷阱 4）。
     get crossOrigin() { return attrs.crossorigin ?? null; },
@@ -336,6 +338,27 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
     'ctx=' + b.log.filter((o) => o.op === 'ctx').length + ' source=' + b.log.filter((o) => o.op === 'createSource').length);
   check('B11: 跨源媒体**必须**带 crossOrigin=anonymous（否则 Web Audio 静音）',
     b.attrs().crossorigin === 'anonymous', 'crossorigin=' + b.attrs().crossorigin);
+}
+
+// B14/B15：拖进度也要淡入淡出（fooyin: seek{in=120,out=120}）——仅当音频图接管增益时
+{
+  const b = await boot({ fakeCtx: {} });
+  await act(async () => {
+    b.player.play(0);
+    await b.waitFor(() => Math.abs(b.media.volume - b.state().volume) < 1e-6);
+  });
+  const mark = b.log.length;
+  b.player.seek(120);
+  await act(async () => { await b.waitFor(() => b.log.slice(mark).some((o) => o.op === 'seek')); });
+  const tail = b.log.slice(mark);
+  const iRamp0 = tail.findIndex((o) => o.op === 'ramp' && o.v === 0);
+  const iSeek = tail.findIndex((o) => o.op === 'seek');
+  const iBack = tail.findIndex((o, i) => i > iSeek && o.op === 'ramp' && o.v > 0);
+  check('B14: seek 前先把增益淡到 0（拖动同样是硬跳变）', iRamp0 >= 0 && iRamp0 < iSeek,
+    JSON.stringify(tail.slice(0, 4)));
+  check('B15: 顺序正确 —— 淡出 → seek → 淡回', iRamp0 >= 0 && iSeek > iRamp0 && iBack > iSeek,
+    'ramp0=' + iRamp0 + ' seek=' + iSeek + ' back=' + iBack);
+  b.restoreInfo();
 }
 
 console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)');
