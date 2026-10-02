@@ -134,41 +134,64 @@ async function boot({ wave = 'ok', delayFor = null } = {}) {
     b.player.play(0);
     await b.waitFor(() => b.log.some((o) => o.op === 'waveform'));
   });
-  check('A1: 起播时按曲目 id 取波形（宿主只读解码 + 缓存）',
-    b.log.filter((o) => o.op === 'waveform').length === 1 && b.log[0].url.includes('p=a.flac'),
-    b.log.filter((o) => o.op === 'waveform').map((o) => o.url).join(' '));
+  const reqs0 = b.log.filter((o) => o.op === 'waveform').map((o) => o.url);
+  check('A1: 起播取当前曲目的包络，并**顺带预取下一首**（切歌时柱子不必等往返）',
+    reqs0.length === 2 && reqs0.some((u) => u.includes('p=a.flac')) && reqs0.some((u) => u.includes('p=b.flac')),
+    reqs0.join(' '));
 
   await b.waitFor(() => b.bars().length > 0);
   // 两层同样的柱子（底层暗、上层亮），上层用 clip-path 按进度裁开
   const all = b.bars();
   const rows = b.container.querySelectorAll('.dshm-wave__row');
   const onRow = b.container.querySelector('.dshm-wave__row--on');
-  check('A2: 收到包络后渲染出两层柱子（每层 120 根，由 400 桶抽样）',
-    all.length === 240 && rows.length === 2 && onRow !== null,
+  check('A2: 常驻底栏渲染 60 根柱子 ×2 层（节点数 = 2×柱子数，底栏刻意减半）',
+    all.length === 120 && rows.length === 2 && onRow !== null,
     'bars=' + all.length + ' rows=' + rows.length);
 
-  // 400 桶 → 120 根：前 60 根落在静音段、后 60 根落在满幅段（最低留 6% 底线）
-  const heights = Array.from(all).slice(0, 120).map((n) => n.style.height);
-  check('A3: 柱子高度跟随包络且抽样正确（静音段 6% 底线，满幅段 100%）',
-    heights[0] === '6%' && heights[59] === '6%' && heights[119] === '100%',
-    'first=' + heights[0] + ' mid=' + heights[59] + ' last=' + heights[119]);
+  // 400 桶 → 60 根：a.flac 是「前 200 桶静音 + 后 200 桶满幅」⇒ 前 30 根 6%、后 30 根 100%
+  const heights = Array.from(all).slice(0, 60).map((n) => n.style.height);
+  check('A3: 柱子高度跟随包络且抽样正确（前 30 根 6% 底线，后 30 根 100%）',
+    heights[0] === '6%' && heights[29] === '6%' && heights[59] === '100%',
+    'first=' + heights[0] + ' mid=' + heights[29] + ' last=' + heights[59]);
 
   const trackEl = b.container.querySelector('.dshm-progressTrack');
   const played = trackEl?.style.getPropertyValue('--dshm-played');
   check('A4: 播放进度通过 CSS 变量传给遮罩（拖动时不必触发 React 重渲染）',
     typeof played === 'string' && played.endsWith('%'), '--dshm-played=' + String(played));
 
-  // 换歌重新取，同一首不重复取
+  // 换歌：b.flac 的包络**已经预取好了** ⇒ 不再请求，且立刻出图（本轮优化的效果）
   await act(async () => {
     b.player.play(1);
-    await b.waitFor(() => b.log.filter((o) => o.op === 'waveform').length === 2);
+    await b.sleep(100);
   });
-  const urls = b.log.filter((o) => o.op === 'waveform').map((o) => o.url);
-  check('A5: 换歌重新取波形（不同曲目各自的包络）',
-    urls.length === 2 && urls[1].includes('p=b.flac'), urls.join(' '));
+  const reqs1 = b.log.filter((o) => o.op === 'waveform').map((o) => o.url);
+  const bHeights = Array.from(b.bars()).slice(0, 2).map((n) => n.style.height);
+  check('A5: 换歌命中预取缓存 —— **不再请求**，且立刻显示新曲目的包络',
+    reqs1.length === 2 && bHeights[0] === '50%' && bHeights[1] === '50%',
+    'requests=' + reqs1.length + ' first=' + bHeights[0]);
+
+  // 回到上一首：也命中客户端缓存（有界 Map），同样不再请求
+  await act(async () => {
+    b.player.play(0);
+    await b.sleep(100);
+  });
+  const reqs2 = b.log.filter((o) => o.op === 'waveform').map((o) => o.url);
+  const aHeights = Array.from(b.bars()).slice(0, 2).map((n) => n.style.height);
+  check('A6: 回到上一首命中客户端缓存 —— 三次切歌总共只请求两次',
+    reqs2.length === 2 && aHeights[0] === '6%', 'requests=' + reqs2.length + ' first=' + aHeights[0]);
+
+  // 全屏播放器给更多细节：120 根柱子（底栏 60 根）
+  await act(async () => {
+    b.player.openPlayer();
+    await b.sleep(60);
+  });
+  const stacked = b.container.querySelector('.dshm-progress--stacked');
+  const stackedBars = stacked === null ? 0 : stacked.querySelectorAll('.dshm-wave__bar').length;
+  check('A7: 全屏播放器用 120 根柱子（细节更多），常驻底栏 60 根',
+    stackedBars === 240, 'stacked bars=' + stackedBars);
 }
 
-// A6：拿不到波形时必须**静默降级**（回到原来的细轨），不是报错
+// A8：拿不到波形时必须**静默降级**（回到原来的细轨），不是报错
 {
   const b = await boot({ wave: 'empty' });
   await act(async () => {
@@ -176,13 +199,13 @@ async function boot({ wave = 'ok', delayFor = null } = {}) {
     await b.waitFor(() => b.log.some((o) => o.op === 'waveform'));
     await b.sleep(60);
   });
-  check('A6: 宿主拿不到波形时不渲染柱子，但进度条照旧工作（静默降级，不报红字）',
+  check('A8: 宿主拿不到波形时不渲染柱子，但进度条照旧工作（静默降级，不报红字）',
     b.bars().length === 0 && b.container.querySelector('.dshm-progressTrack') !== null
       && b.player.getState().error === null,
     'bars=' + b.bars().length + ' error=' + String(b.player.getState().error));
 }
 
-// A7：**迟到结果必须丢弃** —— 快速连切时先发的那首会晚回来，画上去就与正在播的歌对不上。
+// A9：**迟到结果必须丢弃** —— 快速连切时先发的那首会晚回来，画上去就与正在播的歌对不上。
 // ⚠️ 必须让**先发的那首慢、后发的快**：两边一样慢时，迟到的先写上、正确的后写上，
 // 反而「看起来正确」—— 第一版就是这么写的，做对照时**照样全绿**（没有判别力）。
 {
@@ -195,7 +218,7 @@ async function boot({ wave = 'ok', delayFor = null } = {}) {
   });
   const heights = Array.from(b.bars()).slice(0, 4).map((n) => n.style.height);
   // b.flac 是全程 0.5 → 50%；a.flac 是「前静音后满幅」→ 首根 6%。拿到 6% 就说明迟到结果被画上了。
-  check('A7: 快速连切时丢弃上一首的迟到包络（画上去的必须与正在播的歌一致）',
+  check('A9: 快速连切时丢弃上一首的迟到包络（画上去的必须与正在播的歌一致）',
     heights[0] === '50%' && heights[3] === '50%', heights.join(','));
 }
 

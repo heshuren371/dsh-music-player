@@ -112,18 +112,24 @@ const EQ_GAIN_MAX_DB = 12;
 /** 预设：id → 每段增益（dB）。`flat` 永远是第一条（默认不动音色）。 */
 const EQ_PRESETS: Record<string, number[]> = {
   flat: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-  pop: [-1.5, -1, 0, 2, 3.5, 3, 1.5, 0, -1, -1.5],
-  rock: [2, 2, 1, 0, -1, -0.5, 1, 2.5, 3, 3],
-  classical: [3, 2.5, 1.5, 0, 0, 0, -1, -1.5, -2, -2.5],
-  jazz: [2, 1.5, 0.5, 1, -0.5, -0.5, 0, 1, 1.5, 2],
-  bass: [5, 4.5, 3.5, 2, 0.5, 0, 0, 0, 0, 0],
-  vocal: [-2, -1.5, -0.5, 1.5, 3, 3.5, 2.5, 1, 0, -1],
-  electronic: [4, 3.5, 2, 0, -1, -0.5, 1, 2, 3, 3.5],
+  // 曲线按「**入耳式真能重放**的频段」分布：小动圈对 31/62Hz 几乎无输出，把能量堆在那里
+  // 只会白白让自动前级压低整体音量（实测听不出差别的原因之一）。所以低音落在 62–250Hz。
+  pop: [-1, 0, 1, 3, 4, 3, 2, 1, 0, -1],
+  rock: [3, 3, 2, 0.5, -1, -1, 1, 3, 4, 4],
+  classical: [3.5, 3, 2, 0, 0, 0, -1, -2, -3, -3.5],
+  jazz: [3, 2, 1, 1.5, -0.5, -0.5, 0, 1.5, 2, 2.5],
+  bass: [2, 4, 5, 4, 2, 0, 0, 0, 0, 0],
+  vocal: [-2, -1, 0.5, 3, 4.5, 4, 3, 1.5, 0, -1],
+  electronic: [4, 4, 3, 0, -1, -0.5, 1.5, 3, 4, 4.5],
 };
 const EQ_PRESET_ORDER = Object.keys(EQ_PRESETS);
+/** 波形柱子数：全屏播放器多给一点细节，常驻底栏减半（DOM 节点 = 2×柱子数）。 */
+const WAVE_BARS_FULL = 120;
+const WAVE_BARS_INLINE = 60;
 
 /**
- * 波形柱子的抽样：宿主下发 400 桶，渲染只要 ~120 根（两层行 = 240 个节点，再多会拖慢进度条）。
+ * 波形柱子的抽样：宿主下发 400 桶，渲染只要 ~120 根（全屏）/ ~60 根（常驻底栏）。
+ * 两层行 = 2×柱子数个节点，所以底栏刻意减半 —— 它在浏览列表时一直可见，省一半节点。
  * 取每段**最大值**（不是平均：平均会把瞬态抹平，鼓点看起来就没了）。
  */
 function sampleWaveBars(peaks: number[], target: number): number[] {
@@ -1829,7 +1835,10 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           if (q === "1") return true;
           if (q === "0") return false;
         } catch { /* location 不可用就当作没设标记 */ }
-        return (window as unknown as { __dshMusicCrossfade?: boolean }).__dshMusicCrossfade === true;
+        // 默认**开启**（第 25 轮用户实测确认：噪声在**换页面**时也出现 ⇒ 与平台/其它来源有关，
+        // 不再是本插件的设备重协商）。显式关闭：`window.__dshMusicCrossfade = false`。
+        const flag = (window as unknown as { __dshMusicCrossfade?: boolean }).__dshMusicCrossfade;
+        return flag === undefined ? true : flag === true;
       })();
 
       const graphOffByFlag = (() => {
@@ -2049,11 +2058,14 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 
       /** 把下一首挂到空闲元素上（只加载，不出声）。 */
       const schedulePrefetch = () => {
-        if (!crossfadeOn || disposed) return;
-        const el = ensureIdleElement();
-        if (el === null || !ensureIdleGraph()) return;
+        if (disposed) return;
         const next = nextTrackForPrefetch();
         if (next === null) { prefetchedUrl = null; return; }
+        // 波形预取与交叉淡化**解耦**：关掉淡化也该预取（少一次往返，切歌时柱子立刻出现）。
+        void prefetchWaveform(next);
+        if (!crossfadeOn) return;
+        const el = ensureIdleElement();
+        if (el === null || !ensureIdleGraph()) return;
         const url = streamUrl(next);
         prefetchedUrl = url;
         el.src = url;
@@ -2457,11 +2469,48 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       };
 
       /**
+       * 波形客户端缓存（**有界**，§2.2）。宿主那边要跑一次 ffmpeg，客户端这边一次往返也不便宜：
+       * 返回上一首时直接用缓存，柱子**立刻**出现。
+       */
+      const wavePeaksCache = new Map<string, number[]>();
+      const WAVE_PEAKS_CACHE_MAX = 30;
+      const cacheWavePeaks = (id: string, peaks: number[]) => {
+        wavePeaksCache.delete(id);
+        wavePeaksCache.set(id, peaks);
+        while (wavePeaksCache.size > WAVE_PEAKS_CACHE_MAX) {
+          wavePeaksCache.delete(wavePeaksCache.keys().next().value as string);
+        }
+      };
+
+      /**
+       * 预取**下一首**的包络进客户端缓存。与交叉淡化**无关**（关掉淡化也值得预取）。
+       * 注意它只填缓存、**不动当前显示** —— 预取绝不能改 UI。
+       */
+      const prefetchWaveform = async (track: MusicTrack) => {
+        if (disposed || wavePeaksCache.has(track.id)) return;
+        try {
+          const result = await api("/api/waveform?p=" + encodeURIComponent(track.id));
+          if (disposed) return;
+          const peaks = (Array.isArray(result?.peaks) ? result.peaks : [])
+            .filter((v) => typeof v === "number" && Number.isFinite(v));
+          if (peaks.length > 0) cacheWavePeaks(track.id, peaks);
+        } catch {
+          // 预取失败无所谓：真正切到那首时会再请求一次（不报错、不重试风暴）。
+        }
+      };
+
+      /**
        * 波形：按需取当前曲目的包络。宿主侧是**只读** ffmpeg 解码 + 缓存（与 §2.20 同族纪律）。
        * 取不到（没有 ffmpeg / 解码失败 / 未知曲目）就保持 `null` 静默降级 —— 不报红字、不影响播放。
        */
       const loadWaveform = async (track: MusicTrack) => {
         if (state.waveTrackId === track.id && state.wavePeaks !== null) return;
+        const cached = wavePeaksCache.get(track.id);
+        if (cached !== undefined) {
+          // 命中缓存（多是预取来的）：**同步**出图，切歌时看不到空白期。
+          set({ wavePeaks: cached, waveTrackId: track.id });
+          return;
+        }
         set({ wavePeaks: null, waveTrackId: track.id });
         try {
           const result = await api("/api/waveform?p=" + encodeURIComponent(track.id));
@@ -2469,6 +2518,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           if (state.waveTrackId !== track.id) return;
           const raw = Array.isArray(result?.peaks) ? result.peaks : [];
           const peaks = raw.filter((v) => typeof v === "number" && Number.isFinite(v));
+          if (peaks.length > 0) cacheWavePeaks(track.id, peaks);
           set({ wavePeaks: peaks.length > 0 ? peaks : null });
         } catch {
           set({ wavePeaks: null });
@@ -3730,7 +3780,9 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       });
       // 波形：两层同样的柱子，上层用 clip-path 按播放进度裁开。进度通过 CSS 变量
       // `--dshm-played` 传进去，所以拖动的 rAF 循环**不必**触发 React 重渲染。
-      const bars = Array.isArray(peaks) && peaks.length > 0 ? sampleWaveBars(peaks, 120) : null;
+      const bars = Array.isArray(peaks) && peaks.length > 0
+        ? sampleWaveBars(peaks, variant === "stacked" ? WAVE_BARS_FULL : WAVE_BARS_INLINE)
+        : null;
       const playedPct = duration > 0 && Number.isFinite(time) ? Math.max(0, Math.min(100, (time / duration) * 100)) : 0;
       const waveRow = (modifier?) => h("div", { className: "dshm-wave__row" + (modifier === undefined ? "" : " " + modifier) },
         bars === null ? null : bars.map((value, i) => h("span", {

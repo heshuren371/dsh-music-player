@@ -159,10 +159,10 @@ function makeFakeAudioContext(log, store) {
   };
 }
 
-async function boot({ fakeCtx = false } = {}) {
+async function boot({ fakeCtx = false, search = '' } = {}) {
   const log = [];
   const store = [];
-  const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', { url: ORIGIN + '/', pretendToBeVisual: true });
+  const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', { url: ORIGIN + '/' + search, pretendToBeVisual: true });
   const win = dom.window;
   globalThis.window = win;
   globalThis.document = win.document;
@@ -231,7 +231,7 @@ async function boot({ fakeCtx = false } = {}) {
 
 // B1：节点串联顺序（RG 必须在音量**之前**，否则归一化后的信号又被衰减/放大一次）
 {
-  const b = await boot({ fakeCtx: true });
+  const b = await boot({ fakeCtx: true, search: '?crossfade=0' });
   await act(async () => { b.player.play(0); await b.waitFor(() => b.log.some((o) => o.op === 'src')); });
   // ⚠️ **按角色选节点，不要按创建顺序索引**：均衡器插进链后 `store[1]` 变成了 EQ 前级，
   // 于是「rgGain」读到的是前级（全量套件实测：B3–B12 集体变红）。角色是稳定的语义，
@@ -302,7 +302,7 @@ async function boot({ fakeCtx = false } = {}) {
 
 // B11/B12：标签之外的第二条路（测量），以及两者同时存在时的优先级
 {
-  const b = await boot({ fakeCtx: true });
+  const b = await boot({ fakeCtx: true, search: '?crossfade=0' });
   await act(async () => {
     b.player.setReplayGain('track');
     b.player.play(2);                       // 只有测量值的那首
@@ -322,7 +322,7 @@ async function boot({ fakeCtx = false } = {}) {
 
 // B9：回退路径（没有 AudioContext）—— RG 必须折进元素音量，否则静默失效
 {
-  const b = await boot({ fakeCtx: false });
+  const b = await boot({ fakeCtx: false, search: '?crossfade=0' });
   await act(async () => {
     b.player.setVolume(1);
     b.player.setReplayGain('track');

@@ -291,7 +291,7 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
 
 // B1/B2/B3：建图一次、常驻、增益接管音量
 {
-  const b = await boot({ fakeCtx: {} });
+  const b = await boot({ fakeCtx: {}, search: '?crossfade=0' });
   await act(async () => {
     b.player.play(0);
     await b.waitFor(() => b.log.some((o) => o.op === 'createSource'));      // 建图（最多 2s）
@@ -332,7 +332,7 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
 
 // B7：兜底开关
 {
-  const b = await boot({ fakeCtx: {}, search: '?musicGraph=0' });
+  const b = await boot({ fakeCtx: {}, search: '?musicGraph=0&crossfade=0' });
   await act(async () => {
     b.player.play(0);
     await b.waitFor(() => b.log.some((o) => o.op === 'play'));              // 已经起播（回退路径）
@@ -345,7 +345,7 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
 
 // B8：建图失败必须自动回退，不能把播放搞坏
 {
-  const b = await boot({ fakeCtx: { throwOnSource: true } });
+  const b = await boot({ fakeCtx: { throwOnSource: true }, search: '?crossfade=0' });
   await act(async () => {
     b.player.play(0);
     await b.waitFor(() => b.log.some((o) => o.op === 'play'));
@@ -358,7 +358,7 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
 
 // B9/B10：桌面跨源 —— 先直连（不出声风险为 0），探测确认后再建图
 {
-  const b = await boot({ fakeCtx: {}, origin: 'http://127.0.0.1:3080', pageOrigin: 'http://127.0.0.1:3999' });
+  const b = await boot({ fakeCtx: {}, search: '?crossfade=0', origin: 'http://127.0.0.1:3080', pageOrigin: 'http://127.0.0.1:3999' });
   await act(async () => {
     b.player.play(0);
     await b.waitFor(() => b.log.some((o) => o.op === 'src'));   // 第一首已挂源（仍走直连）
@@ -379,7 +379,7 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
 
 // B14/B15：拖进度也要淡入淡出（fooyin: seek{in=120,out=120}）——仅当音频图接管增益时
 {
-  const b = await boot({ fakeCtx: {} });
+  const b = await boot({ fakeCtx: {}, search: '?crossfade=0' });
   await act(async () => {
     b.player.play(0);
     await b.waitFor(() => Math.abs(b.media.volume - b.state().volume) < 1e-6);
@@ -470,20 +470,31 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
     'A=' + b.media.paused + ' B=' + b.media2.paused);
 }
 
-// D0：**默认关闭**时必须与以前逐字一致 —— 不创建第二个元素、不预取
+// D0：**默认开启**（第 25 轮用户确认噪声与平台相关后翻转）—— 不带参数就该走交叉淡化；
+// 想回到旧路径必须**显式** `?crossfade=0`。两条都要断言，否则「默认值」本身就没人守。
 {
   const b = await boot({ fakeCtx: {} });
   await act(async () => {
     b.player.play(0);
+    await b.waitFor(() => b.log.some((o) => o.op === 'src' && o.el === 'B'), 1500);
+  });
+  check('D0a: **默认**（不带参数）就走交叉淡化：创建空闲元素并预取下一首',
+    typeof b.media2.src === 'string' && b.media2.src.length > 0 && b.log.some((o) => o.op === 'src' && o.el === 'B'),
+    'el2 src=' + JSON.stringify(b.media2.src).slice(0, 60));
+}
+{
+  const b = await boot({ fakeCtx: {}, search: '?crossfade=0' });
+  await act(async () => {
+    b.player.play(0);
     await b.waitFor(() => b.log.some((o) => o.op === 'src'));
   });
-  check('D0: 未开启交叉淡化时不碰第二个元素（默认路径零影响）',
+  check('D0b: 显式 ?crossfade=0 时不碰第二个元素（旧路径仍可复现、可排查）',
     b.media2.src === '' && !b.log.some((o) => o.el === 'B'), 'el2 src=' + JSON.stringify(b.media2.src));
 }
 
 // ── E. 均衡器（10 段 peaking + 预设 + 自动前级；见 §2.22）─────────────────────────
 {
-  const b = await boot({ fakeCtx: {} });
+  const b = await boot({ fakeCtx: {}, search: '?crossfade=0' });
   await act(async () => {
     b.player.play(0);
     await b.waitFor(() => b.log.some((o) => o.op === 'src'));
@@ -514,7 +525,9 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
     'gains=' + filters.map((f) => f.gain.value).join(',') + ' preset=' + b.state().eqPreset);
 
   await act(async () => { b.player.setEqualizer('bass'); });
-  const bass = [5, 4.5, 3.5, 2, 0.5, 0, 0, 0, 0, 0];
+  // 预设曲线在源码里（§2.22）；这里写死是为了「改了预设必须回来同步断言」——本轮就把能量
+  // 从 31/62Hz（小动圈几乎无输出）挪到了 62–250Hz，期望值随之更新。
+  const bass = [2, 4, 5, 4, 2, 0, 0, 0, 0, 0];
   check('E4: 切到预设后每段增益等于预设值',
     filters.length === 10 && filters.every((f, i) => Math.abs(f.gain.value - bass[i]) < 0.001),
     'gains=' + filters.map((f) => f.gain.value).join(','));
@@ -561,7 +574,7 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
 
 // E10：没有 createBiquadFilter 的环境**只跳过 EQ**，音频图必须照建（不能连常驻输出流一起丢）
 {
-  const b = await boot({ fakeCtx: { noBiquad: true } });
+  const b = await boot({ fakeCtx: { noBiquad: true }, search: '?crossfade=0' });
   await act(async () => {
     b.player.play(0);
     await b.waitFor(() => b.log.some((o) => o.op === 'src'));
