@@ -136,7 +136,7 @@ const TRACKS = ['a.mp3', 'b.mp3'].map((name, index) => ({
 }));
 
 /** 假 AudioContext：记录建图与增益调度，供断言「常驻」「采样级渐变」。 */
-function makeFakeAudioContext(log, { throwOnSource = false, state = 'running' } = {}) {
+function makeFakeAudioContext(log, store, { throwOnSource = false, state = 'running', noBiquad = false } = {}) {
   return class FakeAudioContext {
     constructor() {
       log.push({ op: 'ctx' });
@@ -158,9 +158,27 @@ function makeFakeAudioContext(log, { throwOnSource = false, state = 'running' } 
           setValueAtTime: (v, t) => { node.gain.value = v; log.push({ op: 'setValue', v, t, id }); },
           linearRampToValueAtTime: (v, t) => { node.gain.value = v; log.push({ op: 'ramp', v, t, id }); },
         },
-        connect: (to) => log.push({ op: 'connect', to: to && to.id }),
+        // `from` 也要记：E 段要按边遍历链条（只有 `to` 的话无法判断「谁接进谁」）。
+        connect: (to) => log.push({ op: 'connect', from: id, to: to && to.id }),
       };
+      store.push(node);
       log.push({ op: 'createGain', id });
+      return node;
+    }
+    /** 假的 peaking 滤波器：E 段要逐段读频点与增益。 */
+    createBiquadFilter() {
+      const id = 'filter' + (++this._n);
+      const node = {
+        id,
+        type: 'lowpass',
+        frequency: { value: 0 },
+        Q: { value: 0 },
+        gain: { value: 0 },
+        connect: (to) => log.push({ op: 'connect', from: id, to: to && to.id }),
+        disconnect: () => {},
+      };
+      store.push(node);
+      log.push({ op: 'createFilter', id });
       return node;
     }
     createMediaElementSource() {
@@ -175,6 +193,7 @@ function makeFakeAudioContext(log, { throwOnSource = false, state = 'running' } 
 
 async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:3080', pageOrigin = null } = {}) {
   const log = [];
+  const store = [];
   // ⚠️ 跨源要用「页面端口 ≠ 媒体端口」来构造，**不能**用 `dsh-app://app` 当 jsdom 的 URL：
   // 非 special scheme 是 opaque origin，jsdom 的 localStorage 会直接抛 SecurityError。
   const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', { url: (pageOrigin ?? origin) + '/' + search, pretendToBeVisual: true });
@@ -190,7 +209,11 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
   globalThis.MutationObserver = class { observe() {} disconnect() {} takeRecords() { return []; } };
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   win.Element.prototype.scrollIntoView = function () {};
-  if (fakeCtx !== null) win.AudioContext = makeFakeAudioContext(log, fakeCtx);
+  if (fakeCtx !== null) {
+    const Ctor = makeFakeAudioContext(log, store, fakeCtx);
+    if (fakeCtx.noBiquad) delete Ctor.prototype.createBiquadFilter;   // 模拟老实现：只跳过 EQ
+    win.AudioContext = Ctor;
+  }
 
   // ⚠️ 夹具必须是一个**活对象**：早先写成 `{...media, get src(){}}` 是**拷贝**，
   // 于是 play() 改的是外层、断言读的是副本（§9 陷阱 4：夹具保真度 = 断言判别力）。
@@ -263,7 +286,7 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
     }
     return pred();
   };
-  return { log, player, media: el, media2: el2, attrs: () => el._attrs, sleep, waitFor, origin, infoLines, restoreInfo, state: () => player.getState() };
+  return { log, store, win, player, media: el, media2: el2, attrs: () => el._attrs, sleep, waitFor, origin, infoLines, restoreInfo, state: () => player.getState() };
 }
 
 // B1/B2/B3：建图一次、常驻、增益接管音量
@@ -456,6 +479,97 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
   });
   check('D0: 未开启交叉淡化时不碰第二个元素（默认路径零影响）',
     b.media2.src === '' && !b.log.some((o) => o.el === 'B'), 'el2 src=' + JSON.stringify(b.media2.src));
+}
+
+// ── E. 均衡器（10 段 peaking + 预设 + 自动前级；见 §2.22）─────────────────────────
+{
+  const b = await boot({ fakeCtx: {} });
+  await act(async () => {
+    b.player.play(0);
+    await b.waitFor(() => b.log.some((o) => o.op === 'src'));
+  });
+  const filters = b.store.filter((n) => n.id.startsWith('filter'));
+  check('E1: 建出 10 段 peaking 滤波器，频点就是十段 ISO 中心频率',
+    filters.length === 10 && filters.every((f) => f.type === 'peaking')
+      && filters.map((f) => f.frequency.value).join(',') === '31,62,125,250,500,1000,2000,4000,8000,16000',
+    'n=' + filters.length + ' freq=' + filters.map((f) => f.frequency.value).join(','));
+
+  const idToDest = (b.log.find((o) => o.op === 'connect' && o.to === 'destination') ?? {}).from;
+  const sourceTo = (b.log.find((o) => o.op === 'connectSource') ?? {}).to;
+  const edge = (from) => (b.log.find((o) => o.op === 'connect' && o.from === from) ?? {}).to;
+  const walk = [];
+  let cursor = sourceTo;
+  for (let i = 0; i < 20 && cursor !== undefined; i += 1) { walk.push(cursor); cursor = edge(cursor); }
+  const f1 = filters[0]; const f10 = filters[filters.length - 1];
+  check('E2: 链条顺序 —— 源 → RG → f1…f10 → 前级 → 音量 → destination',
+    sourceTo !== undefined && f1 !== undefined && f10 !== undefined
+      && walk.includes(f1.id) && walk.includes(f10.id)
+      && walk.indexOf(f1.id) < walk.indexOf(f10.id) && walk[walk.length - 1] === 'destination',
+    walk.join('→'));
+
+  // ⚠️ 一律带 `filters.length === 10` 护栏：`[].every()` 恒真，缺了它会「空过」
+  //（对照⑭实测：不建链时 E3/E4/E8 全绿，只有 E1/E2 红 —— 这就是恒绿断言）。
+  check('E3: 默认 flat —— 每段 0dB（不动用户听到的音色）',
+    filters.length === 10 && filters.every((f) => f.gain.value === 0) && b.state().eqPreset === 'flat',
+    'gains=' + filters.map((f) => f.gain.value).join(',') + ' preset=' + b.state().eqPreset);
+
+  await act(async () => { b.player.setEqualizer('bass'); });
+  const bass = [5, 4.5, 3.5, 2, 0.5, 0, 0, 0, 0, 0];
+  check('E4: 切到预设后每段增益等于预设值',
+    filters.length === 10 && filters.every((f, i) => Math.abs(f.gain.value - bass[i]) < 0.001),
+    'gains=' + filters.map((f) => f.gain.value).join(','));
+
+  const preamp = b.store.find((n) => edge(n.id) === idToDest && !n.id.startsWith('filter') && n.id !== sourceTo);
+  const wantPreamp = Math.pow(10, -5 / 20);
+  check('E5: 自动前级按最大提升量衰减（+5dB → ×' + wantPreamp.toFixed(4) + '），不让 EQ 造成削波',
+    preamp !== undefined && Math.abs(preamp.gain.value - wantPreamp) < 0.005,
+    'preamp=' + String(preamp?.gain.value));
+
+  await act(async () => { b.player.setEqualizer([99, -99, 3, 0, 0, 0, 0, 0, 0, 0]); });
+  check('E6: 自定义曲线被夹到 ±12dB（脏数据不该变成刺耳的声音）',
+    filters.length === 10 && filters[0].gain.value === 12 && filters[1].gain.value === -12 && b.state().eqPreset === 'custom',
+    // ⚠️ `check` 的 detail 是**无条件求值**的：没有滤波器时 `filters[0].gain` 会崩，
+    // 从而掩盖 E7–E10（对照⑭实测）。细节表达式也必须自己防住。
+    filters.length === 10
+      ? ('g0=' + filters[0].gain.value + ' g1=' + filters[1].gain.value + ' preset=' + b.state().eqPreset)
+      : 'filters=' + filters.length);
+
+  const before = filters.map((f) => f.gain.value).join(',');
+  await act(async () => {
+    b.player.setEqualizer('不存在的预设');
+    b.player.setEqualizer([1, 2, 3]);
+  });
+  check('E7: 非法输入**不动**现状（未知预设 / 长度不对都不猜）',
+    filters.length === 10 && filters.map((f) => f.gain.value).join(',') === before,
+    'before=' + before + ' after=' + filters.map((f) => f.gain.value).join(','));
+
+  const rgNode = b.store.find((n) => n.id === sourceTo);
+  const volNode = b.store.find((n) => n.id === idToDest);
+  const rgBefore = rgNode.gain.value;
+  await act(async () => { b.player.setVolume(0.4); });
+  check('E8: 改用户音量不动 EQ、不动 RG（音量 / RG / EQ 三条互不覆盖）',
+    filters.length === 10 && filters[0].gain.value === 12 && rgNode.gain.value === rgBefore && Math.abs(volNode.gain.value - 0.4) < 0.001,
+    filters.length === 10
+      ? JSON.stringify({ eq0: filters[0].gain.value, rg: rgNode.gain.value, vol: volNode.gain.value })
+      : 'filters=' + filters.length);
+
+  const storedPrefs = JSON.parse(b.win.localStorage.getItem('dsh-music:prefs') ?? '{}');
+  check('E9: 曲线持久化（刷新后保留，不会回到默认）',
+    storedPrefs.eqPreset === 'custom' && Array.isArray(storedPrefs.eqBands) && storedPrefs.eqBands[0] === 12,
+    String(storedPrefs.eqPreset) + ' bands=' + JSON.stringify(storedPrefs.eqBands));
+}
+
+// E10：没有 createBiquadFilter 的环境**只跳过 EQ**，音频图必须照建（不能连常驻输出流一起丢）
+{
+  const b = await boot({ fakeCtx: { noBiquad: true } });
+  await act(async () => {
+    b.player.play(0);
+    await b.waitFor(() => b.log.some((o) => o.op === 'src'));
+  });
+  check('E10: 缺 createBiquadFilter 时只跳过均衡器，音频图照建（§2.19 的常驻流不能丢）',
+    b.log.filter((o) => o.op === 'ctx').length === 1 && b.log.filter((o) => o.op === 'createFilter').length === 0
+      && b.media.volume === 1,
+    'ctx=' + b.log.filter((o) => o.op === 'ctx').length + ' filters=' + b.log.filter((o) => o.op === 'createFilter').length);
 }
 
 console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)');

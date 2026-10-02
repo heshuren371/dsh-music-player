@@ -233,16 +233,23 @@ async function boot({ fakeCtx = false } = {}) {
 {
   const b = await boot({ fakeCtx: true });
   await act(async () => { b.player.play(0); await b.waitFor(() => b.log.some((o) => o.op === 'src')); });
-  const volRaw = b.store[0];
-  const rgRaw = b.store[1];
+  // ⚠️ **按角色选节点，不要按创建顺序索引**：均衡器插进链后 `store[1]` 变成了 EQ 前级，
+  // 于是「rgGain」读到的是前级（全量套件实测：B3–B12 集体变红）。角色是稳定的语义，
+  // 索引只是实现的偶然顺序（同族教训见 AGENTS §9 第 3 条「别依赖字面结构」）。
+  const destFrom = (b.log.find((o) => o.op === 'connect' && o.to === 'destination') ?? {}).from;
+  const sourceToId = (b.log.find((o) => o.op === 'sourceTo') ?? {}).to;
+  const volRaw = b.store.find((n) => n.id === destFrom);
+  const rgRaw = b.store.find((n) => n.id === sourceToId);
   // 缺节点时用「永远 NaN」的替身：让后面每条断言各自报 FAIL，**不要整块崩掉**
   // （崩掉会掩盖其余断言，等于把一次诊断机会丢掉）。负向对照实测踩到过。
   const vol = volRaw ?? { id: '(missing)', gain: { value: NaN } };
   const rg = rgRaw ?? { id: '(missing)', gain: { value: NaN } };
   const link = b.log.find((o) => o.op === 'connect' && o.from === rg?.id);
   const srcTo = b.log.find((o) => o.op === 'sourceTo');
-  check('B1: 串联顺序正确 —— 源 → RG → 音量 → 目标', volRaw !== undefined && rgRaw !== undefined
-    && link !== undefined && link.to === vol.id && srcTo !== undefined && srcTo.to === rg.id,
+  // 结构：**媒体源直接接进 RG 节点**、**音量节点直接接 destination**，且两者必须是不同节点
+  // （中间可以有均衡器链 —— 那是 §2.22 的层，这里只断言 RG 与音量的相对位置与相互独立）。
+  check('B1: RG 与音量是两个不同节点 —— 源接进 RG、音量接 destination', volRaw !== undefined && rgRaw !== undefined
+    && vol.id !== rg.id && srcTo !== undefined && srcTo.to === rg.id,
     JSON.stringify({ vol: vol?.id, rg: rg?.id, link, srcTo }));
 
   check('B2: 默认 **off** —— 不偷偷改用户听到的响度', rg.gain.value === 1, 'rgGain=' + rg.gain.value);
@@ -301,7 +308,7 @@ async function boot({ fakeCtx = false } = {}) {
     b.player.play(2);                       // 只有测量值的那首
     await b.waitFor(() => b.log.filter((o) => o.op === 'src').length >= 1);
   });
-  const rg = b.store[1];
+  const rg = b.store.find((n) => n.id === (b.log.find((o) => o.op === 'sourceTo') ?? {}).to);
   check('B11: 没有标签时用**测量值**（+15.1dB → ×5.69；不带这个兜底，实测库里 0/40 有标签=空操作）',
     near(rg.gain.value, dbToLinear(15.1), 0.02), 'rgGain=' + rg.gain.value + ' want=' + dbToLinear(15.1).toFixed(4));
 

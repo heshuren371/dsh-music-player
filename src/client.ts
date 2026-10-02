@@ -98,6 +98,30 @@ interface MatchState {
 }
 
 /** 播放器 store 的状态快照；`set()` 的 patch 是它的部分字段。 */
+/**
+ * 均衡器参数（**模块级**：player 与视图是两个作用域，放 createPlayer 内视图读不到）。
+ * 10 段 ISO 中心频率的 peaking 滤波器串成一条链，串在 RG 与音量之间；0dB 是**直通**，
+ * 所以「关闭」不需要旁路开关。频点与曲线都是本仓库自定（fooyin 是 GPL-3.0：只借鉴做法）。
+ */
+const EQ_BANDS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+/** 带宽：1.1 是十段均衡器常用的互不严重重叠值。 */
+const EQ_Q = 1.1;
+/** 单段增益范围（dB）。超出只可能是脏数据。 */
+const EQ_GAIN_MIN_DB = -12;
+const EQ_GAIN_MAX_DB = 12;
+/** 预设：id → 每段增益（dB）。`flat` 永远是第一条（默认不动音色）。 */
+const EQ_PRESETS: Record<string, number[]> = {
+  flat: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+  pop: [-1.5, -1, 0, 2, 3.5, 3, 1.5, 0, -1, -1.5],
+  rock: [2, 2, 1, 0, -1, -0.5, 1, 2.5, 3, 3],
+  classical: [3, 2.5, 1.5, 0, 0, 0, -1, -1.5, -2, -2.5],
+  jazz: [2, 1.5, 0.5, 1, -0.5, -0.5, 0, 1, 1.5, 2],
+  bass: [5, 4.5, 3.5, 2, 0.5, 0, 0, 0, 0, 0],
+  vocal: [-2, -1.5, -0.5, 1.5, 3, 3.5, 2.5, 1, 0, -1],
+  electronic: [4, 3.5, 2, 0, -1, -0.5, 1, 2, 3, 3.5],
+};
+const EQ_PRESET_ORDER = Object.keys(EQ_PRESETS);
+
 interface PlayerState {
   dir: string | null;
   tracks: MusicTrack[];
@@ -134,6 +158,9 @@ interface PlayerState {
   rgMeasuring: boolean;
   rgMeasureDone: number;
   rgMeasureTotal: number;
+  /** 均衡器：当前预设 id 与**实际生效**的每段增益（dB）。自定义曲线时 preset 为 'custom'。 */
+  eqPreset: string;
+  eqBands: number[];
   query: string;
   /** 在线补全结果：id → { title?, artist?, album?, cover? }。 */
   meta: Record<string, MetaEntry>;
@@ -172,6 +199,8 @@ interface PlaybackPrefs {
   last?: { id: string; time: number } | undefined;
   rgMode?: string;
   rgPreampDb?: number;
+  eqPreset?: string;
+  eqBands?: number[];
 }
 
 /** 可见列表（筛选 + 排序后的行序）里的一行。 */
@@ -253,6 +282,8 @@ interface MusicPlayerApi {
   seek(value: number): void;
   /** ReplayGain：模式（'off' | 'track' | 'album'）与可选前级增益（dB）。 */
   setReplayGain(mode: string, preampDb?: number): void;
+  /** 均衡器：传预设 id（'flat' | 'pop' | …）或自定义每段增益（dB，长度 10，自动夹范围）。 */
+  setEqualizer(presetOrBands: string | number[]): void;
   /** 预热 /session（媒体直连基址）。 */
   warmSession(): void;
   /** MV 画面：React 侧把这个媒体元素搬进全屏播放器的舞台。 */
@@ -526,6 +557,15 @@ window.__ModuleLoader__.load({
       "rg.off": "关闭",
       "rg.track": "单曲",
       "rg.album": "专辑",
+      "eq.label": "均衡器",
+      "eq.flat": "原声",
+      "eq.pop": "流行",
+      "eq.rock": "摇滚",
+      "eq.classical": "古典",
+      "eq.jazz": "爵士",
+      "eq.bass": "低音增强",
+      "eq.vocal": "人声",
+      "eq.electronic": "电子",
       "rg.measuring": (done, total) => total > 0 ? `正在测量响度… ${done}/${total}` : "正在测量响度…",
       "player.open": "打开播放器",
       "player.close": "收起播放器",
@@ -600,6 +640,15 @@ window.__ModuleLoader__.load({
       "rg.off": "Off",
       "rg.track": "Track",
       "rg.album": "Album",
+      "eq.label": "Equaliser",
+      "eq.flat": "Flat",
+      "eq.pop": "Pop",
+      "eq.rock": "Rock",
+      "eq.classical": "Classical",
+      "eq.jazz": "Jazz",
+      "eq.bass": "Bass boost",
+      "eq.vocal": "Vocal",
+      "eq.electronic": "Electronic",
       "rg.measuring": (done, total) => total > 0 ? `Measuring loudness… ${done}/${total}` : "Measuring loudness…",
       "player.open": "Open player",
       "player.close": "Collapse player",
@@ -1184,6 +1233,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       /** 防削波（fooyin 的 PreventClipping）：默认**恒开**。增益可能把峰值推过满刻度。 */
       const RG_PREVENT_CLIPPING = true;
 
+
       const prefs = loadPrefs();
       let state: PlayerState = {
         dir: null,
@@ -1222,6 +1272,13 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         rgMeasuring: false,
         rgMeasureDone: 0,
         rgMeasureTotal: 0,
+        // 均衡器默认 flat（不动音色）—— 用户没要求就不要偷偷改声音。
+        eqPreset: typeof prefs.eqPreset === "string" && EQ_PRESETS[prefs.eqPreset] !== undefined ? prefs.eqPreset : "flat",
+        eqBands:
+          Array.isArray(prefs.eqBands) && prefs.eqBands.length === EQ_BANDS.length
+            ? prefs.eqBands.map((v) => (typeof v === "number" && Number.isFinite(v)
+              ? Math.max(EQ_GAIN_MIN_DB, Math.min(EQ_GAIN_MAX_DB, v)) : 0))
+            : EQ_PRESETS.flat.slice(),
         query: "",
         /** 在线补全结果：id → { title?, artist?, album?, cover? }。 */
         meta: loadMeta(),
@@ -1721,6 +1778,9 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       let activeLevelNode: GainNode | null = null;
       /** 已经预取到空闲元素上的 URL（切换时用它判断「能否直接交叉进入」）。 */
       let prefetchedUrl: string | null = null;
+      /** 均衡器的滤波器链与自动前级（惰性建于音频图创建时）。 */
+      let eqNodes: BiquadFilterNode[] = [];
+      let eqPreampNode: GainNode | null = null;
       /** 当前生效的 RG 线性增益（1 = 不动）。回退路径要把它折进元素音量。 */
       let rgLinear = 1;
       /**
@@ -1781,10 +1841,41 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           const gain = ctx.createGain();
           gain.gain.value = 0;
           gain.connect(ctx.destination);
-          // RG 节点串在媒体源与音量节点之间：两个增益互不覆盖（淡入淡出只写音量节点）。
+          // 均衡器链：rg → f1 → … → f10 → eqPreamp → 音量 → destination。
+          // 0dB 的 peaking 滤波器是直通，所以关闭不需要旁路；**自动前级**按最大提升量衰减，
+          // 保证「只提升某几段」不会把峰值推过满刻度（与 RG 的防削波同一思路）。
+          const eqPreamp = ctx.createGain();
+          eqPreamp.gain.value = 1;
+          eqPreamp.connect(gain);
+          // 没有 createBiquadFilter 的环境只**跳过 EQ**，绝不能因此把整条音频图判为失败 ——
+          // 那会连「常驻输出流」（§2.19 的根本修法）一起丢掉。
+          let eqChainHead: AudioNode = eqPreamp;
+          if (typeof ctx.createBiquadFilter === "function") {
+            const filters: BiquadFilterNode[] = [];
+            for (const frequency of EQ_BANDS) {
+              const filter = ctx.createBiquadFilter();
+              filter.type = "peaking";
+              filter.frequency.value = frequency;
+              filter.Q.value = EQ_Q;
+              filter.gain.value = 0;
+              filters.push(filter);
+            }
+            // 倒着接：f10→前级、f9→f10 … f1→f2，于是信号方向是 rg → f1 → … → f10 → 前级 → 音量。
+            let node: AudioNode = eqPreamp;
+            for (let i = filters.length - 1; i >= 0; i -= 1) {
+              filters[i].connect(node);
+              node = filters[i];
+            }
+            eqNodes = filters;
+            eqPreampNode = eqPreamp;
+            eqChainHead = node;
+          } else {
+            console.info("[dsh-music-player] 本环境没有 createBiquadFilter —— 跳过均衡器（其余功能不受影响）");
+          }
+          // RG 节点串在媒体源与均衡器之间：各段增益互不覆盖（淡入淡出只写音量节点）。
           const rg = ctx.createGain();
           rg.gain.value = 1;
-          rg.connect(gain);
+          rg.connect(eqChainHead);
           // 交叉淡化需要**每元素一个电平节点**（两个元素才能独立淡入淡出）；RG 与音量仍共享。
           // 未开启时形态与以前**逐字一致**：source → rg → gain（既有套件因此不受影响）。
           let head: AudioNode = rg;
@@ -1800,6 +1891,8 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           audioCtx = ctx;
           gainNode = gain;
           rgGainNode = rg;
+          // 曲线可能在建图之前就设过了（prefs）—— 建完立刻应用一次，避免首播用了默认值。
+          applyEqualizer();
           return true;
         } catch (error) {
           graphDisabled = true;
@@ -1985,6 +2078,27 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             if (!disposed) set({ rgMeasuring: false });
           }
         })();
+      };
+
+      /**
+       * 把均衡器曲线落到滤波器链上，并按**最大提升量**设置自动前级：
+       * 只提升某几段时，前级按 `-max(0, 最大增益)` 衰减，保证不会因此把峰值推过满刻度
+       * （与 RG 的防削波同一思路；fooyin 里这件事由用户调 preamp，这里自动做掉）。
+       * 图不可用时静默跳过 —— 均衡器是锦上添花，绝不能让整条播放路径失败。
+       */
+      const applyEqualizer = () => {
+        if (eqNodes.length === 0) return;
+        let maxBoost = 0;
+        for (let i = 0; i < eqNodes.length; i += 1) {
+          const raw = state.eqBands[i];
+          const db = typeof raw === "number" && Number.isFinite(raw)
+            ? Math.max(EQ_GAIN_MIN_DB, Math.min(EQ_GAIN_MAX_DB, raw)) : 0;
+          eqNodes[i].gain.value = db;
+          if (db > maxBoost) maxBoost = db;
+        }
+        if (eqPreampNode !== null) {
+          eqPreampNode.gain.value = maxBoost > 0 ? Math.pow(10, -maxBoost / 20) : 1;
+        }
       };
 
       /** 把 RG 落到图上（或折进回退路径的元素音量）。切曲与改设置都要调。 */
@@ -3115,6 +3229,28 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           savePrefs({ volume: value });
         },
         /**
+         * 均衡器：预设 id 或自定义曲线。预设来自内置表；自定义曲线长度必须等于段数，
+         * 超出 ±12dB 会被夹住（脏数据不该变成刺耳的声音）。两种都会持久化。
+         */
+        setEqualizer: (presetOrBands) => {
+          let nextPreset = "custom";
+          let nextBands: number[];
+          if (typeof presetOrBands === "string") {
+            const preset = EQ_PRESETS[presetOrBands];
+            if (preset === undefined) return;                       // 未知预设：不动（不猜）
+            nextPreset = presetOrBands;
+            nextBands = preset.slice();
+          } else if (Array.isArray(presetOrBands) && presetOrBands.length === EQ_BANDS.length) {
+            nextBands = presetOrBands.map((v) => (typeof v === "number" && Number.isFinite(v)
+              ? Math.max(EQ_GAIN_MIN_DB, Math.min(EQ_GAIN_MAX_DB, v)) : 0));
+          } else {
+            return;                                                  // 长度不对：不动（不猜）
+          }
+          set({ eqPreset: nextPreset, eqBands: nextBands });
+          savePrefs({ eqPreset: nextPreset, eqBands: nextBands });
+          applyEqualizer();
+        },
+        /**
          * ReplayGain：模式（'off' | 'track' | 'album'）与可选前级增益（dB，省略则不变）。
          * 未测量的曲目**不做增益** —— 想统一推高请用前级，而不是把它当 0dB。
          */
@@ -3861,6 +3997,19 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         "aria-label": t("rg.label") + ": " + rgModeLabel,
       }, "RG"), rgTip, placement);
 
+      /** 均衡器按钮：点一下在预设之间循环（flat → 流行 → 摇滚 → … → flat）。 */
+      const eqPresetLabel = t("eq." + (EQ_PRESETS[state.eqPreset] !== undefined ? state.eqPreset : "flat"));
+      const eqButton = (placement) => withTipWrapped(h("button", {
+        type: "button",
+        className: "dshm-mode dshm-rg" + (state.eqBands.some((v) => Math.abs(v) > 0.01) ? " dshm-rg--on" : ""),
+        onClick: (event) => {
+          event.stopPropagation();
+          const at = EQ_PRESET_ORDER.indexOf(state.eqPreset);
+          player.setEqualizer(EQ_PRESET_ORDER[(at + 1) % EQ_PRESET_ORDER.length]);
+        },
+        "aria-label": t("eq.label") + ": " + eqPresetLabel,
+      }, "EQ"), t("eq.label") + " · " + eqPresetLabel, placement);
+
       // 滚轮：音量条 ±5%（进度条的滚轮在 ProgressBar 内处理）。
       const volumeWheelRef = useWheelHandler((event) => {
         const delta = (event.deltaY < 0 ? 0.05 : -0.05);
@@ -4051,6 +4200,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
               onChange: (event) => player.setVolume(Number(event.target.value)),
             }), t("action.volume") + " " + volumePct + "%", "bottom"),
             rgButton("bottom"),
+            eqButton("bottom"),
           ),
         ),
         h("div", { className: "dshm-playerBody" },
@@ -4330,6 +4480,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             onChange: (event) => player.setVolume(Number(event.target.value)),
           }), t("action.volume") + " " + volumePct + "%"),
           rgButton("top"),
+          eqButton("top"),
         ),
       );
 
