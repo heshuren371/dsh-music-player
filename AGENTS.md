@@ -201,19 +201,22 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 
 **这是本轮最重要的一条**：`requires.contracts` 里的每个 `apiVersion + kind` 都必须是**真实存在、可被 definition 解析**的坐标，不能凭印象编。
 
-- **禁止发明坐标。** 写进 manifest 前必须实测该坐标在 pinned 基线里存在：
-  ```
-  grep -rn "<apiVersion>" <pinned>/docs/proposals/ <pinned>/packages/
-  ```
-  实测（第 7 轮，搜索面已用真实存在的 `conversation.view` 校准）：`webserver.dsh/v1alpha1`、
-  `browser.ui.dsh/v1alpha1`，以及基线里真实存在的 `ui.dsh/v1alpha1` / `web.ui.dsh/v1alpha1`，
-  在 **DSH 运行时全部 0 命中**（宿主只用字符串 slot `conversation.view`）。
-  ⇒ 本插件**不消费**任何 Community 契约，`requires.contracts` 为空是**诚实状态**（`A4-03`）。
-- **`fallback` 只是「optional 时的降级说明」，不能把不存在的坐标洗成合规声明。** 给一个不存在的坐标补 `fallback`（`D-05` 曾如此处置）**不构成修复** —— 它让声明看起来完整，实际协商层永远拿不到 definition。
-- **声明无 definition 的扩展 ≠ 声明能力**：`manifest.zh.md:62` 明确「Host 不理解某项扩展时…**不能声称对应功能已经生效**」。pinned 投影对无 definition 的扩展只产出 `unknown-extension` **warning**（`A4-02`）。因此 `x-dev.dsh-std.extensions` 里的两个 id **不是**能力声明，插件的主功能（会话视图 + 宿主传输）在 manifest 上是**未声明**的。第 9 轮的做法是**不声明**而不是假声明，并把真实绑定记录进 `x-dsh-music-player.ui`（`A4-02` 已修）。
-- **extension id 必须有运行时对应**：两个扩展 id（`local.dsh-music-player.browser` / `.music-view`）在 `lib/` 下**逐个 grep 均 0 命中**；真正的注册点分别是 `package.json` 的 `exports["./client"]` + `dsh.client.platform` 与 `lib/client.js:3200`（`ctx.slots.register`）。声明 id 与运行时注册 id **对不上就是死声明**。（第 8 轮已把原第三个 `.routes` 条目移出，改为顶层的 `x-dsh-music-player.transport` 登记表。）
-- **`prefix` 与精确路由不能混用**：声明 `prefix=/api/dsh-music` + `transport: connection.fetch`，而代码注册的是 **16 条精确** `/api/dsh-music/*`，`webServer` 上注册的是**另一个**前缀 `/dsh-music`（`A4-05` 仍待修）—— 三处语义互相冲突。声明 prefix 必须等于 `webServer.register` 的 path。
-- **`requires.contracts` 必须至少有一条 `required`**：否则 composition preflight 永不阻塞，插件可以在**没注册任何端点**的情况下「激活成功」（`lib/index.js:240-246`：两个服务都缺时静默跳过）。`composition.zh.md:80` 的「preflight 成功不是 agreement」在此退化成恒真（`A4-03`）。
+- **禁止发明坐标**：写进 manifest 前必须实测。实测（第 7 轮，搜索面已用真实存在的
+  `conversation.view` 校准）：`webserver.dsh/v1alpha1`、`browser.ui.dsh/v1alpha1` 与基线里
+  真实存在的 `ui.dsh/v1alpha1` / `web.ui.dsh/v1alpha1` 在 **DSH 运行时全部 0 命中**（宿主只用
+  字符串 slot `conversation.view`）⇒ 本插件**不消费**任何 Community 契约，`requires.contracts`
+  为空是**诚实状态**（`A4-03`）。
+- **`fallback` 不能把不存在的坐标洗成合规声明**：补 `fallback` 只是让声明「看起来完整」，
+  协商层永远拿不到 definition（`D-05` 曾如此误处置）。
+- **声明无 definition 的扩展 ≠ 声明能力**（`manifest.zh.md:62`）：pinned 投影只给
+  `unknown-extension` warning。本仓库的做法是**不声明**而不是假声明，真实绑定记在
+  `x-dsh-music-player.ui`（`A4-02`）。
+- **extension id 必须有运行时对应**：声明 id 与运行时注册 id（`package.json` 的
+  `exports["./client"]` + `ctx.slots.register`）**对不上就是死声明**。
+- **`prefix` 与精确路由不能混用**：声明 prefix 必须等于 `webServer.register` 的 path
+  （本仓库声明过 `prefix=/api/dsh-music` 而实际是 16 条精确路由 —— `A4-05` 仍待修）。
+- **`requires.contracts` 至少一条 `required`**：否则 preflight 永不阻塞，插件能在**没注册任何
+  端点**的情况下「激活成功」（`A4-03`）。
 
 ### 2.12 自建 bearer token 三律（第 5 轮沉淀）
 
@@ -291,18 +294,11 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 
 ### 2.16 平台栅栏在**路由之前**拒答 —— 回落判据不能只认 404（第 13 轮沉淀）
 
-第 12 轮的 A1-02 用「**404** 且该端点属于「不该 404」的那一类」作为「宿主是旧入口」的判据。
-第 13 轮的真机故障证明这条判据**过窄**：
-
-| 请求（Electron 宿主 :19387 实测） | 结果 |
-| --- | --- |
-| `/dsh-music/api/session`（插件自建回环前缀） | **200** |
-| `/api/dsh-music/session`（平台 `/api`） | **401** `unauthorized` |
-| `/api/dsh-music/session` + `Origin: dsh-app://app` | **403** `forbidden` |
-
-平台 `/api` 的 `admit()` 在**路由之前**判 Host/Origin 栅栏与浏览器会话，所以答的是 **401/403**。
-「宿主没有这个端点」（404）与「这道栅栏不让这个请求过」（401/403）是**两件事**，
-把后者当前者会让回落在 Desktop 上永不触发。
+第 12 轮的 A1-02 用「**404** 且该端点属于「不该 404」的那一类」作为「宿主是旧入口」的判据；
+第 13 轮的真机故障证明它**过窄**（Electron 宿主 :19387 实测：插件旧前缀 200，平台 `/api`
+分别答 **401** / 加 `Origin: dsh-app://app` 后 **403** —— 平台 `admit()` 在**路由之前**判
+Host/Origin 与浏览器会话）。**「宿主没有这个端点」（404）与「这道栅栏不让这个请求过」
+（401/403）是两件事**，把后者当前者会让回落在 Desktop 上永不触发。
 
 - **回落判据必须覆盖全部「这道传输送不到」的状态码**（401 / 403 / 404），而且仍然要配
   **正向识别**（必须真的解析出目标数据才算采纳）+ **显式报告降级**（§2.8）。
@@ -311,17 +307,13 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
   信任边界降级是违规。
 - **降级成不可 seek 的源比等待更糟**：`ensureStreamBase()` 拿不到基址时必须**重取**，
   不能「超时就算了」——相对地址在 Desktop 上丢 Range，等于把功能做废。
-- **按可观测症状兜底自愈**：成因修好了也要留一层，因为原因可能不止一个。
-  本仓库的判据是「源不是 token 直连 + 时长已知 + `seekable=[0,0]`」。
-  自愈必须**有界**（窗口 / 退避），且**成功才停** —— **禁止**一次失败就置永久标志
-  （与第 9 轮被推翻的「一次性标志」、§2.10「清 timer ≠ 阻止再武装」同族）。
-- **诊断日志必须无歧义且不带凭据**：分类函数不能把空串 / `blob:` / 自定义协议一起归成
-  「相对」；同时按 §2.9 剥掉 `t=<token>`。
-- **夹具的保真度也是判别力的一部分**：假媒体元素若缺了真实元素一定有的属性
-  （`currentSrc` / `seekable`），被测路径会失真甚至恒绿。写夹具时先问「真实元素这里长什么样」。
+- **按可观测症状兜底自愈**：成因修好了也要留一层。判据是「源不是 token 直连 + 时长已知 +
+  `seekable=[0,0]`」，自愈必须**有界**且**成功才停** —— **禁止**一次失败就置永久标志。
+- **诊断日志必须无歧义且不带凭据**：不得把空串 / `blob:` / 自定义协议一起归成「相对」；按 §2.9 剥 `t=`。
+- **夹具保真度也是判别力**：假元素缺 `currentSrc`/`seekable` 会让被测路径失真甚至恒绿（§9 陷阱 4）。
 
-> **通用形态**：修**症状**时，**修法必须按「当前这条源是什么类型」推导，不能按期望的播放模式
-> （`track.kind`）猜**。另：**只在出问题时记日志不够**，要在**行为发生的那一刻**记。
+> **通用形态**：修**症状**时，修法必须按**当前这条源是什么类型**推导，不能按期望的播放模式
+> （`track.kind`）猜；且**只在出问题时记日志不够**，要在**行为发生的那一刻**记。
 
 ### 2.17 视图局部状态活不过 `conversation.view` 的卸载（第 16 轮沉淀）
 
@@ -431,6 +423,26 @@ pause `{in=120,out=120}` · stop `{in=120,out=300}`。**本仓库采用同一组
 > ⇒ 下发永远是 undefined，而门禁 A1–A3 立刻变红（负向对照①正是把投影删掉验证的）。
 > **给 `Track` 加字段时，必须同时改 `PayloadTrack` 与客户端 `MusicTrack`。**
 
+### 2.21 预取 + 交叉淡化：消除切歌「缝」，但**默认关闭**（第 22 轮沉淀）
+
+第 20 轮按 fooyin 把过渡校准到 300/700ms —— 遮蔽力上去了，代价是**手动切歌多出约 300ms 淡出缝**。
+fooyin 没有这个代价，因为它的 300ms 是**重叠**的交叉淡化。本轮补上浏览器里的等价物。
+
+- **两个媒体元素 + 每元素一个电平节点**：`sourceX → levelX → rg → volume → dest`。两个元素接进
+  **同一个常驻 AudioContext** ⇒ 设备流仍只开一条，§2.19 的前提不变。
+- **`audio` 必须是 `let`**：交接时交换绑定（`audio = inEl`），90+ 处引用自动跟随。活跃元素查询走
+  `player.media()`（调用时才读 `audio`）。
+- **电平必须**每元素**独立**：用共享音量节点做淡出会连新元素一起压掉（门禁 D3：交叉期间音量节点
+  **零写入**）。
+- **「重叠」的判据是「同刻起算」**：两条电平 ramp 都以同一个 `now` 为基准。只断言「节点不同」时，
+  串行的「先淡出再淡入」也会通过（对照⑫实测）—— 本轮第二次踩「断言看着强、其实不判别」。
+- **teardown 要停两个元素**：交叉进行中活跃的仍是旧元素，正在淡入的新元素是**空闲**元素，只停当前
+  那个会让它卸载后继续出声（对照⑬）。**切歌是异步的**：断言必须等新元素真的 `play()` 后再 teardown，
+  否则 halt 抢跑、断言恒绿（本轮实测踩到）。
+- **默认关闭**（`?crossfade=1` / `window.__dshMusicCrossfade`）：300ms 淡出是对设备瞬态的保险，而
+  用户**尚未确认**噪声已消失。确认后再默认开启，届时 H1/H2 的「先淡出再换源」语义要同步改成重叠。
+- **默认路径零影响由门禁 D0 保证**：未开启时不创建第二个元素、不预取。
+
 ## 3. 可跑门禁
 
 改完**必须**跑，全绿才算完成：
@@ -519,7 +531,7 @@ node scripts/check-whitespace.mjs   # 空白/冲突标记（`npm test` 已包含
 | 轮次 | 已实现的门禁（详细断言见 [`docs/gates.md`](docs/gates.md)） |
 | --- | --- |
 | 8–15 | 声明面一致性 · 传输面覆盖 · 释放面完整性 · 死代码（`noUnusedLocals`/`noUnusedParameters`）· 停止后无自续期定时器 · teardown 优先于在飞重载 · 客户端 release 面 · 恒绿断言扫描 · 门禁诊断可用 |
-| 16 / 18–21 | 视图卸载不丢全屏播放器 · 音频不得硬切换（时长按 fooyin 校准）· 音频常驻输出流 + 媒体 CORS · **ReplayGain 响度归一化** |
+| 16 / 18–22 | 视图卸载不丢全屏播放器 · 音频不得硬切换（时长按 fooyin 校准）· 音频常驻输出流 + 媒体 CORS · **ReplayGain 响度归一化** |
 | 待建 | `ctx 读取面一致性` · `契约坐标可解析` · `prefix 语义一致` · `凭据不进日志`（落盘面已覆盖）· `错误面脱敏` · `声明面覆盖实际调用` · `副作用前置授权` · `存储失败不得报成功`（`A5-09`） |
 
 **逐条断言、覆盖的审计条目与负向对照证据 → [`docs/gates.md`](docs/gates.md)。**
@@ -577,6 +589,7 @@ node scripts/check-whitespace.mjs   # 空白/冲突标记（`npm test` 已包含
 | I-15 | 每次过渡都淡入淡出（换源 / 启播 / 暂停 / **seek**），时长取 fooyin 默认（300/700/120ms）；无声音可淡时必须保持同步 | 耳机里的「电流声」/ 起播时序整体后移 | `test-audio-fade`、`test-audio-graph` | §2.18 |
 | I-16 | 音频必须有**常驻固定采样率**的输出流；跨源接 Web Audio 必须先确认 CORS；建图后元素音量置中性 | 切歌/起播的「电流声」/ 静音 / 首次起播无声 | `test-audio-graph` | §2.19 |
 | I-17 | ReplayGain 走**独立节点**；未测量 → 不做增益（≠0dB）；增益按峰值收窄；标签先收窄再夹范围 | 响度跳变 / 互相覆盖 / 削波失真 / NaN 静音 | `test-replaygain` | §2.20 |
+| I-18 | 交叉淡化：两元素接进**同一**常驻 AudioContext；电平**每元素独立**；teardown 停两个 | 切歌有缝 / 用户音量被过渡压掉 / 卸载后仍出声 | `test-audio-graph`（D 段） | §2.21 |
 
 ## 9. 已知陷阱速查
 

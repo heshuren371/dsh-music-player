@@ -64,6 +64,7 @@ cd .. && dsh plugin --profile web add link:./dsh-music-player
 ## 功能
 
 - 递归扫描本地目录，支持 flac / mp3 / m4a / aac / ogg / opus / wav / mp4 / mov / webm / mkv / avi；原生目录选择器覆盖 macOS / Windows / Linux，也可手动粘贴路径
+- 交叉淡化（试验，**默认关闭**）：`?crossfade=1` 或 `window.__dshMusicCrossfade = true` 开启后，切歌时新旧两首**重叠**淡入淡出 —— 消除过渡缝且不牺牲遮蔽力。等确认「电流声」已消失再默认开启
 - 单曲循环与列表循环。**播放顺序等于可见列表顺序**，排序或搜索后「下一首」就是你看到的下一行
 - 列表显示歌曲名 / 歌手 / 时长；标签与封面来自音频文件内嵌数据，缺省回退「歌手 - 歌名」文件名约定
 - MV 三档判定 `direct` / `remux` / `transcode`（参考 Jellyfin），后两档调用 ffmpeg 并把产物缓存在临时目录。**没有 ffmpeg 也能用**：直出格式照常播，其余给出安装提示

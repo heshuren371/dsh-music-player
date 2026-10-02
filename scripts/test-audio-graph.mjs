@@ -154,9 +154,9 @@ function makeFakeAudioContext(log, { throwOnSource = false, state = 'running' } 
         id,
         gain: {
           value: 0,
-          cancelScheduledValues: (t) => log.push({ op: 'cancel', t }),
-          setValueAtTime: (v, t) => { node.gain.value = v; log.push({ op: 'setValue', v, t }); },
-          linearRampToValueAtTime: (v, t) => { node.gain.value = v; log.push({ op: 'ramp', v, t }); },
+          cancelScheduledValues: (t) => log.push({ op: 'cancel', t, id }),
+          setValueAtTime: (v, t) => { node.gain.value = v; log.push({ op: 'setValue', v, t, id }); },
+          linearRampToValueAtTime: (v, t) => { node.gain.value = v; log.push({ op: 'ramp', v, t, id }); },
         },
         connect: (to) => log.push({ op: 'connect', to: to && to.id }),
       };
@@ -194,29 +194,35 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
 
   // ⚠️ 夹具必须是一个**活对象**：早先写成 `{...media, get src(){}}` 是**拷贝**，
   // 于是 play() 改的是外层、断言读的是副本（§9 陷阱 4：夹具保真度 = 断言判别力）。
-  const attrs = {};
-  const el = {
-    _src: '', _volume: 1, _t: 0, paused: true, duration: 200, readyState: 4,
-    error: null, preload: '',
-    get src() { return this._src; },
-    set src(v) { log.push({ op: 'src', v }); this._src = v; },
-    get currentSrc() { return this._src; },
-    get currentTime() { return this._t; },
-    set currentTime(v) { log.push({ op: 'seek', v }); this._t = v; },
-    // 真实元素的 `crossOrigin` 是**反射 IDL 属性**：赋值即写 attribute。夹具必须照做，
-    // 否则断言读 attribute 恒为 undefined（本套件第三次栽在夹具保真度上，§9 陷阱 4）。
-    get crossOrigin() { return attrs.crossorigin ?? null; },
-    set crossOrigin(v) { attrs.crossorigin = v; },
-    get volume() { return this._volume; },
-    set volume(v) { this._volume = v; log.push({ op: 'volume', v }); },
-    setAttribute: (n, v) => { attrs[n] = v; },
-    removeAttribute: (n) => { if (n === 'crossorigin') delete attrs.crossorigin; },
-    play() { this.paused = false; log.push({ op: 'play' }); return Promise.resolve(); },
-    pause() { this.paused = true; log.push({ op: 'pause' }); },
-    load() {},
-    addEventListener: () => {},
+  // 元素工厂：交叉淡化需要**两个**元素，日志必须能区分是谁做的（el: 'A' | 'B'）。
+  const makeEl = (tag) => {
+    const attrs = {};
+    return {
+      _tag: tag, _attrs: attrs, _src: '', _volume: 1, _t: 0, paused: true, duration: 200, readyState: 4,
+      error: null, preload: '',
+      get src() { return this._src; },
+      set src(v) { log.push({ op: 'src', v, el: tag }); this._src = v; },
+      get currentSrc() { return this._src; },
+      get currentTime() { return this._t; },
+      set currentTime(v) { log.push({ op: 'seek', v, el: tag }); this._t = v; },
+      // 真实元素的 `crossOrigin` 是**反射 IDL 属性**：赋值即写 attribute。夹具必须照做，
+      // 否则断言读 attribute 恒为 undefined（本套件第三次栽在夹具保真度上，§9 陷阱 4）。
+      get crossOrigin() { return attrs.crossorigin ?? null; },
+      set crossOrigin(v) { attrs.crossorigin = v; },
+      get volume() { return this._volume; },
+      set volume(v) { this._volume = v; log.push({ op: 'volume', v, el: tag }); },
+      setAttribute: (n, v) => { attrs[n] = v; },
+      removeAttribute: (n) => { if (n === 'crossorigin') delete attrs.crossorigin; },
+      play() { this.paused = false; log.push({ op: 'play', el: tag }); return Promise.resolve(); },
+      pause() { this.paused = true; log.push({ op: 'pause', el: tag }); },
+      load() { log.push({ op: 'load', el: tag }); },
+      addEventListener: () => {},
+    };
   };
+  const el = makeEl('A');
+  const el2 = makeEl('B');
   win.__dshMusicMedia = () => el;
+  win.__dshMusicMedia2 = () => el2;
 
   const okJson = (body) => ({ ok: true, status: 200, json: async () => body, clone() { return okJson(body); } });
   const mockFetch = async (url) => {
@@ -257,7 +263,7 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
     }
     return pred();
   };
-  return { log, player, media: el, attrs: () => attrs, sleep, waitFor, origin, infoLines, restoreInfo, state: () => player.getState() };
+  return { log, player, media: el, media2: el2, attrs: () => el._attrs, sleep, waitFor, origin, infoLines, restoreInfo, state: () => player.getState() };
 }
 
 // B1/B2/B3：建图一次、常驻、增益接管音量
@@ -367,6 +373,89 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
   check('B15: 顺序正确 —— 淡出 → seek → 淡回', iRamp0 >= 0 && iSeek > iRamp0 && iBack > iSeek,
     'ramp0=' + iRamp0 + ' seek=' + iSeek + ' back=' + iBack);
   b.restoreInfo();
+}
+
+// ── D. 预取 + 交叉淡化（`?crossfade=1`；默认关闭，见 §2.21）───────────────────────
+// 为什么要有 D 段：默认路径断言（A–C）在关闭时**不该有任何变化**；开启后要保证
+// ① 下一首真的被预取、② 两个元素**重叠**（不是「淡出→加载→淡入」的缝隙）、
+// ③ 电平与用户音量分离、④ 角色交换后各处引用指向新元素、⑤ teardown 两个都停。
+{
+  const b = await boot({ fakeCtx: {}, search: '?crossfade=1' });
+  await act(async () => {
+    b.player.play(0);
+    await b.waitFor(() => b.log.some((o) => o.op === 'src' && o.el === 'A'));
+  });
+  // 预取：下一首的 URL 挂到**空闲**元素上，且它没有被播放（只加载、不出声）
+  const prefetched = b.log.filter((o) => o.op === 'src' && o.el === 'B');
+  check('D1: 起播后把下一首预取到空闲元素（只加载不出声）',
+    prefetched.length === 1 && String(prefetched[0].v).includes('b.mp3')
+      && !b.log.some((o) => o.op === 'play' && o.el === 'B'),
+    'prefetched=' + prefetched.length + ' src=' + String(prefetched[0]?.v).slice(-24));
+
+  // 交叉：两个电平节点**同时**被调度（一个降、一个升），这才是「重叠」而不是「先淡出再淡入」
+  const mark = b.log.length;
+  await act(async () => {
+    b.player.play(1);
+    await b.waitFor(() => b.player.media() === b.media2, 2000);
+  });
+  const tail = b.log.slice(mark);
+  const ramps = tail.filter((o) => o.op === 'ramp' || o.op === 'setValue');
+  // 必须是**两条 ramp**（采样级渐变）落在**两个不同**节点上：一条降到 0（旧元素）、
+  // 一条升到 1（新元素）—— 这才叫重叠。写成 `find(v===1)` 会误命中 setValue（本轮踩到）。
+  const down = ramps.find((o) => o.op === 'ramp' && o.v === 0);
+  const up = ramps.find((o) => o.op === 'ramp' && o.v === 1);
+  // 「重叠」= 两条 ramp 在**同一时刻起算**（都以同一个 now 为基准）。若实现退化成
+  // 「先淡出、再淡入」（有缝隙），新元素那条 ramp 会晚 `changeFadeOutMs` —— 所以这条
+  // 时间断言才是 D2 的判别力所在（只看「节点不同」的话，串行实现也会通过）。
+  const sameStart = down !== undefined && up !== undefined && Math.abs(up.t - down.t) < 0.05;
+  check('D2: 交叉是**重叠**的 —— 两条电平 ramp 同刻起算（串行的「先淡出再淡入」会红）',
+    down !== undefined && up !== undefined && down.id !== up.id && sameStart,
+    JSON.stringify(ramps.slice(0, 4)));
+
+  // 电平与**用户音量**分离：音量节点（gain1）在交叉期间不得被写
+  const volumeTouched = ramps.filter((o) => o.id === 'gain1');
+  check('D3: 交叉走的是每元素电平，**不写用户音量节点**（否则用户音量会被过渡吃掉）',
+    volumeTouched.length === 0, 'volume-node ops=' + volumeTouched.length);
+
+  check('D4: 交接后活跃元素换成预取的那个（引用自动跟随，旧元素已停）',
+    b.player.media() === b.media2 && b.media.paused === true,
+    'activeIsB=' + (b.player.media() === b.media2) + ' oldPaused=' + b.media.paused);
+
+  // 预取是**链式**的：交接后立刻为新空闲元素预取再下一首
+  check('D5: 交接后继续链式预取（下一首挂到新的空闲元素上）',
+    b.log.filter((o) => o.op === 'src' && o.el === 'A').length >= 2,
+    'A src ops=' + b.log.filter((o) => o.op === 'src' && o.el === 'A').length);
+
+}
+
+// D6 单独跑：**在交叉进行中** halt —— 那一刻「活跃」仍是旧元素，正在淡入的新元素是空闲元素，
+// 只有 `halt()` 主动停空闲元素才能让它不继续出声（否则 teardown 后它还在播，I-06）。
+// 不这么写的话，交接已经 pause 过空闲元素，断言恒绿（本轮实测：删掉 halt 里的停止调用，旧写法照样通过）。
+{
+  const b = await boot({ fakeCtx: {}, search: '?crossfade=1' });
+  await act(async () => {
+    b.player.play(0);
+    await b.waitFor(() => b.log.some((o) => o.op === 'src' && o.el === 'B'));
+    b.player.play(1);
+    // ⚠️ 切歌是**异步**的（要先拿流基址）。必须等新元素真的**开始播放**（交叉已启动）
+    // 再 teardown，否则 halt 抢在交叉开始之前赢，断言恒绿 —— 本轮实测踩到过。
+    await b.waitFor(() => b.log.some((o) => o.op === 'play' && o.el === 'B'), 1000);
+    b.player.halt();                   // 交接（320ms 后）之前 teardown
+  });
+  check('D6: 交叉进行中 halt() 会停掉空闲元素（只停当前那个会留下它继续出声）',
+    b.media.paused === true && b.media2.paused === true,
+    'A=' + b.media.paused + ' B=' + b.media2.paused);
+}
+
+// D0：**默认关闭**时必须与以前逐字一致 —— 不创建第二个元素、不预取
+{
+  const b = await boot({ fakeCtx: {} });
+  await act(async () => {
+    b.player.play(0);
+    await b.waitFor(() => b.log.some((o) => o.op === 'src'));
+  });
+  check('D0: 未开启交叉淡化时不碰第二个元素（默认路径零影响）',
+    b.media2.src === '' && !b.log.some((o) => o.el === 'B'), 'el2 src=' + JSON.stringify(b.media2.src));
 }
 
 console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)');

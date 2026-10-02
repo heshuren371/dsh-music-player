@@ -1146,7 +1146,8 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * 进度/seek/MediaSession 全部共用一条路径）。
        * jsdom 没有媒体实现 —— 测试套件通过 window.__dshMusicMedia 注入假元素。
        */
-      const audio = typeof window.__dshMusicMedia === "function"
+      // ⚠️ 必须是 `let`：交叉淡化要**交换两个元素的角色**，而下面 90+ 处引用都读这个名字。
+      let audio = typeof window.__dshMusicMedia === "function"
         ? window.__dshMusicMedia()
         : document.createElement("video");
       audio.preload = "auto";
@@ -1713,8 +1714,29 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       let crossOriginCorsOk: boolean | null = null;
       /** RG 增益节点，**独立于**音量节点（见 RG 常量处的说明）。 */
       let rgGainNode: GainNode | null = null;
+      /** 交叉淡化：空闲元素与它的电平节点（**惰性创建**，未开启时不存在）。 */
+      let idleEl: HTMLVideoElement | null = null;
+      let idleLevelNode: GainNode | null = null;
+      /** 交叉淡化模式下当前元素的电平节点；非交叉模式为 null（图形态与以前完全一致）。 */
+      let activeLevelNode: GainNode | null = null;
+      /** 已经预取到空闲元素上的 URL（切换时用它判断「能否直接交叉进入」）。 */
+      let prefetchedUrl: string | null = null;
       /** 当前生效的 RG 线性增益（1 = 不动）。回退路径要把它折进元素音量。 */
       let rgLinear = 1;
+      /**
+       * 预取 + 交叉淡化（消除切歌过渡缝）。**默认关闭**：300ms 淡出是设备瞬态的保险，
+       * 要先确认「噪声已修复」再默认开启（§2.18 / §2.21）。开启：`?crossfade=1`
+       * 或 `window.__dshMusicCrossfade = true`。
+       */
+      const crossfadeOn = (() => {
+        try {
+          const q = new URLSearchParams(window.location.search).get("crossfade");
+          if (q === "1") return true;
+          if (q === "0") return false;
+        } catch { /* location 不可用就当作没设标记 */ }
+        return (window as unknown as { __dshMusicCrossfade?: boolean }).__dshMusicCrossfade === true;
+      })();
+
       const graphOffByFlag = (() => {
         try {
           // 查询参数刻意**不叫** `dshm-*`：静态审计按约定把 `dshm-` 前缀当 CSS 类
@@ -1762,9 +1784,19 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           // RG 节点串在媒体源与音量节点之间：两个增益互不覆盖（淡入淡出只写音量节点）。
           const rg = ctx.createGain();
           rg.gain.value = 1;
-          // 一个媒体元素只能建一次 source；建不上就永久退回元素音量。
-          ctx.createMediaElementSource(audio).connect(rg);
           rg.connect(gain);
+          // 交叉淡化需要**每元素一个电平节点**（两个元素才能独立淡入淡出）；RG 与音量仍共享。
+          // 未开启时形态与以前**逐字一致**：source → rg → gain（既有套件因此不受影响）。
+          let head: AudioNode = rg;
+          if (crossfadeOn) {
+            const level = ctx.createGain();
+            level.gain.value = 1;
+            level.connect(rg);
+            activeLevelNode = level;
+            head = level;
+          }
+          // 一个媒体元素只能建一次 source；建不上就永久退回元素音量。
+          ctx.createMediaElementSource(audio).connect(head);
           audioCtx = ctx;
           gainNode = gain;
           rgGainNode = rg;
@@ -1840,6 +1872,64 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           linear = Math.min(linear, 1 / rawPeak);
         }
         return { linear, db };
+      };
+
+      /** 空闲元素（预取用的另一半）。惰性创建：只在开启交叉淡化时存在。 */
+      const ensureIdleElement = (): HTMLVideoElement | null => {
+        if (!crossfadeOn) return null;
+        if (idleEl !== null) return idleEl;
+        const injected = (window as unknown as { __dshMusicMedia2?: () => HTMLVideoElement }).__dshMusicMedia2;
+        const el = typeof injected === "function" ? injected() : document.createElement("video");
+        el.preload = "auto";
+        el.className = "dshm-mv";
+        el.setAttribute?.("playsinline", "");
+        el.volume = 1;
+        if (mediaPark !== null) mediaPark.appendChild(el);
+        idleEl = el;
+        return el;
+      };
+
+      /** 空闲元素接进**同一条常驻输出流**：设备格式仍然只开一次（§2.19 的前提不变）。 */
+      const ensureIdleGraph = (): boolean => {
+        const el = idleEl;
+        if (audioCtx === null || rgGainNode === null || el === null) return false;
+        if (idleLevelNode !== null) return true;
+        try {
+          const level = audioCtx.createGain();
+          level.gain.value = 0;
+          level.connect(rgGainNode);
+          audioCtx.createMediaElementSource(el).connect(level);
+          idleLevelNode = level;
+          return true;
+        } catch {
+          return false;
+        }
+      };
+
+      /** 可见列表里的下一首（与 next() 同一套顺序：播放顺序 = 你看到的顺序）。 */
+      const nextTrackForPrefetch = (): MusicTrack | null => {
+        const rows = visibleRows();
+        if (rows.length === 0) return null;
+        const pos = rows.findIndex((row) => row.index === state.current);
+        if (pos < 0) return null;
+        const track = state.tracks[rows[(pos + 1) % rows.length].index];
+        // 只预取音频：MV 走单元素路径（画面要搬进舞台，换元素的代价与风险都不值得）。
+        if (track === undefined || track.kind === "video") return null;
+        if (state.tracks[state.current]?.kind === "video") return null;
+        return track;
+      };
+
+      /** 把下一首挂到空闲元素上（只加载，不出声）。 */
+      const schedulePrefetch = () => {
+        if (!crossfadeOn || disposed) return;
+        const el = ensureIdleElement();
+        if (el === null || !ensureIdleGraph()) return;
+        const next = nextTrackForPrefetch();
+        if (next === null) { prefetchedUrl = null; return; }
+        const url = streamUrl(next);
+        prefetchedUrl = url;
+        el.src = url;
+        el.load?.();
       };
 
       /** 当前曲目有没有任何可用的 RG 数据（文件标签或插件测量）。 */
@@ -2023,6 +2113,8 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           // 起播后淡入到用户音量，避免第一帧就是满幅。
           void promise.then(() => {
             if (!disposed) void rampVolume(state.volume, changeFadeInMs);
+            // 起播后把**下一首**挂到空闲元素上，切换时就能直接交叉进入。
+            if (!disposed) schedulePrefetch();
           }).catch((error) => {
             // AbortError = 这次 play 被随后的 pause()/换源打断，不是失败（快速切歌、
             // 立刻暂停都会走到这里）。把它当成「播不了」会误报红字。
@@ -2040,7 +2132,59 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         // 「确定正在出声」才需要淡出。判据写成 `paused === false && volume > 0` 而不是
         // `paused || volume <= 0.001`：后者在属性缺失（`paused === undefined`）时两个分支
         // 都是 false，会误判成「正在播」而走异步路径（第 18 轮实测踩到）。
+        /**
+         * 交叉进入：空闲元素**已经预取好**这一首，于是新旧两首**重叠**淡入淡出 ——
+         * 300ms 的遮蔽力保持不变，而「淡出→加载→淡入」的缝隙消失（这就是 fooyin
+         * `nexttrackpreparer` + crossfade 在浏览器里的等价物）。两个元素接进**同一个
+         * 常驻 AudioContext**，所以设备流仍然只有一条。
+         */
+        const crossfadeInto = (): boolean => {
+          const inEl = idleEl;
+          const inLevel = idleLevelNode;
+          if (!crossfadeOn || audioCtx === null || inEl === null || inLevel === null) return false;
+          if (prefetchedUrl !== url || !(inEl.readyState >= 2)) return false;
+          const outEl = audio;
+          const outLevel = activeLevelNode;
+          // 共享 RG 节点按**新**曲目设值（关闭状态下这里是活动的旧曲目，不涉及）。
+          applyReplayGain();
+          try { inEl.currentTime = 0; } catch { /* 假元素可能没有 setter 语义 */ }
+          const now = audioCtx.currentTime;
+          const down = outLevel;
+          if (down !== null) {
+            down.gain.cancelScheduledValues(now);
+            down.gain.setValueAtTime(Number.isFinite(down.gain.value) ? down.gain.value : 1, now);
+            down.gain.linearRampToValueAtTime(0, now + changeFadeOutMs / 1000);
+          }
+          inLevel.gain.cancelScheduledValues(now);
+          inLevel.gain.setValueAtTime(0, now);
+          inLevel.gain.linearRampToValueAtTime(1, now + changeFadeInMs / 1000);
+          const promise = inEl.play();
+          set({ playing: true, error: null });
+          const settle = () => {
+            if (disposed) return;
+            try {
+              outEl.pause();
+              outEl.removeAttribute("src");
+              outEl.load?.();
+            } catch { /* 假元素 */ }
+            if (outLevel !== null) outLevel.gain.value = 0;
+            // 交换角色：`audio` 是 let，其余 90+ 处引用自动跟随；电平节点跟着换。
+            audio = inEl;
+            idleEl = outEl;
+            const levelSwap = activeLevelNode;
+            activeLevelNode = inLevel;
+            idleLevelNode = levelSwap;
+            prefetchedUrl = null;
+            schedulePrefetch();
+          };
+          setTimeout(settle, changeFadeOutMs + 20);
+          if (promise !== undefined) promise.catch(() => { /* AbortError 等：不是失败 */ });
+          return true;
+        };
+
         const audible = audio.paused === false && Number.isFinite(audio.volume) && audio.volume > 0.001;
+        // 预取已经就绪 → 直接重叠进入（无声可淡、或没预取到，才走下面既有的两条路径）。
+        if (audible && crossfadeInto()) return;
         if (!audible) {
           // ⚠️ 没有声音要淡出时**必须同步起播**：这里 await 一下就会把 src/play 推迟到
           // 一个微任务之后，起播时序整体后移（第 18 轮实测：6 套回归当场抓到）。
@@ -2877,6 +3021,10 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           // 常驻音频图刻意不销毁（它的存在意义就是让设备流别重建），但 teardown 必须释放
           // 设备流：suspend 而不是 close —— close 之后这个媒体元素再也接不回音频图。
           if (audioCtx !== null && audioCtx.state === "running") void audioCtx.suspend();
+          // 交叉淡化模式下有两个元素：只用 `stopAudio()` 停当前那个会留下一个还在出声的。
+          if (idleEl !== null) {
+            try { idleEl.pause(); } catch { /* 假元素 */ }
+          }
           // 收起动画的定时器同理：清句柄 + 复位 phase，下一代会话/下一次挂载
           // 不会继承「全屏播放器还开着」的旧状态。
           if (playerCloseTimer !== null) {
