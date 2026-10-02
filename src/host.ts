@@ -21,6 +21,17 @@ interface ScannedFile {
   kind: 'audio' | 'video';
 }
 
+/**
+ * 波形缓存的一条：`peaks` 是 0..1 的 400 个桶（与 UI 宽度解耦，客户端再抽样）。
+ * `size`/`mtimeMs` 与 RG 同理：文件变了就重算。
+ */
+interface WaveEntry {
+  peaks: number[];
+  size: number;
+  mtimeMs: number;
+  at: number;
+}
+
 /** 一条测量结果。`size`/`mtimeMs` 用于判断文件是否变过（变了要重测）。 */
 interface RgEntry {
   trackGainDb: number;
@@ -1201,6 +1212,22 @@ const STATE_FILE = path.join(STATE_DIR, 'dsh-music-player.json');
  * 刻意**不写进音频文件** —— 改用户的文件是不可逆副作用，见 AGENTS.md §2.20。
  */
 const RG_STATE_FILE = path.join(STATE_DIR, 'dsh-music-player-rg.json');
+/** 波形缓存与 RG 测量缓存分开：一个可重建的展示数据，不该和响度数据混在一个文件里。 */
+const WAVEFORM_STATE_FILE = path.join(STATE_DIR, 'dsh-music-player-waveform.json');
+/**
+ * 波形参数：解码成 8kHz 单声道后**流式**聚合，每 0.5s 取一个峰值 —— 内存与曲长无关
+ * （绝不缓冲整段 PCM：一小时 8kHz 单声道是 56MB）。0.5s 的桶足够 400 根柱子的分辨率。
+ */
+const WAVEFORM_DECODE_RATE = 8000;
+const WAVEFORM_SAMPLES_PER_BUCKET = 2000;
+/** 桶数上限（4000 × 0.5s = 33 分钟）；超长曲目只保留前半，**有界**优先于完整。 */
+const WAVEFORM_BUCKET_CAP = 4000;
+/** 下发分辨率：缓存与 UI 宽度解耦，客户端再按需要抽样到 ~120 根。 */
+const WAVEFORM_BUCKETS = 400;
+const WAVEFORM_TIMEOUT_MS = 60 * 1000;
+/** 进程内条目上限与落盘条目上限（§2.2：module 级容器必须设上限）。 */
+const WAVEFORM_CACHE_MAX = 512;
+const WAVEFORM_CACHE_PERSIST_MAX = 200;
 const LEGACY_STATE_FILE = fileURLToPath(new URL('./state.json', import.meta.url));
 
 function statusError(statusCode: number, message: string): StatusError {
@@ -1972,6 +1999,189 @@ function createHost(ctx) {
     }
   }
 
+  // ── 波形：按需生成 + 缓存（与 RG 测量同一套纪律：只读、可中止、失败可重建） ──────────
+  const waveCache = new Map<string, WaveEntry>();
+  let waveLoaded = false;
+  /** 在飞的 ffmpeg 子进程。teardown 必须全部杀掉，否则热重载后它们会跑到结束（I-06）。 */
+  const waveChildren = new Set<ChildProcess>();
+  let waveStopped = false;
+  let waveSaveTimer: NodeJS.Timeout | null = null;
+
+  function trimWaveCache(): void {
+    while (waveCache.size > WAVEFORM_CACHE_MAX) waveCache.delete(waveCache.keys().next().value as string);
+  }
+
+  async function loadWaveCache(): Promise<void> {
+    if (waveLoaded) return;
+    waveLoaded = true;
+    try {
+      const raw = JSON.parse(await fs.readFile(WAVEFORM_STATE_FILE, 'utf8')) as { entries?: Record<string, WaveEntry> };
+      for (const [id, entry] of Object.entries(raw.entries ?? {})) {
+        if (Array.isArray(entry?.peaks) && entry.peaks.length > 0 && typeof entry.size === 'number') waveCache.set(id, entry);
+      }
+      trimWaveCache();
+    } catch {
+      // 不存在 / 损坏：波形可重建，不是错误（离线或首次运行都走这里）。
+    }
+  }
+
+  async function saveWaveCache(): Promise<void> {
+    const entries: Record<string, WaveEntry> = {};
+    let n = 0;
+    for (const [id, entry] of waveCache) {
+      if (n >= WAVEFORM_CACHE_PERSIST_MAX) break;
+      entries[id] = entry;
+      n += 1;
+    }
+    const tmp = WAVEFORM_STATE_FILE + '.tmp';
+    try {
+      await fs.mkdir(STATE_DIR, { recursive: true });
+      await fs.writeFile(tmp, JSON.stringify({ version: 1, entries }), 'utf8');
+      await fs.rename(tmp, authorize('storage.local.write', WAVEFORM_STATE_FILE, [STATE_DIR]));
+    } catch {
+      // 写失败不致命：内存里的结果本轮照用，下次重算即可。
+    }
+  }
+
+  /** 合并短时间内的多次生成，避免用户快速跳曲时把缓存文件写爆。 */
+  function scheduleWaveSave(): void {
+    if (waveSaveTimer !== null) return;
+    waveSaveTimer = setTimeout(() => {
+      waveSaveTimer = null;
+      void saveWaveCache();
+    }, 2000);
+  }
+
+  /** 把长桶数组二次抽样成 WAVEFORM_BUCKETS 个（取每段最大值，不平均：平均值会把瞬态抹平）。 */
+  function downsamplePeaks(source: number[], target: number): number[] {
+    if (source.length === 0) return [];
+    if (source.length <= target) return source.slice();
+    const out: number[] = [];
+    for (let i = 0; i < target; i += 1) {
+      const from = Math.floor((i * source.length) / target);
+      const to = Math.max(from + 1, Math.floor(((i + 1) * source.length) / target));
+      let max = 0;
+      for (let j = from; j < to && j < source.length; j += 1) if (source[j] > max) max = source[j];
+      out.push(max);
+    }
+    return out;
+  }
+
+  /** 只读地跑一次 ffmpeg 解码取包络。**不改任何音频文件**，也不写临时目录。 */
+  function waveformOne(filePath: string, diag: { reason: string | null }): Promise<number[] | null> {
+    return new Promise((resolve) => {
+      const bin = findFfmpeg();
+      if (bin === null) {
+        diag.reason = 'ffmpeg-not-found';
+        resolve(null);
+        return;
+      }
+      let settled = false;
+      let timer: NodeJS.Timeout | null = null;
+      const buckets: number[] = [];
+      let carry = Buffer.alloc(0);
+      let current = 0;
+      let count = 0;
+      let stderrLen = 0;
+      const child = spawn(bin, [
+        '-hide_banner', '-nostdin', '-v', 'error', '-i', filePath,
+        '-ac', '1', '-ar', String(WAVEFORM_DECODE_RATE), '-f', 's16le', '-',
+      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+      waveChildren.add(child);
+      const finish = (value: number[] | null) => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null) clearTimeout(timer);
+        waveChildren.delete(child);
+        resolve(value);
+      };
+      child.stderr?.on('data', (chunk: Buffer) => { stderrLen += chunk.length; });
+      child.stdout?.on('data', (chunk: Buffer) => {
+        // 半个 int16 要留到下一块（chunk 边界不保证对齐）。
+        const buf = carry.length === 0 ? chunk : Buffer.concat([carry, chunk]);
+        const usable = buf.length - (buf.length % 2);
+        carry = usable === buf.length ? Buffer.alloc(0) : Buffer.from(buf.subarray(usable));
+        for (let i = 0; i < usable; i += 2) {
+          const v = buf.readInt16LE(i);
+          const abs = v < 0 ? -v : v;
+          if (abs > current) current = abs;
+          count += 1;
+          if (count >= WAVEFORM_SAMPLES_PER_BUCKET) {
+            if (buckets.length < WAVEFORM_BUCKET_CAP) buckets.push(current);
+            current = 0;
+            count = 0;
+          }
+        }
+      });
+      timer = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* 可能已退出 */ }
+        diag.reason = 'timeout';
+        finish(null);
+      }, WAVEFORM_TIMEOUT_MS);
+      child.on('error', () => {
+        diag.reason = 'spawn-error';
+        finish(null);
+      });
+      child.on('close', (code) => {
+        if (waveStopped) {
+          diag.reason = 'cancelled';
+          finish(null);
+          return;
+        }
+        // 末尾不足一个桶的尾巴也要算进去，否则长曲目的最后一秒会被丢掉。
+        if (count > 0 && buckets.length < WAVEFORM_BUCKET_CAP) buckets.push(current);
+        if (buckets.length === 0) {
+          // 分类原因**不含路径**（§2.8 脱敏）：退出码 + stderr 长度足以区分「ffmpeg 报错」与「没有音频流」。
+          diag.reason = 'no-audio:exit=' + String(code) + ',len=' + String(stderrLen);
+          finish(null);
+          return;
+        }
+        const sampled = downsamplePeaks(buckets, WAVEFORM_BUCKETS);
+        let max = 0;
+        for (const v of sampled) if (v > max) max = v;
+        // 每首各自归一化到 0..1（否则安静的歌在 UI 上几乎看不见）；全静音保持全 0。
+        finish(max > 0 ? sampled.map((v) => Math.round((v / max) * 1000) / 1000) : sampled.map(() => 0));
+      });
+    });
+  }
+
+  /** 取某首曲目的波形：命中缓存（size+mtime 一致）就直接回，否则算一次并落缓存。 */
+  async function waveformFor(track: Track): Promise<{ peaks: number[]; cached: boolean; reason: string | null }> {
+    let stat;
+    try {
+      stat = await fs.stat(track.path);
+    } catch {
+      return { peaks: [], cached: false, reason: 'file-missing' };
+    }
+    const hit = waveCache.get(track.id);
+    if (hit !== undefined && hit.peaks.length > 0 && hit.size === stat.size && hit.mtimeMs === stat.mtimeMs) {
+      return { peaks: hit.peaks, cached: true, reason: null };
+    }
+    if (waveStopped) return { peaks: [], cached: false, reason: 'stopped' };
+    const diag = { reason: null as string | null };
+    const peaks = await waveformOne(track.path, diag);
+    if (peaks === null) return { peaks: [], cached: false, reason: diag.reason ?? 'waveform-failed' };
+    waveCache.set(track.id, { peaks, size: stat.size, mtimeMs: stat.mtimeMs, at: Date.now() });
+    trimWaveCache();
+    scheduleWaveSave();
+    return { peaks, cached: false, reason: null };
+  }
+
+  /** teardown / 停用：杀掉所有在飞子进程并阻止再启动（I-06）。 */
+  function stopWaveform(reason: string): void {
+    waveStopped = true;
+    if (waveSaveTimer !== null) {
+      clearTimeout(waveSaveTimer);
+      waveSaveTimer = null;
+    }
+    for (const child of waveChildren) {
+      try { child.kill('SIGKILL'); } catch { /* 可能已退出 */ }
+    }
+    waveChildren.clear();
+    void saveWaveCache();
+    console.info('[dsh-music-player] 波形生成已停止：' + reason);
+  }
+
   /** 只读地跑一次 ebur128。**不改任何音频文件**，也不写临时目录。 */
   function measureOne(filePath: string, diag: { reason: string | null }): Promise<{ trackGainDb: number; trackPeak: number } | { silent: true } | null> {
     return new Promise((resolve) => {
@@ -2389,6 +2599,21 @@ function createHost(ctx) {
       await ready;
       if (currentDir !== null && library === null && scanning === null) startScan(currentDir).catch(() => {});
       sendJson(res, 200, libraryPayload(library));
+      return;
+    }
+
+    if (pathname === '/api/dsh-music/waveform' && req.method === 'GET') {
+      await ready;
+      await loadWaveCache();
+      const wanted = url.searchParams.get('p') ?? '';
+      const track = (library?.tracks ?? []).find((item) => item.id === wanted);
+      if (track === undefined) {
+        // 未知曲目不是基础设施失败：回空波形 + 稳定原因，客户端静默降级（§2.8）。
+        sendJson(res, 200, { peaks: [], cached: false, reason: 'unknown-track' });
+        return;
+      }
+      const result = await waveformFor(track);
+      sendJson(res, 200, result);
       return;
     }
 
@@ -2835,6 +3060,7 @@ function createHost(ctx) {
     killAllMvJobs('插件已停用');
     // 测量同样要停：漏掉这一步，热重载/停用后 ffmpeg 会继续跑到结束（I-06 孤儿进程）。
     stopRgMeasure('插件已停用');
+    stopWaveform('插件已停用');
     // 标签 worker 也必须随实例销毁：热重载/停用后不能留着旧线程。
     failAllTagJobs('插件已停用');
     if (tagWorker !== null) {

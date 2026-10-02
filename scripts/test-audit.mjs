@@ -271,10 +271,12 @@ check('MusicView never references createPlayer locals (retry must not throw Refe
 // **它并不能证明子进程被杀**，所以这里补上接线检查，两者合起来才是完整覆盖。
 const disposeStart = host.indexOf('function dispose()');
 const disposeBody = disposeStart < 0 ? '' : host.slice(disposeStart, host.indexOf('\n    }', disposeStart));
-check('dispose() 停掉所有持子进程的任务（MV 与 ReplayGain 测量）',
-  disposeStart >= 0 && disposeBody.includes('killAllMvJobs(') && disposeBody.includes('stopRgMeasure('),
+check('dispose() 停掉所有持子进程的任务（MV / RG 测量 / 波形生成）',
+  disposeStart >= 0 && disposeBody.includes('killAllMvJobs(') && disposeBody.includes('stopRgMeasure(')
+    && disposeBody.includes('stopWaveform('),
   disposeStart < 0 ? 'dispose() not found'
-    : 'mv=' + disposeBody.includes('killAllMvJobs(') + ' measure=' + disposeBody.includes('stopRgMeasure('));
+    : 'mv=' + disposeBody.includes('killAllMvJobs(') + ' rg=' + disposeBody.includes('stopRgMeasure(')
+      + ' waveform=' + disposeBody.includes('stopWaveform('));
 
 console.log(failures === 0 ? 'ALL PASS' : failures + ' CHECK(S) FAILED');
 process.exit(failures === 0 ? 0 : 1);

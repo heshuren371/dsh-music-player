@@ -16,7 +16,7 @@ DSH 的本地音乐播放器插件，**Web + Desktop 同一份包**。`src/*.ts`
 
 ```bash
 pnpm run build && pnpm run typecheck   # 编译 + 类型棘轮（基线 0，含死代码开关）
-npm test                               # 产物新鲜度 + 逐文件严格 + 30 套回归
+npm test                               # 产物新鲜度 + 逐文件严格 + 31 套回归
 pnpm run check:manifest                # 只在动了 dsh-plugin.json 时必跑
 ```
 
@@ -37,7 +37,7 @@ pnpm run check:manifest                # 只在动了 dsh-plugin.json 时必跑
 
 1. 改了 `src/` → 跑过 `pnpm run build`
 2. `pnpm run typecheck` 0 错误（含 `noUnusedLocals`/`noUnusedParameters`：死代码直接红）
-3. `npm test` 30 套全绿
+3. `npm test` 31 套全绿
 4. 新增功能/修复 → **在 `scripts/run-all.mjs` 注册了回归套件**（没注册等于没门禁）
 5. 新增断言 → **做过对照**：把缺陷改回去，断言必须变红（§6.1 第 7 条）
 6. 改了文档 → README ≤ 220 行，深度材料进 `docs/`（§7.2）
@@ -192,26 +192,24 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
   为跨 activation 共享资源**，且每代的 disposer 只作用于**自己那一代**。→ `window.__dshMusicPlayer`
   是未声明的隐式转移（`A3-03`）。
 - **disposer 必须作用于「自己的」实例**：对共享对象调 `dispose()`/`halt()` 会停掉新实例仍在使用的东西。
-- **`await` 挂起后恢复的代码路径必须检查 `disposed` 状态位**：只把引用置 `null` **不够** —— 挂起的异步分支会把它重新赋值。本仓库有两条这样的路径：`lib/index.js:98-127`（`ensureHost` 两个挂起点，第 8 轮已修）与 `lib/client.js:934-957`（轮询回调，第 8 轮已修）。→ `A3-02`。
+- **`await` 挂起后恢复的路径必须检查 `disposed`**：只把引用置 `null` **不够** —— 挂起的异步分支会
+  把它重新赋值（`A3-02`：`ensureHost` 两个挂起点、客户端轮询回调）。
 - **「清 timer」与「阻止再武装」是两件事**：teardown 里 `clearTimeout` 只能清掉**当前**那个句柄；若回调在飞期间句柄已被置 null，`clearTimeout` 落空，回调的 `catch` 会再武装。守卫若依赖 `set()` 未复位的状态（如 `scanning`），teardown 必须**显式复位该状态**。→ `A3-01`（历史 bug 的同族复发形态）。
-- **自建 DOM 与全局键必须释放**：挂在 `document.body` 上的节点、`window.*` 上的键，都要在 teardown 里 `remove()` / `delete`（`lifecycle.zh.md:107`）。→ `A3-04`（`.dshm-mvPark` + `<audio>`）。
+- **自建 DOM 与全局键必须释放**：挂在 `document.body` 的节点、`window.*` 的键都要 `remove()` /
+  `delete`（`lifecycle.zh.md:107`；`A3-04` 是 `.dshm-mvPark` + `<audio>`）。
 - **不得读取未在 manifest 声明的 context API**（`lifecycle.zh.md:82`）：`ctx.get('X')` / `ctx.X` / `ctx.inject(['X'])` 里的**每个服务名**都必须能在 `requires.contracts` 或 `permissions` 里找到对应声明。→ 目前 `directoryPicker`（`lib/host.js:1886`）、`ctx.locale`（`lib/client.js:3186`）、`connection.fetch`（`lib/index.js:240`）**三者都没有声明**（`A3-05`）。
 
 ### 2.11 契约坐标必须真实可解析（第 4 轮沉淀）
 
 **这是本轮最重要的一条**：`requires.contracts` 里的每个 `apiVersion + kind` 都必须是**真实存在、可被 definition 解析**的坐标，不能凭印象编。
 
-- **禁止发明坐标**：写进 manifest 前必须实测。实测（第 7 轮，搜索面已用真实存在的
-  `conversation.view` 校准）：`webserver.dsh/v1alpha1`、`browser.ui.dsh/v1alpha1` 与基线里
-  真实存在的 `ui.dsh/v1alpha1` / `web.ui.dsh/v1alpha1` 在 **DSH 运行时全部 0 命中**（宿主只用
-  字符串 slot `conversation.view`）⇒ 本插件**不消费**任何 Community 契约，`requires.contracts`
-  为空是**诚实状态**（`A4-03`）。
-- **`fallback` 不能把不存在的坐标洗成合规声明**（`D-05` 曾如此误处置）。
-- **声明无 definition 的扩展 ≠ 声明能力**（`manifest.zh.md:62`，投影只给 warning）：本仓库
-  **不声明**而不是假声明，真实绑定记在 `x-dsh-music-player.ui`（`A4-02`）。
-- **extension id 必须有运行时对应**，否则是死声明。
-- **`prefix` 不能与精确路由混用**：声明的 prefix 必须等于 `webServer.register` 的 path（`A4-05`）。
-- **`requires.contracts` 至少一条 `required`**，否则 preflight 永不阻塞（`A4-03`）。
+- **禁止发明坐标，写进 manifest 前必须实测**（「0 命中」先用已知为真的样本校准搜索面，§6.1）。
+  实测：候选坐标在 DSH 运行时全部 0 命中 ⇒ 本插件**不消费**任何 Community 契约，
+  `requires.contracts` 为空是**诚实状态**（`A4-03`）。
+- **`fallback` 不能把不存在的坐标洗成合规声明**（`D-05`）。
+- **声明无 definition 的扩展 ≠ 声明能力**（`manifest.zh.md:62`）：**不声明**优于假声明（`A4-02`）。
+- **extension id 必须有运行时对应**；**`prefix` 必须等于 `webServer.register` 的 path**（`A4-05`）；
+  **`requires.contracts` 至少一条 `required`**，否则 preflight 永不阻塞（`A4-03`）。
 
 ### 2.12 自建 bearer token 三律（第 5 轮沉淀）
 
@@ -283,23 +281,17 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 
 ### 2.16 平台栅栏在**路由之前**拒答 —— 回落判据不能只认 404（第 13 轮沉淀）
 
-第 12 轮的 A1-02 用「**404** 且该端点属于「不该 404」的那一类」作为「宿主是旧入口」的判据；
-第 13 轮的真机故障证明它**过窄**（Electron 宿主 :19387 实测：插件旧前缀 200，平台 `/api`
-分别答 **401** / 加 `Origin: dsh-app://app` 后 **403** —— 平台 `admit()` 在**路由之前**判
-Host/Origin 与浏览器会话）。**「宿主没有这个端点」（404）与「这道栅栏不让这个请求过」
-（401/403）是两件事**，把后者当前者会让回落在 Desktop 上永不触发。
+平台 `/api` 的 `admit()` 在**路由之前**判 Host/Origin 与浏览器会话 ⇒ 实测答的是 **401/403**，
+不是 404。**「宿主没有这个端点」（404）与「这道栅栏不让这个请求过」（401/403）是两件事**。
 
-- **回落判据必须覆盖全部「这道传输送不到」的状态码**（401 / 403 / 404），而且仍然要配
-  **正向识别**（必须真的解析出目标数据才算采纳）+ **显式报告降级**（§2.8）。
-- **例外只给「其存在意义就是绕开这道栅栏」的端点**：本仓库只有 `/session`
-  （它的产物就是回环 token 基址）。其余端点**不得**享受这条 —— 把一次普通的 403 洗成
-  信任边界降级是违规。
-- **降级成不可 seek 的源比等待更糟**：`ensureStreamBase()` 拿不到基址时必须**重取**，
-  不能「超时就算了」——相对地址在 Desktop 上丢 Range，等于把功能做废。
-- **按可观测症状兜底自愈**：成因修好了也要留一层。判据是「源不是 token 直连 + 时长已知 +
-  `seekable=[0,0]`」，自愈必须**有界**且**成功才停** —— **禁止**一次失败就置永久标志。
-- **诊断日志必须无歧义且不带凭据**：不得把空串 / `blob:` / 自定义协议一起归成「相对」；按 §2.9 剥 `t=`。
-- **夹具保真度也是判别力**：假元素缺 `currentSrc`/`seekable` 会让被测路径失真甚至恒绿（§9 陷阱 4）。
+- **回落判据必须覆盖全部「这道传输送不到」的状态码**（401 / 403 / 404），并配**正向识别**
+  （真的解析出目标数据才算采纳）+ **显式报告降级**（§2.8）。
+- **例外只给「其存在意义就是绕开这道栅栏」的端点**（本仓库只有 `/session`）—— 把一次普通的
+  403 洗成信任边界降级是违规。
+- **降级成不可 seek 的源比等待更糟**：拿不到基址必须**重取**，不能「超时就算了」（丢 Range = 功能做废）。
+- **按可观测症状兜底自愈**：判据「源不是 token 直连 + 时长已知 + `seekable=[0,0]`」，**有界**且
+  **成功才停** —— **禁止**一次失败就置永久标志。
+- **诊断日志无歧义且不带凭据**（按 §2.9 剥 `t=`）；**夹具保真度也是判别力**（§9 陷阱 4）。
 
 > **通用形态**：修**症状**时，修法必须按**当前这条源是什么类型**推导，不能按期望的播放模式
 > （`track.kind`）猜；且**只在出问题时记日志不够**，要在**行为发生的那一刻**记。
@@ -309,26 +301,19 @@ Host/Origin 与浏览器会话）。**「宿主没有这个端点」（404）与
 DSH 的 `conversation.view` **只在被选中时挂载**（切到「对话」即卸载，切回来是一次全新挂载）。
 这条接缝有三个必须一起记住的后果：
 
-- **要跨视图切换保留的 UI 状态，禁止放视图局部 `useState`**。全屏播放器三态 `playerPhase`、
-  MV 放大 `mvBig`、封面预览 `zoomOpen` 修复前全是局部 state，切走再回来就回到列表页
-  （用户报的直接症状）。它们现在放进 **player 单例 store**（`src/client.ts` 的 `PlayerState`）。
-- **视图驱动的定时器必须归资源所有者，不能归视图的 effect**。收起动画那 200ms 若挂在视图里，
-  卸载会把它 cleanup 掉，`phase` 永远停在 `closing`；定时器因此移进 `createPlayer()`
-  （`playerCloseTimer`），并在 `halt()` 里清句柄 + 复位状态（同 §2.10）。
-- **重挂载后要把外部资源搬回来**：MV 的 `<video>` 卸载时停在 body 停靠位（离开文档即暂停），
-  回来时必须按**恢复后的** `playerPhase` 搬进新舞台；断言要覆盖「同一个元素、不是新建第二个」。
-- **UI 过渡的定时器禁止用 `disposed` 早退**：`halt()` 已经清掉句柄，所以回调能跑到，唯一可能是
-  「teardown 之后又被显式打开过」；而 player 是 window 级单例、下一代 activation 继续用它
-  （A3-03），`disposed` 置位后**永不复位** ⇒ 早退会把 `phase` 永久钉在 `closing`
-  （覆盖层关不掉，`closePlayer` 又拒绝从 closing 出发 = 死锁）。判据改成「还在 closing 才收口」。
-  同理**禁止**给 `openPlayer` 加 `disposed` 守卫：那会让插件重载后的全屏播放器再也打不开
-  （比死锁更坏）。teardown 语义由 `halt()` 自己完成，不靠拦 UI 操作。
+- **要跨视图切换保留的 UI 状态，禁止放视图局部 `useState`**（全屏三态 / MV 放大 / 封面预览
+  修复前都是局部 state，切走再回来就回到列表页）⇒ 放进 **player 单例 store**。
+- **视图驱动的定时器必须归资源所有者**（收起动画的 200ms 挂在视图里会被卸载 cleanup 掉，
+  `phase` 永久停在 `closing`）⇒ 移进 `createPlayer()` 并在 `halt()` 里清句柄 + 复位状态（§2.10）。
+- **重挂载后要把外部资源搬回来**（MV 的 `<video>` 停在 body 停靠位），断言覆盖「同一个元素、
+  不是新建第二个」。
+- **UI 过渡的定时器禁止用 `disposed` 早退**：`disposed` 置位后**永不复位**（player 是 window 级
+  单例，A3-03）⇒ 早退会把 `phase` 钉死在 `closing`（`closePlayer` 拒绝从 closing 出发 = 死锁）。
+  同理**禁止**给 `openPlayer` 加 `disposed` 守卫（会让插件重载后的全屏播放器再也打不开）。
 
-> 门禁 `test-view-persistence.mjs`：挂载 → 开全屏（含 MV 放大）→ 卸载 → store 仍 `open`
-> 且媒体停在 body → 重挂载 → 全屏 / 放大布局 / 同一个 `<video>` 全回来；收起动画跨卸载仍走完；
-> `halt()` 复位；**外加**「teardown 之后 open→close 仍收口」与「真实第二次 activation 能开能关」
-> 两条（防 `disposed` 死锁回归）。夹具用**真实 `<video>` DOM 节点**（假元素没有 `nodeType`，
-> 搬运路径会整体跳过 ⇒ 断言恒绿，§9 第 4 条）。细节与负向对照见台账 §5.22。
+> 门禁 `test-view-persistence.mjs` 覆盖上述全部 + 「teardown 之后 open→close 仍收口」与
+> 「真实第二次 activation 能开能关」两条。夹具必须用**真实 `<video>` DOM 节点**（假元素没有
+> `nodeType`，搬运路径整体跳过 ⇒ 恒绿）。细节与对照见台账 §5.22。
 
 ### 2.18 过渡必须淡入淡出，且时长要够长（第 18 轮起；第 20 轮按 fooyin 校准）
 
@@ -365,11 +350,10 @@ pause `{in=120,out=120}` · stop `{in=120,out=300}`。**本仓库采用同一组
 - **跨源是前提**：桌面版页面 origin 是 `dsh-app://app`、媒体在 `127.0.0.1` ⇒ Web Audio
   **必须有 CORS**，否则输出**静音**。宿主只对**窄名单**回显 ACAO（不用 `*`，见 §2.12），
   并对媒体端点应答 `OPTIONS` 预检（`Range` 不是 CORS 安全列表头）。
-- **降级不许变成故障**：建图失败 → **永久退回元素音量**；跨源且未确认 CORS → **先直连、后台探一次**，
-  确认后下一首才建图；另有兜底开关 `?musicGraph=0` / `window.__dshMusicNoGraph`。
-- **建图后必须把元素音量置中性**：建图前写的是元素音量（首播时是 0），建图后增益在图里 ——
-  不置中性就是「元素 0 × 增益」= **第一次起播静音**（比电流声严重，被本轮门禁抓到）。
-- **音频图 `halt()` 只 suspend 不 close** —— close 之后这个媒体元素再也接不回音频图。
+- **降级不许变成故障**：建图失败 → **永久退回元素音量**；跨源未确认 CORS → **先直连、后台探一次**；
+  兜底开关 `?musicGraph=0` / `window.__dshMusicNoGraph`。
+- **建图后必须把元素音量置中性**（否则「元素 0 × 增益」= **第一次起播静音**，比电流声更严重）。
+- **音频图 `halt()` 只 suspend 不 close** —— close 之后媒体元素再也接不回音频图。
 - **`AudioContext.sampleRate` 创建时即固定** ⇒ ctx 必须在**第一次播放时**才建，并把
   `sampleRate`/`state` 打进诊断（只记数字与状态，绝不记 URL/token；门禁 B13）。
 - **`location` 一律写 `window.location`**（bundle 由宿主 eval）。
@@ -387,9 +371,9 @@ pause `{in=120,out=120}` · stop `{in=120,out=300}`。**本仓库采用同一组
   **除回去**，否则渐变会从被 RG 缩过的值起步。
 - **防削波默认恒开**：增益后峰值可能越过满刻度，按 `peak` **收窄**增益（fooyin 的
   `PreventClipping`）。**禁止**为了「响一点」去掉它 —— 门禁 B6 会红。
-- **标签是文件里来的，必须先收窄**：`typeof v !== 'number' || !Number.isFinite(v)`。
-  注意 `Number.isFinite` **不做类型收窄**，`strictNullChecks` 下必须显式判类型。
-- **范围要夹住**：增益 ±40dB、前级 ±15dB、峰值 ≤4（超出当损坏）。荒谬值只会变成刺耳或静音。
+- **标签是文件里来的，必须先收窄**：`typeof v !== 'number' || !Number.isFinite(v)`
+  （`Number.isFinite` **不做类型收窄**，`strictNullChecks` 下要显式判类型）；**范围要夹住**：
+  增益 ±40dB、前级 ±15dB、峰值 ≤4（超出当损坏）。
 - **`null` 标签在 payload 里也要是 `null`**（不是 undefined）：客户端据此区分「未测量」与「字段缺失」。
 - **只读标签不够**：本机曲库实测 **0/40 首**带 `REPLAYGAIN_*` 标签 ⇒ 必须有**测量**这条兜底。
   测法用 ffmpeg 的 `ebur128=peak=true`（只读，**绝不写回音频文件**），增益 = `-18 LUFS` − 实测积分
@@ -451,6 +435,28 @@ fooyin 没有这个代价，因为它的 300ms 是**重叠**的交叉淡化。�
 - **`check()` 的 detail 是无条件求值的**：没有滤波器时 `filters[0].gain` 会在 detail 里崩、掩盖
   后面的断言。**非空护栏要同时加在条件与 detail 上**（`[].every()` 恒真 = 空过）。
 
+### 2.23 波形进度条：包络要**忠实**，取不到就**静默降级**（第 24 轮沉淀）
+
+进度条只有一条线时看不出「哪儿是副歌、哪儿是静音」，拖动全凭猜。做法与 fooyin 的 waveform
+seekbar 同源（GPL-3.0：只借鉴做法，不抄代码）。
+
+- **内存必须与曲长无关**：ffmpeg 只读解码成单声道后**按 0.25s 流式聚合**取峰值，绝不缓冲整段
+  PCM（一小时 8kHz 单声道就是 56MB）。桶数设上限（超长曲目只保留前半，**有界**优先于完整）。
+- **不做低通式的"假波形"**：解码率要够高（8kHz），否则把高频削掉会让鼓点看起来是平的
+  （§9 陷阱 4 的同类：夹具/参数不保真，断言就没有判别力）。
+- **每首各自归一化到 0..1**：安静的歌在 UI 上才看得见；**全静音保持全 0**（不猜）。
+  对照实测：改成按满刻度除 → 前半 0 / 后半 **0.80** → B2/B3 红。
+- **缓存要按 `size`+`mtimeMs` 失效**：只判「有没有条目」会让波形永远停在旧内容上
+  （对照实测：去掉失效判断 → B5 红）。
+- **取不到就静默降级**：没有 ffmpeg / 非音频 / 未知曲目 → 回**空波形 + 稳定原因**（不是 500），
+  客户端退回原来的细轨，**不报红字、不影响播放**（门禁 A6/B6/B7）。
+- **客户端必须丢弃迟到的结果**：快速连切时先发的那首会晚回来，画上去就与正在播的歌对不上。
+  ⚠️ **对照要让它真的能红**：得让「先发的慢、后发的快」，否则迟到的先写、正确的后写，
+  看起来反而正确（本轮实测：两边一样慢时，删掉守卫**照样全绿**）。
+- **进度用 CSS 变量传给遮罩**（`--dshm-played` + `clip-path`）：拖动的 rAF 循环**不必**触发
+  React 重渲染（进度条是刻意非受控的，见 §4）。
+- **两层柱子**（底层暗 / 上层亮）而不是「把已播部分重画一遍」：只渲染一次，遮罩裁剪是免费的。
+
 ## 3. 可跑门禁
 
 改完**必须**跑，全绿才算完成：
@@ -458,7 +464,7 @@ fooyin 没有这个代价，因为它的 300ms 是**重叠**的交叉淡化。�
 ```bash
 pnpm run build                # src/*.ts → lib/*.js（改了 src 必须跑）
 pnpm run typecheck            # 类型棘轮：错误数只许变少（基线 0）
-npm test                      # 产物新鲜度 + 逐文件严格 + 30 套回归
+npm test                      # 产物新鲜度 + 逐文件严格 + 31 套回归
                               # = check-build-fresh && check-strict && run-all
 pnpm run check:manifest       # dsh-plugin.json 对 pinned Community v0.15 校验
 node scripts/check-whitespace.mjs   # 空白/冲突标记（`npm test` 已包含）
@@ -467,7 +473,7 @@ node scripts/check-whitespace.mjs   # 空白/冲突标记（`npm test` 已包含
                               #    质量由 `check-build-fresh`（逐字节比对）保证，不由空白门禁保证。
 ```
 
-`.github/workflows/ci.yml` 在每次 push / PR 上跑同一组门禁（`pnpm install --frozen-lockfile` → `typecheck` → 全部 `lib/*.js` 与 `scripts/*.mjs` 的 `node --check` → `npm test`（= 新鲜度 + 逐文件严格 + 30 套）→ manifest 校验 → 冲突标记扫描）。**CI 故意不先 build**：新鲜度门禁只在 `lib/` 未被就地覆盖时才有判别力。**CI 绿不等于 manifest 校验过**：CI 里没有 vendor 基线，`check:manifest` 会走 SKIP 分支并打 `::warning::` —— SKIP 不是通过（见上）。
+`.github/workflows/ci.yml` 在每次 push / PR 上跑同一组门禁（`pnpm install --frozen-lockfile` → `typecheck` → 全部 `lib/*.js` 与 `scripts/*.mjs` 的 `node --check` → `npm test`（= 新鲜度 + 逐文件严格 + 31 套）→ manifest 校验 → 冲突标记扫描）。**CI 故意不先 build**：新鲜度门禁只在 `lib/` 未被就地覆盖时才有判别力。**CI 绿不等于 manifest 校验过**：CI 里没有 vendor 基线，`check:manifest` 会走 SKIP 分支并打 `::warning::` —— SKIP 不是通过（见上）。
 
 - **只要动了 `dsh-plugin.json` 或 manifest 相关字段，`check:manifest` 是必跑项。** 它用固定 revision 的 `@dsh-std/manifest` 校验，不是照 `main` 分支。基线找不到时它以 **SKIP** 退出（exit 0 + 明确警告），**那不是通过**——用 `DSH_STD_MANIFEST=/path/to/@dsh-std/manifest/lib/index.js` 指过去。
 - 新增功能**必须**在 `scripts/run-all.mjs` 的 `suites` 里注册回归套件；没注册等于没有门禁。
@@ -500,7 +506,7 @@ node scripts/check-whitespace.mjs   # 空白/冲突标记（`npm test` 已包含
 
 **逐轮要点见台账**（第 7–19 轮的维度、证据与结论都在 `docs/audit-ledger.md` 的 §5.11–§5.25）。
 
-**当前状态（第 20 轮）**：高危 **13 → 0**，只剩中/低与**明确接受项**（§10）；套件 18 → **30**
+**当前状态（第 24 轮）**：高危 **13 → 0**，只剩中/低与**明确接受项**（§10）；套件 18 → **31**
 （全绿、每条新门禁都做过对照）；类型错误 **243 → 0** 且基线锁 0；审计维度全覆。
 自推翻的记录（**不得覆盖，只能新写**）：`D-05` 误标「已修」、`A1-02` 的冷却设计、第 13 轮自愈的修法。
 
@@ -539,7 +545,7 @@ node scripts/check-whitespace.mjs   # 空白/冲突标记（`npm test` 已包含
 | 轮次 | 已实现的门禁（详细断言见 [`docs/gates.md`](docs/gates.md)） |
 | --- | --- |
 | 8–15 | 声明面一致性 · 传输面覆盖 · 释放面完整性 · 死代码（`noUnusedLocals`/`noUnusedParameters`）· 停止后无自续期定时器 · teardown 优先于在飞重载 · 客户端 release 面 · 恒绿断言扫描 · 门禁诊断可用 |
-| 16 / 18–22 | 视图卸载不丢全屏播放器 · 音频不得硬切换（时长按 fooyin 校准）· 音频常驻输出流 + 媒体 CORS · **ReplayGain 响度归一化** |
+| 16 / 18–24 | 视图卸载不丢全屏播放器 · 音频不得硬切换（时长按 fooyin 校准）· 音频常驻输出流 + 媒体 CORS · **ReplayGain 响度归一化** |
 | 待建 | `ctx 读取面一致性` · `契约坐标可解析` · `prefix 语义一致` · `凭据不进日志`（落盘面已覆盖）· `错误面脱敏` · `声明面覆盖实际调用` · `副作用前置授权` · `存储失败不得报成功`（`A5-09`） |
 
 **逐条断言、覆盖的审计条目与负向对照证据 → [`docs/gates.md`](docs/gates.md)。**
@@ -599,6 +605,7 @@ node scripts/check-whitespace.mjs   # 空白/冲突标记（`npm test` 已包含
 | I-17 | ReplayGain 走**独立节点**；未测量 → 不做增益（≠0dB）；增益按峰值收窄；标签先收窄再夹范围 | 响度跳变 / 互相覆盖 / 削波失真 / NaN 静音 | `test-replaygain` | §2.20 |
 | I-18 | 交叉淡化：两元素接进**同一**常驻 AudioContext；电平**每元素独立**；teardown 停两个 | 切歌有缝 / 用户音量被过渡压掉 / 卸载后仍出声 | `test-audio-graph`（D 段） | §2.21 |
 | I-19 | 均衡器：0dB 即直通；自动前级按最大提升补偿；曲线夹 ±12dB（两处）；非法输入不动现状；缺 `createBiquadFilter` 只跳过 EQ | 削波失真 / 脏数据变刺耳 / 连常驻输出流一起丢 | `test-audio-graph`（E 段） | §2.22 |
+| I-20 | 波形：内存与曲长无关；包络忠实且每首归一化；缓存按 size+mtime 失效；取不到**静默降级**；客户端丢弃迟到结果 | 长曲目吃内存 / 波形不随内容变 / 拿不到就报错 / 画错歌的波形 | `test-waveform` | §2.23 |
 
 ## 9. 已知陷阱速查
 

@@ -122,6 +122,23 @@ const EQ_PRESETS: Record<string, number[]> = {
 };
 const EQ_PRESET_ORDER = Object.keys(EQ_PRESETS);
 
+/**
+ * 波形柱子的抽样：宿主下发 400 桶，渲染只要 ~120 根（两层行 = 240 个节点，再多会拖慢进度条）。
+ * 取每段**最大值**（不是平均：平均会把瞬态抹平，鼓点看起来就没了）。
+ */
+function sampleWaveBars(peaks: number[], target: number): number[] {
+  if (peaks.length <= target) return peaks.slice();
+  const out: number[] = [];
+  for (let i = 0; i < target; i += 1) {
+    const from = Math.floor((i * peaks.length) / target);
+    const to = Math.max(from + 1, Math.floor(((i + 1) * peaks.length) / target));
+    let max = 0;
+    for (let j = from; j < to && j < peaks.length; j += 1) if (peaks[j] > max) max = peaks[j];
+    out.push(max);
+  }
+  return out;
+}
+
 interface PlayerState {
   dir: string | null;
   tracks: MusicTrack[];
@@ -161,6 +178,13 @@ interface PlayerState {
   /** 均衡器：当前预设 id 与**实际生效**的每段增益（dB）。自定义曲线时 preset 为 'custom'。 */
   eqPreset: string;
   eqBands: number[];
+  /**
+   * 当前曲目的波形包络（0..1，宿主下发的 400 桶；`null` = 还没拿到或拿不到）。
+   * 它是**纯展示数据**：拿不到就退回原来的细轨，绝不因此报错或拦住播放。
+   */
+  wavePeaks: number[] | null;
+  /** 已为哪一首发起过波形请求：换歌要重新取，同一首不重复取。 */
+  waveTrackId: string | null;
   query: string;
   /** 在线补全结果：id → { title?, artist?, album?, cover? }。 */
   meta: Record<string, MetaEntry>;
@@ -878,7 +902,16 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-progress{width:100%;align-items:center;gap:8px;display:flex}
 /* 进度条命中区：指针事件在这里处理（滑杆本体 pointer-events:none），
    这样"点哪儿跳哪儿 / 拖多快都跟手"不依赖原生 range 的拇指命中。 */
-.dshm-progressTrack{cursor:pointer;flex:1;min-width:0;align-items:center;display:flex}
+.dshm-progressTrack{cursor:pointer;flex:1;min-width:0;align-items:center;display:flex;position:relative}
+/* 波形：垫在滑杆下面（滑杆轨道透明），播放过的部分用 clip-path 亮起来。进度靠 CSS 变量
+   --dshm-played 传入，所以拖动的 rAF 循环不必触发 React 重渲染。 */
+.dshm-wave{position:absolute;inset:-6px 0;pointer-events:none;display:flex}
+.dshm-wave__row{position:absolute;inset:0;display:flex;align-items:center;gap:1px}
+.dshm-wave__bar{flex:1;min-width:0;border-radius:1px;background:var(--dsw-alias-border-l2)}
+.dshm-wave__row--on{clip-path:inset(0 calc(100% - var(--dshm-played,0%)) 0 0)}
+.dshm-wave__row--on .dshm-wave__bar{background:var(--dsw-alias-text-accent,currentColor);opacity:.85}
+/* 波形垫底、滑杆在上：波形自己 pointer-events:none，这里把层序写成显式的（别依赖 DOM 顺序）。 */
+.dshm-progressTrack--wave .dshm-slider{position:relative;z-index:1}
 .dshm-progress .dshm-slider{width:100%}
 .dshm-progressTrack:hover .dshm-slider::-webkit-slider-thumb,.dshm-progress--dragging .dshm-slider::-webkit-slider-thumb{transform:scale(1)}
 .dshm-progressTrack:hover .dshm-slider::-moz-range-thumb,.dshm-progress--dragging .dshm-slider::-moz-range-thumb{transform:scale(1)}
@@ -1273,6 +1306,8 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         rgMeasureDone: 0,
         rgMeasureTotal: 0,
         // 均衡器默认 flat（不动音色）—— 用户没要求就不要偷偷改声音。
+        wavePeaks: null,
+        waveTrackId: null,
         eqPreset: typeof prefs.eqPreset === "string" && EQ_PRESETS[prefs.eqPreset] !== undefined ? prefs.eqPreset : "flat",
         eqBands:
           Array.isArray(prefs.eqBands) && prefs.eqBands.length === EQ_BANDS.length
@@ -2421,6 +2456,25 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         }
       };
 
+      /**
+       * 波形：按需取当前曲目的包络。宿主侧是**只读** ffmpeg 解码 + 缓存（与 §2.20 同族纪律）。
+       * 取不到（没有 ffmpeg / 解码失败 / 未知曲目）就保持 `null` 静默降级 —— 不报红字、不影响播放。
+       */
+      const loadWaveform = async (track: MusicTrack) => {
+        if (state.waveTrackId === track.id && state.wavePeaks !== null) return;
+        set({ wavePeaks: null, waveTrackId: track.id });
+        try {
+          const result = await api("/api/waveform?p=" + encodeURIComponent(track.id));
+          // 快速连切时回来的是**上一首**的结果，必须丢弃 —— 否则波形与正在播的歌对不上。
+          if (state.waveTrackId !== track.id) return;
+          const raw = Array.isArray(result?.peaks) ? result.peaks : [];
+          const peaks = raw.filter((v) => typeof v === "number" && Number.isFinite(v));
+          set({ wavePeaks: peaks.length > 0 ? peaks : null });
+        } catch {
+          set({ wavePeaks: null });
+        }
+      };
+
       const playIndex = (index) => {
         const track = state.tracks[index];
         if (track === undefined) return;
@@ -2441,6 +2495,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           mv: track.kind === "video" ? { id: track.id, state: "checking", progress: 0, mode: null, error: null } : null,
         });
         savePrefs({ last: { id: track.id, time: 0 } });
+        void loadWaveform(track);
         updateMediaSession();
         if (track.kind === "video") {
           void (async () => {
@@ -3565,7 +3620,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
      * whole view (track list included) on every animation frame, which is what
      * made dragging and seeking feel sluggish.
      */
-    const ProgressBar = React.memo(function ProgressBar({ player, trackId, duration, time, playing, t, variant }) {
+    const ProgressBar = React.memo(function ProgressBar({ player, trackId, duration, time, playing, peaks, t, variant }) {
       // 指针交互挂在命中区（.dshm-progressTrack）上，滚轮快进也挂这里。
       const trackRef = useWheelHandler((event) => {
         if (trackId < 0 || !(duration > 0)) return;
@@ -3673,8 +3728,24 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         onLostPointerCapture: endDrag,
         onChange: onInput,
       });
+      // 波形：两层同样的柱子，上层用 clip-path 按播放进度裁开。进度通过 CSS 变量
+      // `--dshm-played` 传进去，所以拖动的 rAF 循环**不必**触发 React 重渲染。
+      const bars = Array.isArray(peaks) && peaks.length > 0 ? sampleWaveBars(peaks, 120) : null;
+      const playedPct = duration > 0 && Number.isFinite(time) ? Math.max(0, Math.min(100, (time / duration) * 100)) : 0;
+      const waveRow = (modifier?) => h("div", { className: "dshm-wave__row" + (modifier === undefined ? "" : " " + modifier) },
+        bars === null ? null : bars.map((value, i) => h("span", {
+          key: i,
+          className: "dshm-wave__bar",
+          // 高度按包络；最低留 6%，静音段也看得见一条底线。
+          style: { height: Math.max(6, Math.round(value * 100)) + "%" },
+        })));
       // 命中区自己接管指针：点哪儿跳哪儿、拖多快都只画界面，松手才 seek。
-      const track = h("div", { className: "dshm-progressTrack" }, slider);
+      const track = h("div", {
+        className: "dshm-progressTrack" + (bars === null ? "" : " dshm-progressTrack--wave"),
+        style: bars === null ? undefined : { "--dshm-played": playedPct.toFixed(2) + "%" },
+      },
+        bars === null ? null : h("div", { className: "dshm-wave", "aria-hidden": "true" }, waveRow(), waveRow("dshm-wave__row--on")),
+        slider);
       const stacked = variant === "stacked";
       return h("div", {
         className: "dshm-progress"
@@ -4301,6 +4372,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
               duration: state.duration,
               time: state.time,
               playing: state.playing,
+              peaks: state.wavePeaks,
               t,
               variant: "stacked",
             }),
@@ -4456,6 +4528,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             duration: state.duration,
             time: state.time,
             playing: state.playing,
+            peaks: state.wavePeaks,
             t,
           }),
         ),
