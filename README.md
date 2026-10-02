@@ -102,7 +102,7 @@ cd .. && dsh plugin --profile web add link:./dsh-music-player
 ```sh
 pnpm run build          # src/*.ts → lib/*.js
 pnpm run typecheck      # 类型棘轮：错误数只许变少（基线 0，含死代码开关）
-npm test                # 产物新鲜度 + 逐文件严格 + 30 套回归
+npm test                # 产物新鲜度 + 逐文件严格 + 31 套回归
 pnpm run check:manifest # dsh-plugin.json 对 pinned dsh-std Community v0.15 校验
 ```
 
