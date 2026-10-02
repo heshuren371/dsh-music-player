@@ -1425,3 +1425,120 @@ seek 的淡入淡出**只在常驻音频图接管增益时**启用：图未启�
 `typecheck` 0 · **`ALL 29 SUITES PASS`** · 三条对照精确变红 · `check-build-fresh` 一致 ·
 `check-strict` 通过 · manifest PASS · `diff --check` clean。
 **真实听感仍未验证**（jsdom 没有音频设备）—— 这一条继续如实标注。
+
+---
+
+## 5.29 第 21 轮 —— ReplayGain 响度归一化（推荐顺序的第 1 项）
+
+### 5.29.1 维度与依据
+
+用户要求「按推荐顺序来做」：ReplayGain → 预取 → 均衡器 → 波形。本轮做第 1 项。
+
+**依据**（fooyin，GPL-3.0；本仓库 MIT ⇒ **只借鉴做法、不抄代码**）：
+- 只读**标准标签** `REPLAYGAIN_TRACK_GAIN` / `_TRACK_PEAK` / `_ALBUM_GAIN` / `_ALBUM_PEAK`
+  （`include/core/constants.h:87-92`）；
+- 模式 `Off / Track / Album`，两套 preamp（有标签 / 无标签）；
+- **`PreventClipping`**：增益后按峰值收窄（`enginedefs.h` 的 `RGProcess`）。
+
+本仓库的天然适配点：第 19 轮已经有常驻 `GainNode`，标签本来就用 `music-metadata` 读
+（它已把 `"-6.50 dB"` 归一化为 `{dB, ratio}` —— **实测确认**后才动手）。
+
+### 5.29.2 实现
+
+- **宿主**：`Track` 加 4 个字段（未测量时 `null`）；`readFiniteDb` / `readFinitePeak` 只接受有限数
+  （标签来自文件，是不可信输入）。
+- **客户端**：`source → rgGain → volumeGain → destination` —— **两个增益节点分离**，否则淡入淡出
+  与响度归一化会互相覆盖。`rgForTrack()` 做增益数学 + 防削波；`applyReplayGain()` 在**切曲前**应用。
+  回退路径（无音频图）把 RG 折进元素音量，且 `readVolume()` 把它**除回去**（否则渐变起点错）。
+- **UI**：播放器里一个 `RG` 按钮循环 `off → track → album`（前级不进 UI，走 API）。
+- **门禁**：`scripts/test-replaygain.mjs`（15 条）+ 注册进 `run-all`（30 套）。
+
+### 5.29.3 本轮抓到的真缺陷：**§2.7 的「四个副本」其实是五个**
+
+字段在宿主解析出来了、`Track` 类型也加了，**但 `payloadTracksFor()` 的 `Track → PayloadTrack`
+白名单投影没加** ⇒ 下发永远是 `undefined`。门禁 A1–A3 当场变红；**负向对照①**就是把投影删掉，
+结果 A1–A5 全红 —— 证明这条断言真的有判别力。
+
+⇒ 已写进 §2.20 的引用块：**给 `Track` 加字段必须同时改 `PayloadTrack` 与客户端 `MusicTrack`。**
+
+### 5.29.4 负向对照（每条都重建产物）
+
+| 对照 | 结果 |
+| --- | --- |
+| 删掉投影白名单里的 RG 字段 | A1–A5 **红**（`rgTrackGainDb=undefined`） |
+| `RG_PREVENT_CLIPPING = false` | B6 **红**（`rgGain=2.66` 而不是收窄到 `1.012`） |
+| 不建独立 RG 节点（源直接接音量） | B1 **红**（顺序错），且暴露我的套件缺节点时会崩 → 已加 NaN 替身守卫 |
+| 回退路径不折 RG 进元素音量 | B9 **红**（`elementVolume=1` 而不是 `0.473`） |
+
+### 5.29.5 连带修复（不是放宽断言）
+
+- `test-audio-fade` A2 因为 `applyReplayGain` **多写了一次「值没变」的音量**而红 ⇒ 改实现：
+  RG 未变时不再重复写（**冗余写入会让断言失去分辨力**）。
+- `test-audio-graph` B3 红 ⇒ 发现它的假 `createGain()` **每次返回同一个节点**（真实 API 每次是新
+  节点）。这是**夹具不保真**（§9 陷阱 4），改夹具；新增第二个增益后才暴露出来。
+
+---
+
+## 5.30 第 21 轮的**数据丢失事故**：`git checkout <路径>` 回滚了未提交的实现
+
+### 5.30.1 发生了什么
+
+跑「往源码塞一个行尾空格」的负向对照时，我用
+
+```bash
+printf 'const x = 1; \n' >> src/client.ts && node scripts/check-whitespace.mjs | head -3
+git checkout src/client.ts          # ← 想「还原」
+```
+
+`git checkout <路径>` 从**索引**恢复文件，而索引里是**上一次 commit**的版本 ⇒ 它把整个
+`src/client.ts` 的 ReplayGain 实现（约 120 行）**连未提交的真改动一起回滚**了。
+`rgForTrack` / `rgGainNode` / `RG_PREVENT_CLIPPING` 全部变成 0 命中。
+
+### 5.30.2 怎么恢复的（可复现的恢复路径）
+
+关键：**`lib/client.js` 是那次丢失源码编译出来的产物**，还在磁盘上（只是 `src` 被回滚）。
+
+1. `cp lib/client.js /tmp/lost-client.js` —— 先备份「丢失源码的产物」；
+2. 重放 `Patch A`（10 处编辑）与 `Patch B`（10 处编辑）—— 都是本轮真实执行过的补丁；
+3. `tsc` 重新编译；
+4. `diff /tmp/lost-client.js lib/client.js` ⇒ **逐字节一致**（唯一差异是我随后清理的那一个
+   行尾空格）⇒ **恢复逐字忠实**，不是「看起来差不多」。
+
+### 5.30.3 沉淀（已进 §9 陷阱 12）
+
+- **禁止**用 `git checkout <路径>` 撤销「临时改坏文件做对照」。
+- 做对照前后一律 **`cp 文件 /tmp/xxx.bak` 再 `cp` 回来**；对照脚本里也不要出现任何
+  「从仓库恢复」的命令。
+- 附带教训：**产物不只是产物** —— 在源丢失时，它是唯一能证明「恢复是否忠实」的参照物。
+  这也让「提交 `lib/`」这条既有取舍多了一个理由。
+
+---
+
+## 5.31 门禁设计缺陷：`git diff --check` 在产物上给出**无法修复**的失败
+
+### 5.31.1 问题
+
+`AGENTS.md` §3 一直写着「跑 `git diff --check`」，但它是**人工纪律、不是门禁**，而且：
+
+- `lib/client.js` 里 tsc 的 JSX 输出会在部分行尾留空格 —— **HEAD 实测就有 16 处**；
+- 而手改 `lib/` **违反 §2.15**（`check-build-fresh` 逐字节比对会立刻判红）。
+
+⇒ 「产物有行尾空白」在现行规则下**无解**。本轮我改到其中一行（加 `rgButton`），
+`git diff --check` 就把那个**先前就存在**的空格报成新增问题。
+
+### 5.31.2 修法：把纪律变成门禁，并明确排除产物
+
+新增 `scripts/check-whitespace.mjs`，接入 `npm test` 与 CI：
+
+- 扫**全树**（不依赖 diff 基，CI 里同样有效）；
+- **排除 `lib/` 与 `pnpm-lock.yaml`**，理由写在脚本文件头（产物质量由 `check-build-fresh` 保证）；
+- 带**非空护栏**：扫描到的文本文件数 < 20 就判失败 —— 防止「0 命中」其实是因为遍历坏了
+  （§6.1 第 3 条：0 命中必须先校准搜索面）。
+
+CI 的「Whitespace and conflict markers」步骤改为调用同一脚本（原先只查冲突标记），
+**本地与 CI 判据现在完全一致**。
+
+### 5.31.3 对照
+
+塞行尾空格 → 红（定位到 `src/client.ts:4288`）· 塞冲突标记 → 红（`scripts/run-all.mjs:58`）。
+全树（排除产物）存量行尾空白实测 **0**，所以门禁从第一天起就是干净的。

@@ -40,6 +40,11 @@ interface MusicTrack {
   kind?: string | null;
   /** 视频编码（用于判断能否直出，见 host 的 mvPlan）。 */
   videoCodec?: string | null;
+  /** ReplayGain 标准标签（宿主从 music-metadata 归一化后下发）；null/缺省 = 未测量。 */
+  rgTrackGainDb?: number | null;
+  rgTrackPeak?: number | null;
+  rgAlbumGainDb?: number | null;
+  rgAlbumPeak?: number | null;
 }
 
 /** 在线补全结果（localStorage `dsh-music:meta`）：只覆盖显示，不写回文件。 */
@@ -117,6 +122,11 @@ interface PlayerState {
   time: number;
   duration: number;
   volume: number;
+  /** ReplayGain：模式与前级增益（dB）。`off` 表示完全不干预响度。 */
+  rgMode: "off" | "track" | "album";
+  rgPreampDb: number;
+  /** 当前曲目**实际生效**的增益（dB）；null = 未启用或该曲目未测量。 */
+  rgTrackDb: number | null;
   query: string;
   /** 在线补全结果：id → { title?, artist?, album?, cover? }。 */
   meta: Record<string, MetaEntry>;
@@ -153,6 +163,8 @@ interface PlaybackPrefs {
   sortDir?: string;
   /** 上次播放位置（换目录/刷新后回补）。 */
   last?: { id: string; time: number } | undefined;
+  rgMode?: string;
+  rgPreampDb?: number;
 }
 
 /** 可见列表（筛选 + 排序后的行序）里的一行。 */
@@ -231,6 +243,8 @@ interface MusicPlayerApi {
   next(): void;
   prev(): void;
   seek(value: number): void;
+  /** ReplayGain：模式（'off' | 'track' | 'album'）与可选前级增益（dB）。 */
+  setReplayGain(mode: string, preampDb?: number): void;
   /** 预热 /session（媒体直连基址）。 */
   warmSession(): void;
   /** MV 画面：React 侧把这个媒体元素搬进全屏播放器的舞台。 */
@@ -500,6 +514,10 @@ window.__ModuleLoader__.load({
       "action.play": "播放",
       "action.pause": "暂停",
       "action.volume": "音量",
+      "rg.label": "响度归一化（ReplayGain）",
+      "rg.off": "关闭",
+      "rg.track": "单曲",
+      "rg.album": "专辑",
       "player.open": "打开播放器",
       "player.close": "收起播放器",
       "player.queue": "接下来播放",
@@ -569,6 +587,10 @@ window.__ModuleLoader__.load({
       "action.play": "Play",
       "action.pause": "Pause",
       "action.volume": "Volume",
+      "rg.label": "ReplayGain loudness normalisation",
+      "rg.off": "Off",
+      "rg.track": "Track",
+      "rg.album": "Album",
       "player.open": "Open player",
       "player.close": "Collapse player",
       "player.queue": "Continue Playing",
@@ -694,7 +716,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-zoomable{cursor:zoom-in}
 .dshm-lightbox{position:fixed;inset:0;z-index:80;justify-content:center;align-items:center;background:rgba(0,0,0,.72);-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);display:flex}
 .dshm-lightboxImg{max-width:min(88vw,900px);max-height:86vh;object-fit:contain;border-radius:14px;box-shadow:0 30px 80px rgba(0,0,0,.55)}
-/* MV 放大模式：点画面后视频铺大（右栏队列让位），整套控制条仍在下方 —— 
+/* MV 放大模式：点画面后视频铺大（右栏队列让位），整套控制条仍在下方 ——
    尺寸夹在播放器区域内，永远不会超出 desktop。 */
 .dshm-player--mvbig .dshm-playerBody{grid-template-columns:minmax(0,1fr);padding:0 26px 22px}
 .dshm-player--mvbig .dshm-playerRight{display:none}
@@ -818,6 +840,9 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-right{min-width:0;justify-content:flex-end;align-items:center;gap:10px;display:flex}
 .dshm-mode{cursor:pointer;height:26px;color:var(--dsw-alias-label-secondary);border:1px solid var(--dsw-alias-border-l2);background:transparent;border-radius:7px;flex:none;align-items:center;gap:5px;padding:0 9px;font:inherit;font-size:11px;display:inline-flex}
 .dshm-mode:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+/* ReplayGain 按钮：与模式按钮同款，只在开启时高亮，未开启时保持安静 */
+.dshm-rg{font-weight:600;letter-spacing:.02em;min-width:34px;justify-content:center}
+.dshm-rg--on{color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-primary)}
 .dshm-volume{width:88px;flex:none}
 /* 全屏播放器顶部那条音量按 macOS 的长条比例（底部条不变，仍是 88px） */
 .dshm-volume--wide{width:180px}
@@ -1132,6 +1157,22 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         document.body.appendChild(mediaPark);
         mediaPark.appendChild(audio);
       }
+      /**
+       * ReplayGain（响度归一化）。做法与 fooyin 一致：**只读标准标签、不改文件**；
+       * 未测量过的曲目**不做任何增益**（不是当 0dB 用）。
+       * 增益走**独立节点**，与用户音量串成 `source → rgGain → volumeGain → destination` ——
+       * 这样淡入淡出（写音量节点）与响度归一化（写 RG 节点）互不覆盖。
+       */
+      const RG_PREAMP_MIN_DB = -15;
+      const RG_PREAMP_MAX_DB = 15;
+      /** 标签来自文件，可能荒谬：夹住范围（不可信输入）。 */
+      const RG_GAIN_MIN_DB = -40;
+      const RG_GAIN_MAX_DB = 40;
+      /** 峰值只用于**收窄**增益；超过这个数当标签损坏，不用它。 */
+      const RG_PEAK_MAX = 4;
+      /** 防削波（fooyin 的 PreventClipping）：默认**恒开**。增益可能把峰值推过满刻度。 */
+      const RG_PREVENT_CLIPPING = true;
+
       const prefs = loadPrefs();
       let state: PlayerState = {
         dir: null,
@@ -1161,6 +1202,12 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         time: 0,
         duration: 0,
         volume: typeof prefs.volume === "number" && prefs.volume >= 0 && prefs.volume <= 1 ? prefs.volume : 1,
+        // 默认 off：归一化会改变用户听到的响度，必须由用户显式打开。
+        rgMode: prefs.rgMode === "track" || prefs.rgMode === "album" ? prefs.rgMode : "off",
+        rgPreampDb: typeof prefs.rgPreampDb === "number" && Number.isFinite(prefs.rgPreampDb)
+          ? Math.max(RG_PREAMP_MIN_DB, Math.min(RG_PREAMP_MAX_DB, prefs.rgPreampDb))
+          : 0,
+        rgTrackDb: null,
         query: "",
         /** 在线补全结果：id → { title?, artist?, album?, cover? }。 */
         meta: loadMeta(),
@@ -1651,6 +1698,10 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       let gainNode: GainNode | null = null;
       let graphDisabled = false;
       let crossOriginCorsOk: boolean | null = null;
+      /** RG 增益节点，**独立于**音量节点（见 RG 常量处的说明）。 */
+      let rgGainNode: GainNode | null = null;
+      /** 当前生效的 RG 线性增益（1 = 不动）。回退路径要把它折进元素音量。 */
+      let rgLinear = 1;
       const graphOffByFlag = (() => {
         try {
           // 查询参数刻意**不叫** `dshm-*`：静态审计按约定把 `dshm-` 前缀当 CSS 类
@@ -1695,10 +1746,15 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           const gain = ctx.createGain();
           gain.gain.value = 0;
           gain.connect(ctx.destination);
+          // RG 节点串在媒体源与音量节点之间：两个增益互不覆盖（淡入淡出只写音量节点）。
+          const rg = ctx.createGain();
+          rg.gain.value = 1;
           // 一个媒体元素只能建一次 source；建不上就永久退回元素音量。
-          ctx.createMediaElementSource(audio).connect(gain);
+          ctx.createMediaElementSource(audio).connect(rg);
+          rg.connect(gain);
           audioCtx = ctx;
           gainNode = gain;
+          rgGainNode = rg;
           return true;
         } catch (error) {
           graphDisabled = true;
@@ -1731,12 +1787,58 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           audio.volume = 1;                              // 元素音量中性，真正的增益在图里
           gainNode.gain.value = v;
         } else {
-          audio.volume = v;
+          // 回退路径只有**一个**旋钮：响度归一化必须折进来，否则 RG 静默失效。
+          audio.volume = Math.max(0, Math.min(1, v * rgLinear));
         }
       };
       const readVolume = (): number => {
         if (gainNode !== null) return Number.isFinite(gainNode.gain.value) ? gainNode.gain.value : 0;
-        return Number.isFinite(audio.volume) ? audio.volume : 0;
+        const raw = Number.isFinite(audio.volume) ? audio.volume : 0;
+        // 元素音量里含着 RG，读回来要**除回去**，否则渐变会从被 RG 缩过的值起步。
+        return rgLinear > 0 ? Math.max(0, Math.min(1, raw / rgLinear)) : raw;
+      };
+
+      /**
+       * 当前曲目该用的 ReplayGain。与 fooyin 一致：
+       * ① 只读标准标签、不改文件；② 未测量过 → 1（**不做增益**，不是当 0dB 用）；
+       * ③ Track / Album 两种模式，Album 缺标签回退 Track；
+       * ④ 防削波：增益后峰值可能越过满刻度，按 peak **收窄**增益。
+       */
+      const rgForTrack = (track: MusicTrack | undefined): { linear: number; db: number | null } => {
+        if (track === undefined || state.rgMode === "off") return { linear: 1, db: null };
+        const album = state.rgMode === "album";
+        const rawDb = album
+          ? (Number.isFinite(track.rgAlbumGainDb) ? track.rgAlbumGainDb : track.rgTrackGainDb)
+          : track.rgTrackGainDb;
+        if (typeof rawDb !== "number" || !Number.isFinite(rawDb)) return { linear: 1, db: null };
+        const gainDb = Math.max(RG_GAIN_MIN_DB, Math.min(RG_GAIN_MAX_DB, rawDb));
+        const preampDb = Math.max(RG_PREAMP_MIN_DB, Math.min(RG_PREAMP_MAX_DB, state.rgPreampDb));
+        const db = gainDb + preampDb;
+        let linear = Math.pow(10, db / 20);
+        const rawPeak = album
+          ? (Number.isFinite(track.rgAlbumPeak) ? track.rgAlbumPeak : track.rgTrackPeak)
+          : track.rgTrackPeak;
+        if (RG_PREVENT_CLIPPING && typeof rawPeak === "number" && Number.isFinite(rawPeak)
+          && rawPeak > 0 && rawPeak <= RG_PEAK_MAX) {
+          linear = Math.min(linear, 1 / rawPeak);
+        }
+        return { linear, db };
+      };
+
+      /** 把 RG 落到图上（或折进回退路径的元素音量）。切曲与改设置都要调。 */
+      const applyReplayGain = () => {
+        const next = rgForTrack(state.tracks[state.current]);
+        if (rgGainNode !== null) rgGainNode.gain.value = next.linear;
+        // 回退路径的 RG 折在**元素音量**里，所以 RG 没变就不必再写一次 ——
+        // 冗余写入会让「起播前不得有渐变写入」这类断言失去分辨力（test-audio-fade A2）。
+        if (next.linear === rgLinear) {
+          set({ rgTrackDb: next.db });
+          return;
+        }
+        const user = readVolume();     // 必须**先**读：readVolume 依赖旧的 rgLinear
+        rgLinear = next.linear;
+        applyVolume(user);
+        set({ rgTrackDb: next.db });
       };
 
       /** 取消在飞的渐变；被取消的那个 promise 以 `false` 结算（不会挂住调用方）。 */
@@ -1838,6 +1940,8 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             if (sameOrigin) audio.removeAttribute("crossorigin");
             else audio.crossOrigin = "anonymous";
           }
+          // 切曲前把该曲目的 ReplayGain 落到图上：晚一步就会先按上一首的增益出声。
+          applyReplayGain();
           audio.src = url;
           const promise = audio.play();
           if (promise === undefined) {
@@ -2785,6 +2889,19 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           set({ volume: value });
           savePrefs({ volume: value });
         },
+        /**
+         * ReplayGain：模式（'off' | 'track' | 'album'）与可选前级增益（dB，省略则不变）。
+         * 未测量的曲目**不做增益** —— 想统一推高请用前级，而不是把它当 0dB。
+         */
+        setReplayGain: (mode, preampDb) => {
+          const nextMode = mode === "track" || mode === "album" ? mode : "off";
+          const nextPreamp = typeof preampDb === "number" && Number.isFinite(preampDb)
+            ? Math.max(RG_PREAMP_MIN_DB, Math.min(RG_PREAMP_MAX_DB, preampDb))
+            : state.rgPreampDb;
+          set({ rgMode: nextMode, rgPreampDb: nextPreamp });
+          savePrefs({ rgMode: nextMode, rgPreampDb: nextPreamp });
+          applyReplayGain();
+        },
         toggleMode: () => {
           const mode = state.mode === "loop" ? "one" : "loop";
           set({ mode });
@@ -3495,6 +3612,24 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       const visibleTracks = player.visibleRows();
       const volumePct = Math.round(state.volume * 100);
 
+      /**
+       * ReplayGain 按钮：点一下循环 `off → track → album`（与 fooyin 的三种模式一致）。
+       * 前级增益属进阶设置，不进 UI —— 用 `player.setReplayGain(mode, preampDb)` 设。
+       * 标签用缩写「RG」，完整含义在 tooltip 与 aria-label 里（两处都走字典）。
+       */
+      const rgModeLabel = state.rgMode === "album"
+        ? t("rg.album")
+        : (state.rgMode === "track" ? t("rg.track") : t("rg.off"));
+      const rgButton = (placement) => withTipWrapped(h("button", {
+        type: "button",
+        className: "dshm-mode dshm-rg" + (state.rgMode === "off" ? "" : " dshm-rg--on"),
+        onClick: (event) => {
+          event.stopPropagation();
+          player.setReplayGain(state.rgMode === "off" ? "track" : (state.rgMode === "track" ? "album" : "off"));
+        },
+        "aria-label": t("rg.label") + ": " + rgModeLabel,
+      }, "RG"), t("rg.label") + " · " + rgModeLabel, placement);
+
       // 滚轮：音量条 ±5%（进度条的滚轮在 ProgressBar 内处理）。
       const volumeWheelRef = useWheelHandler((event) => {
         const delta = (event.deltaY < 0 ? 0.05 : -0.05);
@@ -3684,6 +3819,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
               "aria-label": t("action.volume"),
               onChange: (event) => player.setVolume(Number(event.target.value)),
             }), t("action.volume") + " " + volumePct + "%", "bottom"),
+            rgButton("bottom"),
           ),
         ),
         h("div", { className: "dshm-playerBody" },
@@ -3962,6 +4098,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             "aria-label": t("action.volume"),
             onChange: (event) => player.setVolume(Number(event.target.value)),
           }), t("action.volume") + " " + volumePct + "%"),
+          rgButton("top"),
         ),
       );
 

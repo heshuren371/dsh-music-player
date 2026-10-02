@@ -69,6 +69,7 @@ cd .. && dsh plugin --profile web add link:./dsh-music-player
 - MV 三档判定 `direct` / `remux` / `transcode`（参考 Jellyfin），后两档调用 ffmpeg 并把产物缓存在临时目录。**没有 ffmpeg 也能用**：直出格式照常播，其余给出安装提示
 - 在线补全元数据：宿主并行查询 QQ 音乐 / iTunes / 网易云，置信不足时用 MusicBrainz 兜底；勾选后写回标签并按「歌手 - 原名」重命名文件
 - 一键补全全部：逐首限速、进度可见、可随时停止
+- 响度归一化（ReplayGain）：读文件内嵌的 `REPLAYGAIN_*` 标准标签，提供**单曲 / 专辑**两种模式与前级增益，防削波默认开启。**不修改文件、不自行扫描测量** —— 没有标签的曲目不做任何增益
 - 系统集成：MediaSession（媒体键与 macOS 控制中心 / 锁屏「正在播放」）以及换曲原生通知
 - Apple 离线包（`.movpkg`）是 FairPlay 加密的 HLS，任何第三方播放器都无法解密，扫描时整体跳过并在统计里说明
 
@@ -98,7 +99,7 @@ cd .. && dsh plugin --profile web add link:./dsh-music-player
 ```sh
 pnpm run build          # src/*.ts → lib/*.js
 pnpm run typecheck      # 类型棘轮：错误数只许变少（基线 0，含死代码开关）
-npm test                # 产物新鲜度 + 逐文件严格 + 29 套回归
+npm test                # 产物新鲜度 + 逐文件严格 + 30 套回归
 pnpm run check:manifest # dsh-plugin.json 对 pinned dsh-std Community v0.15 校验
 ```
 

@@ -144,17 +144,25 @@ function makeFakeAudioContext(log, { throwOnSource = false, state = 'running' } 
       this.sampleRate = 48000;   // 固定采样率就是常驻音频图的全部意义，夹具必须给出来
       this.currentTime = 1;
       this.destination = { id: 'destination' };
-      this.gain = {
+      this._n = 0;
+    }
+    // ⚠️ 每次必须是**新节点**：真实 createGain() 就是这样。先前返回同一个对象，
+    // 两个增益（音量 / ReplayGain）会互相覆盖 —— 夹具不保真，断言就没有判别力（§9 陷阱 4）。
+    createGain() {
+      const id = 'gain' + (++this._n);
+      const node = {
+        id,
         gain: {
           value: 0,
           cancelScheduledValues: (t) => log.push({ op: 'cancel', t }),
-          setValueAtTime: (v, t) => { this.gain.gain.value = v; log.push({ op: 'setValue', v, t }); },
-          linearRampToValueAtTime: (v, t) => { this.gain.gain.value = v; log.push({ op: 'ramp', v, t }); },
+          setValueAtTime: (v, t) => { node.gain.value = v; log.push({ op: 'setValue', v, t }); },
+          linearRampToValueAtTime: (v, t) => { node.gain.value = v; log.push({ op: 'ramp', v, t }); },
         },
-        connect: (to) => log.push({ op: 'connect', to: to.id }),
+        connect: (to) => log.push({ op: 'connect', to: to && to.id }),
       };
+      log.push({ op: 'createGain', id });
+      return node;
     }
-    createGain() { log.push({ op: 'createGain' }); return this.gain; }
     createMediaElementSource() {
       log.push({ op: 'createSource' });
       if (throwOnSource) throw new Error('no media source');

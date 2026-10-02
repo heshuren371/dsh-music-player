@@ -75,9 +75,6 @@ jobs:
           exit $status
 
       - name: Whitespace and conflict markers
-        run: |
-          if git grep -nI -E '^(<<<<<<< |=======$|>>>>>>> )' -- . ':!pnpm-lock.yaml'; then
-            echo "::error::发现冲突标记残留"
-            exit 1
-          fi
-          echo "no conflict markers"
+        # 本步骤原先只查冲突标记；现在调用 scripts/check-whitespace.mjs：
+        # 同一套判据 + 行尾空白，且**本地与 CI 完全一致**（脚本里排除了产物 lib/，原因见其文件头）。
+        run: node scripts/check-whitespace.mjs

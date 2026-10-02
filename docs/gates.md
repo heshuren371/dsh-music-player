@@ -1,0 +1,34 @@
+# 门禁总表（按轮次）
+
+> 本表原在 `AGENTS.md` §6.3。**第 21 轮移到这里**：`AGENTS.md` 有 64 KiB 注入预算，撞上后
+> 尾部会被**静默截断**（已实测，见 AGENTS.md §11）。规则与判据留在 `AGENTS.md`，**逐条门禁的
+> 覆盖面**放这里。新增门禁时同时更新本表与 `AGENTS.md` §8 的不变量索引。
+
+"必建" 的含义：该门禁已判定为可机械校验但**尚未实现**；实现后按 §6.1 第 7 条会**先变红**，
+届时按 §6.2 登记待修，**不得放宽断言**。
+
+| 门禁 | 断言 | 归属轮次 | 覆盖 |
+| --- | --- | --- | --- |
+| `声明面一致性` | `dsh-plugin.json` 的 `endpoints`、`lib/index.js` 的 `FETCH_ROUTES`、`lib/host.js` 的分派表**三向集合相等**（不是单向 `expected.every()`）；`expected` 必须**从分派表推导**而非手工抄 | 1/2/4 | `A1-01`/`A2-03`/`A4-01` |
+| `传输面覆盖` | 每个功能套件至少有一个用例打**生产使用的传输面**（默认 `connection.fetch`），不得只打旧前缀 | 2 | `A2-03` |
+| `释放面完整性` | **第 15 轮已实现**（`test-leak.mjs`）：8 次热重载后 ① fd 不增长 ② 无孤儿子进程 ③ `dispose()` 后 1.5s 内 CPU≈0 ④ heap 增长有界（阈值由正对照标定） | 1/3/15 | `A1-03` |
+| `死代码` | **第 15 轮已实现**：`tsconfig.json` 永久开启 `noUnusedLocals` + `noUnusedParameters`（开启前全仓仅 5 处，已清）。新增未使用声明会直接让 `typecheck` 变红 | 15 | `A2-15` |
+| `停止后无自续期定时器` | teardown 后 3 s 内 fetch 次数不增；`getState().scanning === false` | 3 | `A3-01` |
+| `teardown 优先于在飞重载` | 挂起 `import()` 期间触发 disposer，断言不再创建 host（`fs.stat`/`import` 计数不增、tag worker 未启动、有回滚或明确降级而非静默空窗） | 1/3 | `A1-04`/`A3-02` |
+| `客户端 release 面` | teardown 后 `window.__dshMusicPlayer === undefined` 且 `.dshm-mvPark` 不在 DOM；二次 activation 不复用第一次的媒体元素 | 3 | `A3-03`/`A3-04` |
+| `ctx 读取面一致性` | `ctx.get('X')` / `ctx.<svc>` / `ctx.inject([...])` 的服务名集合 ⊆ manifest `requires.contracts` + `permissions`（静态，建议并入 `test-audit.mjs`） | 3/4/5 | `A3-05`/`A4-03`/`A5-05` |
+| `契约坐标可解析` | 每个 `requires.contracts` 的 `{apiVersion,kind}` 能在 pinned definition catalog 解析；且**至少一条 `required`** | 4 | `A4-02`/`A4-03`/`A4-06` |
+| `prefix 语义一致` | `HttpPrefixRoutes` 声明的 `prefix` 必须等于 `webServer.register` 的 path | 4 | `A4-05` |
+| `凭据不进日志` | 触发一次带 `?t=` 的请求，断言**任何落盘文件**都不含该 token 值；且 `lib/` 无未声明的写盘点（搜索面见 §2.9） | 2/5 | `A2-01`/`A5-01` |
+| `自建 token 三律` | ①同一 token 不得同时通过 `art` 与 `stream` ②基址 hostname 恒为回环字面量 ③无 `isSystemPath` 式栅栏豁免 | 5 | `A5-02`/`A5-03` |
+| `错误面脱敏` | 触发 `fs` 错误与「文件不存在」路径，断言响应体**不含绝对路径与文件名** | 1/5 | `A1-05`/`A5-09` |
+| `声明面覆盖实际调用` | 从 `lib/` 抽取的 fs / net / host 面 ⊆ manifest 声明面；新增写盘路径必须落在已声明 scope 内 | 5 | `A5-06`/`A5-08` |
+| `副作用前置授权` | 每个 `fs.unlink` / `fs.rename` / tagwriter 投递的调用链上先经同一 `authorize(action, scope)` | 5 | `A5-04` |
+| `存储失败不得报成功` | 只读 `$DSH_HOME` 时，断言响应含**稳定未持久化错误码**，而不是 `200 + 数据` | 5 | `A5-09` |
+| `恒绿断言扫描` | 静态禁止 `check(…, true)` 字面真断言；「跳过」必须能与「通过」区分（非零退出或显式 skip 计数） | 2 | `A2-10`/`A2-11`/`A2-13` |
+| `空白与冲突标记` | **第 21 轮已实现**（`scripts/check-whitespace.mjs`，接入 `npm test` 与 CI）：全树扫行尾空白与冲突标记，**排除产物 `lib/`**（tsc 会在 JSX 行尾留空格，而改 `lib/` 违反 §2.15 ⇒ 该失败按规则无法修复），并带**非空护栏**（扫描文件数 <20 判失败，防「0 命中」不含信息）。负向对照：塞行尾空格 → 红 · 塞冲突标记 → 红 | 21 | §3 §9 |
+| `门禁诊断可用` | `run-all.mjs` 失败时必须打印失败套件的 stderr | 2 | `A2-12` |
+| `视图卸载不丢全屏播放器` | **第 16 轮已实现**（`test-view-persistence.mjs`）：开全屏（含 MV 放大）→ 卸载视图 → store 仍 `open` 且媒体停在 body → 重新挂载 → 全屏播放器 / 放大布局 / 同一个 `<video>` 全部回来；收起动画跨卸载仍走完；`halt()` 复位 | 16 | §2.17 |
+| `音频不得硬切换` | **第 18 轮已实现，第 20 轮按 fooyin 校准**（`test-audio-fade.mjs`）：首播 30ms 内挂源（不等淡出）；换源前必须**多步**淡到 ~0；换源后淡回用户值；暂停前先淡出；淡入途中改音量不被覆盖；连切后渐变已结算；`halt()` 后不再写 `audio.volume`；**H1** 手动切歌淡出 ≥200ms（fooyin 300）· **H2** 曲末自动 ≥500ms（fooyin 700）· **seek** 淡出→seek→淡回（`test-audio-graph` B14/B15） | 18/20 | §2.18 |
+| `ReplayGain 响度归一化` | **第 21 轮已实现**（`test-replaygain.mjs`，15 条）：宿主下发四项标签且**未测量为 null**；客户端 `off` 默认不干预；track/album 增益数学；前级叠加；**防削波按峰值收窄**；**未测量曲目不做增益**；两个增益**互不覆盖**（节点顺序 源→RG→音量）；回退路径把 RG 折进元素音量；模式持久化。负向对照：删投影白名单 → A1–A5 红 · 关防削波 → B6 红 · 不建独立节点 → B1 红 · 回退丢弃 RG → B9 红 | 21 | §2.20 |
+| `音频常驻输出流 + 媒体 CORS` | **第 19 轮已实现**（`test-audio-graph.mjs`）：起播建**一个**常驻 AudioContext 且换歌不重建；元素音量置中性、增益在图里；同源**不设** crossOrigin / 跨源**必须**带；未确认 CORS 前**不建图**；建图失败与 `?musicGraph=0` 均回退；`halt()` 只 suspend。宿主侧：窄名单回显 ACAO（非名单**一个头都不给**）、媒体端点应答 `OPTIONS` 预检、平台路由拒绝跨源预检 | 19 | §2.19 |

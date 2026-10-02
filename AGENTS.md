@@ -16,7 +16,7 @@ DSH 的本地音乐播放器插件，**Web + Desktop 同一份包**。`src/*.ts`
 
 ```bash
 pnpm run build && pnpm run typecheck   # 编译 + 类型棘轮（基线 0，含死代码开关）
-npm test                               # 产物新鲜度 + 逐文件严格 + 29 套回归
+npm test                               # 产物新鲜度 + 逐文件严格 + 30 套回归
 pnpm run check:manifest                # 只在动了 dsh-plugin.json 时必跑
 ```
 
@@ -37,7 +37,7 @@ pnpm run check:manifest                # 只在动了 dsh-plugin.json 时必跑
 
 1. 改了 `src/` → 跑过 `pnpm run build`
 2. `pnpm run typecheck` 0 错误（含 `noUnusedLocals`/`noUnusedParameters`：死代码直接红）
-3. `npm test` 29 套全绿
+3. `npm test` 30 套全绿
 4. 新增功能/修复 → **在 `scripts/run-all.mjs` 注册了回归套件**（没注册等于没门禁）
 5. 新增断言 → **做过对照**：把缺陷改回去，断言必须变红（§6.1 第 7 条）
 6. 改了文档 → README ≤ 220 行，深度材料进 `docs/`（§7.2）
@@ -230,7 +230,7 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 
 `storage.zh.md:83`「失败的 cleanup 不得报告为已完成」是**通用形态**，适用所有持久化/副作用路径：
 
-- **吞掉写失败后仍返回成功是违规**。现状 `A5-09`：`saveState` 全量吞错（`lib/host.js:1042-1044`）后 `/dir` 仍返回 `200 + dir`（`:1769-1776`）。
+- **吞掉写失败后仍返回成功是违规**。现状 `A5-09`：`saveState` 全量吞错后 `/dir` 仍返回 `200`。
 - **持久化层必须有稳定错误码**（`storage.zh.md:87-93` 的五个码目前**一个都没有**），不能只靠
   「有没有抛异常」表达。
 
@@ -387,13 +387,34 @@ pause `{in=120,out=120}` · stop `{in=120,out=300}`。**本仓库采用同一组
 - **建图后必须把元素音量置中性**：建图前写的是元素音量（首播时是 0），建图后增益在图里 ——
   不置中性就是「元素 0 × 增益」= **第一次起播静音**（比电流声严重，被本轮门禁抓到）。
 - **音频图 `halt()` 只 suspend 不 close** —— close 之后这个媒体元素再也接不回音频图。
-- **`AudioContext` 的 `sampleRate` 在创建时就固定**（howler.js 为此专门 close 重建 ctx）。
-  所以 ctx 必须在**第一次播放时**才建，并且要把它的 `sampleRate` / `state` **打到诊断里** ——
-  否则「设备在页面打开之后才换（插耳机）」这类场景无法从外部判断（§2.16：在行为发生的那一刻记）。
-- **诊断只记数字与状态**（sampleRate / state / 通过与否），**绝不记 URL 或 token**（§2.9）——
-  该约束由门禁 B13 钉死。
-- **`location` 一律写 `window.location`**：bundle 由宿主 eval，「裸 `location` 能否解析」取决于
-  宿主作用域。
+- **`AudioContext` 的 `sampleRate` 创建时即固定**（howler.js 为此专门 close 重建 ctx）：所以 ctx
+  必须在**第一次播放时**才建，并把 `sampleRate`/`state` 打进诊断（§2.16），否则「打开页面之后才
+  插耳机」这类场景无法从外部判断。诊断**只记数字与状态**，绝不记 URL/token（§2.9，门禁 B13 钉死）。
+- **`location` 一律写 `window.location`**：bundle 由宿主 eval，裸 `location` 的解析取决于宿主作用域。
+
+### 2.20 ReplayGain：标签是**不可信输入**，增益必须走**独立节点**（第 21 轮沉淀）
+
+本仓库**只读标准标签**（`REPLAYGAIN_TRACK_GAIN` / `_ALBUM_GAIN` / `_PEAK`），**不改文件**，
+也不自己扫描测量。做法与 fooyin 一致（它是 GPL-3.0、本仓库 MIT：**只借鉴做法，不抄代码**）。
+
+- **未测量 ≠ 0dB**。`REPLAYGAIN_*` 缺失时增益必须是 **1（不做任何增益）**：把它当 0dB 等于
+  「声称已测量且无需调整」。`Track` 的四个字段未测量时一律 `null`，客户端见到 `null` 直接跳过。
+- **增益必须走独立节点**：`source → rgGain → volumeGain → destination`。否则淡入淡出（写音量
+  节点）与响度归一化（写 RG 节点）会**互相覆盖** —— 门禁 B8 钉死这条。
+- **回退路径要把 RG 折进元素音量**（图不可用时只有一个旋钮），并且 `readVolume()` 要把它
+  **除回去**，否则渐变会从被 RG 缩过的值起步。
+- **防削波默认恒开**：增益后峰值可能越过满刻度，按 `peak` **收窄**增益（fooyin 的
+  `PreventClipping`）。**禁止**为了「响一点」去掉它 —— 门禁 B6 会红。
+- **标签是文件里来的，必须先收窄**：`typeof v !== 'number' || !Number.isFinite(v)`。
+  注意 `Number.isFinite` **不做类型收窄**，`strictNullChecks` 下必须显式判类型。
+- **范围要夹住**：增益 ±40dB、前级 ±15dB、峰值 ≤4（超出当损坏）。荒谬值只会变成刺耳或静音。
+- **`null` 标签在 payload 里也要是 `null`**（不是 undefined）：客户端据此区分「未测量」与「字段缺失」。
+
+> **§2.7 的「四个副本」实际是五个**：`Track` 类型 → **`PayloadTrack` 白名单投影** →
+> `lib/index.js` 的 `FETCH_ROUTES`（仅端点）→ `dsh-plugin.json` → 客户端 `MusicTrack`。
+> 本轮就栽在这里：字段在宿主解析出来了、类型也加了，但 **`payloadTracksFor()` 的 map 没加**
+> ⇒ 下发永远是 undefined，而门禁 A1–A3 立刻变红（负向对照①正是把投影删掉验证的）。
+> **给 `Track` 加字段时，必须同时改 `PayloadTrack` 与客户端 `MusicTrack`。**
 
 ## 3. 可跑门禁
 
@@ -402,13 +423,16 @@ pause `{in=120,out=120}` · stop `{in=120,out=300}`。**本仓库采用同一组
 ```bash
 pnpm run build                # src/*.ts → lib/*.js（改了 src 必须跑）
 pnpm run typecheck            # 类型棘轮：错误数只许变少（基线 0）
-npm test                      # 产物新鲜度 + 逐文件严格 + 29 套回归
+npm test                      # 产物新鲜度 + 逐文件严格 + 30 套回归
                               # = check-build-fresh && check-strict && run-all
 pnpm run check:manifest       # dsh-plugin.json 对 pinned Community v0.15 校验
-git diff --check              # 空白/冲突标记
+node scripts/check-whitespace.mjs   # 空白/冲突标记（`npm test` 已包含）
+                              # ⚠️ 它**排除 `lib/`**：tsc 的 JSX 输出会在部分行尾留空格（HEAD 实测 16 处），
+                              #    而手改 `lib/` 违反 §2.15 ⇒ 那个失败按规则**无法修复**。产物的
+                              #    质量由 `check-build-fresh`（逐字节比对）保证，不由空白门禁保证。
 ```
 
-`.github/workflows/ci.yml` 在每次 push / PR 上跑同一组门禁（`pnpm install --frozen-lockfile` → `typecheck` → 全部 `lib/*.js` 与 `scripts/*.mjs` 的 `node --check` → `npm test`（= 新鲜度 + 逐文件严格 + 29 套）→ manifest 校验 → 冲突标记扫描）。**CI 故意不先 build**：新鲜度门禁只在 `lib/` 未被就地覆盖时才有判别力。**CI 绿不等于 manifest 校验过**：CI 里没有 vendor 基线，`check:manifest` 会走 SKIP 分支并打 `::warning::` —— SKIP 不是通过（见上）。
+`.github/workflows/ci.yml` 在每次 push / PR 上跑同一组门禁（`pnpm install --frozen-lockfile` → `typecheck` → 全部 `lib/*.js` 与 `scripts/*.mjs` 的 `node --check` → `npm test`（= 新鲜度 + 逐文件严格 + 30 套）→ manifest 校验 → 冲突标记扫描）。**CI 故意不先 build**：新鲜度门禁只在 `lib/` 未被就地覆盖时才有判别力。**CI 绿不等于 manifest 校验过**：CI 里没有 vendor 基线，`check:manifest` 会走 SKIP 分支并打 `::warning::` —— SKIP 不是通过（见上）。
 
 - **只要动了 `dsh-plugin.json` 或 manifest 相关字段，`check:manifest` 是必跑项。** 它用固定 revision 的 `@dsh-std/manifest` 校验，不是照 `main` 分支。基线找不到时它以 **SKIP** 退出（exit 0 + 明确警告），**那不是通过**——用 `DSH_STD_MANIFEST=/path/to/@dsh-std/manifest/lib/index.js` 指过去。
 - 新增功能**必须**在 `scripts/run-all.mjs` 的 `suites` 里注册回归套件；没注册等于没有门禁。
@@ -441,7 +465,7 @@ git diff --check              # 空白/冲突标记
 
 **逐轮要点见台账**（第 7–19 轮的维度、证据与结论都在 `docs/audit-ledger.md` 的 §5.11–§5.25）。
 
-**当前状态（第 20 轮）**：高危 **13 → 0**，只剩中/低与**明确接受项**（§10）；套件 18 → **29**
+**当前状态（第 20 轮）**：高危 **13 → 0**，只剩中/低与**明确接受项**（§10）；套件 18 → **30**
 （全绿、每条新门禁都做过对照）；类型错误 **243 → 0** 且基线锁 0；审计维度全覆。
 自推翻的记录（**不得覆盖，只能新写**）：`D-05` 误标「已修」、`A1-02` 的冷却设计、第 13 轮自愈的修法。
 
@@ -477,29 +501,14 @@ git diff --check              # 空白/冲突标记
 
 **第 8 轮已实现 4 条**：`声明面一致性`（`test-route-consistency.mjs`）、`凭据不进日志`（`test-audit.mjs` ⑦）、`停止后无自续期定时器`（`test-poll-teardown.mjs`）、`teardown 优先于在飞重载`（`test-teardown-race.mjs`）。其余仍待建；按 §6.1 第 7 条实现后**会先变红**，届时按 §6.2 登记待修、**不得放宽断言**。
 
-| 门禁 | 断言 | 归属轮次 | 覆盖 |
-| --- | --- | --- | --- |
-| `声明面一致性` | `dsh-plugin.json` 的 `endpoints`、`lib/index.js` 的 `FETCH_ROUTES`、`lib/host.js` 的分派表**三向集合相等**（不是单向 `expected.every()`）；`expected` 必须**从分派表推导**而非手工抄 | 1/2/4 | `A1-01`/`A2-03`/`A4-01` |
-| `传输面覆盖` | 每个功能套件至少有一个用例打**生产使用的传输面**（默认 `connection.fetch`），不得只打旧前缀 | 2 | `A2-03` |
-| `释放面完整性` | **第 15 轮已实现**（`test-leak.mjs`）：8 次热重载后 ① fd 不增长 ② 无孤儿子进程 ③ `dispose()` 后 1.5s 内 CPU≈0 ④ heap 增长有界（阈值由正对照标定） | 1/3/15 | `A1-03` |
-| `死代码` | **第 15 轮已实现**：`tsconfig.json` 永久开启 `noUnusedLocals` + `noUnusedParameters`（开启前全仓仅 5 处，已清）。新增未使用声明会直接让 `typecheck` 变红 | 15 | `A2-15` |
-| `停止后无自续期定时器` | teardown 后 3 s 内 fetch 次数不增；`getState().scanning === false` | 3 | `A3-01` |
-| `teardown 优先于在飞重载` | 挂起 `import()` 期间触发 disposer，断言不再创建 host（`fs.stat`/`import` 计数不增、tag worker 未启动、有回滚或明确降级而非静默空窗） | 1/3 | `A1-04`/`A3-02` |
-| `客户端 release 面` | teardown 后 `window.__dshMusicPlayer === undefined` 且 `.dshm-mvPark` 不在 DOM；二次 activation 不复用第一次的媒体元素 | 3 | `A3-03`/`A3-04` |
-| `ctx 读取面一致性` | `ctx.get('X')` / `ctx.<svc>` / `ctx.inject([...])` 的服务名集合 ⊆ manifest `requires.contracts` + `permissions`（静态，建议并入 `test-audit.mjs`） | 3/4/5 | `A3-05`/`A4-03`/`A5-05` |
-| `契约坐标可解析` | 每个 `requires.contracts` 的 `{apiVersion,kind}` 能在 pinned definition catalog 解析；且**至少一条 `required`** | 4 | `A4-02`/`A4-03`/`A4-06` |
-| `prefix 语义一致` | `HttpPrefixRoutes` 声明的 `prefix` 必须等于 `webServer.register` 的 path | 4 | `A4-05` |
-| `凭据不进日志` | 触发一次带 `?t=` 的请求，断言**任何落盘文件**都不含该 token 值；且 `lib/` 无未声明的写盘点（搜索面见 §2.9） | 2/5 | `A2-01`/`A5-01` |
-| `自建 token 三律` | ①同一 token 不得同时通过 `art` 与 `stream` ②基址 hostname 恒为回环字面量 ③无 `isSystemPath` 式栅栏豁免 | 5 | `A5-02`/`A5-03` |
-| `错误面脱敏` | 触发 `fs` 错误与「文件不存在」路径，断言响应体**不含绝对路径与文件名** | 1/5 | `A1-05`/`A5-09` |
-| `声明面覆盖实际调用` | 从 `lib/` 抽取的 fs / net / host 面 ⊆ manifest 声明面；新增写盘路径必须落在已声明 scope 内 | 5 | `A5-06`/`A5-08` |
-| `副作用前置授权` | 每个 `fs.unlink` / `fs.rename` / tagwriter 投递的调用链上先经同一 `authorize(action, scope)` | 5 | `A5-04` |
-| `存储失败不得报成功` | 只读 `$DSH_HOME` 时，断言响应含**稳定未持久化错误码**，而不是 `200 + 数据` | 5 | `A5-09` |
-| `恒绿断言扫描` | 静态禁止 `check(…, true)` 字面真断言；「跳过」必须能与「通过」区分（非零退出或显式 skip 计数） | 2 | `A2-10`/`A2-11`/`A2-13` |
-| `门禁诊断可用` | `run-all.mjs` 失败时必须打印失败套件的 stderr | 2 | `A2-12` |
-| `视图卸载不丢全屏播放器` | **第 16 轮已实现**（`test-view-persistence.mjs`）：开全屏（含 MV 放大）→ 卸载视图 → store 仍 `open` 且媒体停在 body → 重新挂载 → 全屏播放器 / 放大布局 / 同一个 `<video>` 全部回来；收起动画跨卸载仍走完；`halt()` 复位 | 16 | §2.17 |
-| `音频不得硬切换` | **第 18 轮已实现，第 20 轮按 fooyin 校准**（`test-audio-fade.mjs`）：首播 30ms 内挂源（不等淡出）；换源前必须**多步**淡到 ~0；换源后淡回用户值；暂停前先淡出；淡入途中改音量不被覆盖；连切后渐变已结算；`halt()` 后不再写 `audio.volume`；**H1** 手动切歌淡出 ≥200ms（fooyin 300）· **H2** 曲末自动 ≥500ms（fooyin 700）· **seek** 淡出→seek→淡回（`test-audio-graph` B14/B15） | 18/20 | §2.18 |
-| `音频常驻输出流 + 媒体 CORS` | **第 19 轮已实现**（`test-audio-graph.mjs`）：起播建**一个**常驻 AudioContext 且换歌不重建；元素音量置中性、增益在图里；同源**不设** crossOrigin / 跨源**必须**带；未确认 CORS 前**不建图**；建图失败与 `?musicGraph=0` 均回退；`halt()` 只 suspend。宿主侧：窄名单回显 ACAO（非名单**一个头都不给**）、媒体端点应答 `OPTIONS` 预检、平台路由拒绝跨源预检 | 19 | §2.19 |
+| 轮次 | 已实现的门禁（详细断言见 [`docs/gates.md`](docs/gates.md)） |
+| --- | --- |
+| 8–15 | 声明面一致性 · 传输面覆盖 · 释放面完整性 · 死代码（`noUnusedLocals`/`noUnusedParameters`）· 停止后无自续期定时器 · teardown 优先于在飞重载 · 客户端 release 面 · 恒绿断言扫描 · 门禁诊断可用 |
+| 16 / 18–21 | 视图卸载不丢全屏播放器 · 音频不得硬切换（时长按 fooyin 校准）· 音频常驻输出流 + 媒体 CORS · **ReplayGain 响度归一化** |
+| 待建 | `ctx 读取面一致性` · `契约坐标可解析` · `prefix 语义一致` · `凭据不进日志`（落盘面已覆盖）· `错误面脱敏` · `声明面覆盖实际调用` · `副作用前置授权` · `存储失败不得报成功`（`A5-09`） |
+
+**逐条断言、覆盖的审计条目与负向对照证据 → [`docs/gates.md`](docs/gates.md)。**
+
 
 ## 7. 文档分层与关系
 
@@ -511,6 +520,7 @@ git diff --check              # 空白/冲突标记
 | `docs/desktop.md` | 改宿主接缝 / 排查 Desktop 问题的人 | 两代宿主形态差异、macOS 通知与「正在播放」的能力边界与验证方法、官方组件与图标命名演变、媒体直连（token 通道）的原因、技术名称表 | 与 Desktop 无关的内容 |
 | `docs/compatibility.md` | DSH STORE 收录 / 供应链与权限审查 | 声明位置与取值、逐版本依据、尚未提供的证据、已知断点、依赖、权限与代码信号的对应关系、外部服务、失败边界、**端点面与信任边界**（README 在这里链接） | 使用说明 |
 | `AGENTS.md`（本文件） | 改代码的人与 agent | 规范基线、不可协商的规则（§2）、可跑门禁（§3）、既有约定（§4）、审计与迭代协议（§6） | 台账正文（已移出） |
+| `docs/gates.md` | 改代码 / 查门禁的人 | **门禁总表**（逐条断言、覆盖的审计条目、负向对照证据）。第 21 轮从 `AGENTS.md` §6.3 移出 | 规则本身（在 `AGENTS.md`） |
 | `docs/audit-ledger.md` | 审计者 | 逐轮台账全文（证据、复现、符合项清单、编号裁定） | 规则本身 |
 | `docs/images/` | README 读者 | 真机截图（音乐标签页 / 全屏 MV）。**README 顶部引用**；新增截图请降采样到 1600px 宽再入库 | —— |
 | `dsh-plugin.json` `x-dsh-transition` | 跨版本核对者 | 接缝的实测记录。**升级 DSH 后按运行中的应用核对，不要按本地 checkout。** | —— |
@@ -551,6 +561,7 @@ git diff --check              # 空白/冲突标记
 | I-14 | 跨视图切换要保留的 UI 状态只在 player store；视图驱动的定时器归资源所有者 | 切回音乐页看到列表页 / 卡在 closing | `test-view-persistence` | §2.17 |
 | I-15 | 每次过渡都淡入淡出（换源 / 启播 / 暂停 / **seek**），时长取 fooyin 默认（300/700/120ms）；无声音可淡时必须保持同步 | 耳机里的「电流声」/ 起播时序整体后移 | `test-audio-fade`、`test-audio-graph` | §2.18 |
 | I-16 | 音频必须有**常驻固定采样率**的输出流；跨源接 Web Audio 必须先确认 CORS；建图后元素音量置中性 | 切歌/起播的「电流声」/ 静音 / 首次起播无声 | `test-audio-graph` | §2.19 |
+| I-17 | ReplayGain 走**独立节点**；未测量 → 不做增益（≠0dB）；增益按峰值收窄；标签先收窄再夹范围 | 响度跳变 / 互相覆盖 / 削波失真 / NaN 静音 | `test-replaygain` | §2.20 |
 
 ## 9. 已知陷阱速查
 
@@ -569,6 +580,9 @@ git diff --check              # 空白/冲突标记
 11. **「本地全绿」≠「已进仓库」** —— 第 16 轮的修复在工作区放了两轮没提交，而文档已在声称完成，
     第 17 轮推出去的代码里没有它（台账 §5.24）。**每轮收口必须看 `git status --short`**；
     `git add -A` 之后只列出少数文件，本身就是异常信号。
+12. **禁止用 `git checkout <路径>` 撤销「临时改坏文件做对照」** —— 索引里是上一次 commit 的版本，
+    这条命令会**连未提交的真改动一起回滚**。第 21 轮就这么丢掉过整个 `src/client.ts` 的
+    ReplayGain 实现（台账 §5.30）。**做对照前后一律 `cp 文件 /tmp/xxx.bak` 再还原**。
 
 ## 10. 明确接受的设计取舍（**不要「顺手修好」**）
 

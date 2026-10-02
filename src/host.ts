@@ -45,6 +45,15 @@ interface Track {
   width: number | null;
   height: number | null;
   tagged: boolean;
+  /**
+   * ReplayGain：**标准标签**（`REPLAYGAIN_TRACK_GAIN` 等），由 music-metadata 归一化成
+   * `{dB, ratio}`。未测量过就是 null —— 客户端对 null **不做任何增益**（不是当 0dB 用）。
+   * dB 用于增益，peak 用于防削波（增益后峰值可能越界）。
+   */
+  rgTrackGainDb: number | null;
+  rgTrackPeak: number | null;
+  rgAlbumGainDb: number | null;
+  rgAlbumPeak: number | null;
 }
 
 /** 一次完整扫描的结果；`scannedAt` 变化即代表库内容已更新（payload 缓存据此失效）。 */
@@ -66,6 +75,11 @@ interface PayloadTrack {
   tagged: boolean;
   kind: 'audio' | 'video';
   videoCodec: string | null;
+  /** ReplayGain：Track → PayloadTrack 是**白名单投影**，漏加就永远下发不出去。 */
+  rgTrackGainDb: number | null;
+  rgTrackPeak: number | null;
+  rgAlbumGainDb: number | null;
+  rgAlbumPeak: number | null;
 }
 
 /** 封面：只有 mime 过白名单、且未超字节上限的才会走到这里。 */
@@ -1412,6 +1426,10 @@ async function readMetadata(file: ScannedFile): Promise<Track> {
     tagged: false,
     /** 库内稳定 id（相对根目录的路径）；scanLibrary 扫描收尾时回填。 */
     id: '',
+    rgTrackGainDb: null,
+    rgTrackPeak: null,
+    rgAlbumGainDb: null,
+    rgAlbumPeak: null,
   };
   try {
     const metadata = await parseFile(file.path, { duration: true, skipCovers: true });
@@ -1423,6 +1441,12 @@ async function readMetadata(file: ScannedFile): Promise<Track> {
     const hasArtist = typeof artist === 'string' && artist.trim().length > 0;
     if (hasArtist) track.artist = artist.trim();
     track.tagged = hasTitle && hasArtist;
+    // ReplayGain：music-metadata 已把 `"-6.50 dB"` 归一化为 {dB, ratio}。
+    // **只接受有限数**：标签来自文件，可能是任何字符串（不可信输入）。
+    track.rgTrackGainDb = readFiniteDb(common.replaygain_track_gain);
+    track.rgAlbumGainDb = readFiniteDb(common.replaygain_album_gain);
+    track.rgTrackPeak = readFinitePeak(common.replaygain_track_peak);
+    track.rgAlbumPeak = readFinitePeak(common.replaygain_album_peak);
     if (typeof metadata.format.duration === 'number' && Number.isFinite(metadata.format.duration)) {
       track.duration = Math.round(metadata.format.duration * 10) / 10;
     }
@@ -1446,6 +1470,18 @@ async function readMetadata(file: ScannedFile): Promise<Track> {
     // Unparseable/corrupt tags still list and stream; fall back to filename info.
   }
   return track;
+}
+
+/** ReplayGain 增益：`{dB}` 有限才采用，否则 null（未测量 / 标签损坏）。 */
+function readFiniteDb(value: { dB?: number } | undefined): number | null {
+  const db = value?.dB;
+  return typeof db === 'number' && Number.isFinite(db) ? db : null;
+}
+
+/** ReplayGain 峰值：`{ratio}`，必须为正的有限数（0 与负值无意义）。 */
+function readFinitePeak(value: { ratio?: number } | undefined): number | null {
+  const ratio = value?.ratio;
+  return typeof ratio === 'number' && Number.isFinite(ratio) && ratio > 0 ? ratio : null;
 }
 
 /** Characters illegal (or dangerous) in a cross-platform filename. */
@@ -1956,6 +1992,10 @@ function createHost(ctx) {
       // MV 相关：客户端据此显示 MV 标识，并在播放前问 /mv 该怎么出画面。
       kind: track.kind === 'video' ? 'video' : 'audio',
       videoCodec: track.videoCodec ?? null,
+      rgTrackGainDb: track.rgTrackGainDb,
+      rgTrackPeak: track.rgTrackPeak,
+      rgAlbumGainDb: track.rgAlbumGainDb,
+      rgAlbumPeak: track.rgAlbumPeak,
     }));
     payloadTracksSource = result;
     payloadTracksScannedAt = result.scannedAt;
