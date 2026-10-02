@@ -219,7 +219,9 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 
 本插件不走 DSH 的 permission grant，而是**自建路径凭证**（`?t=<randomUUID>`）。自建 bearer token 必须满足三条，缺一即等于把读能力挂在一个不该挂的入口上：
 
-1. **按用途分签**：一个 token **不得**同时授权两类权限。原来是同一个 token 既授权取封面（`art`）又授权**任意库内曲目全量读**（`stream`）—— 第 9 轮已拆成 `systemArtToken` / `systemStreamToken` 两个独立随机值，交叉使用 403（`A5-02` 已修）。**仍待修**：token 在进程生命周期内不过期、无轮换、不按 session 区分，唯一撤销边界仍是 `createHost()` 闭包销毁。
+1. **按用途分签**：一个 token **不得**同时授权两类权限。第 9 轮已拆成 `systemArtToken` /
+   `systemStreamToken` 两个独立随机值，交叉使用 403（`A5-02` 已修）。**仍待修**：token 不过期、
+   无轮换、不按 session 区分，唯一撤销边界仍是 `createHost()` 闭包销毁。
 2. **基址钉回环字面量，不得回显请求 Host**：原来 `lib/host.js` 的 `/session` 直接用请求 Host 拼基址 —— 第 9 轮改为 `loopbackAuthority(req)`：只取 Host 的**端口**，主机名固定 `127.0.0.1`（`A5-03` 已修）。
 3. **被豁免 Host/Origin 栅栏的端点**（`lib/host.js` 的 `system-*`）**不得承担读能力**，且其凭证**不得进入任何持久通道**（日志、文件、localStorage）。豁免必须**只到 Origin / Sec-Fetch 为止** —— 第 9 轮新增 `isLoopbackHostRequest`，Host 非回环一律 403（`A5-03` 已修）。
 
@@ -409,6 +411,19 @@ pause `{in=120,out=120}` · stop `{in=120,out=300}`。**本仓库采用同一组
   注意 `Number.isFinite` **不做类型收窄**，`strictNullChecks` 下必须显式判类型。
 - **范围要夹住**：增益 ±40dB、前级 ±15dB、峰值 ≤4（超出当损坏）。荒谬值只会变成刺耳或静音。
 - **`null` 标签在 payload 里也要是 `null`**（不是 undefined）：客户端据此区分「未测量」与「字段缺失」。
+- **只读标签不够**：本机曲库实测 **0/40 首**带 `REPLAYGAIN_*` 标签 ⇒ 必须有**测量**这条兜底。
+  测法用 ffmpeg 的 `ebur128=peak=true`（只读，**绝不写回音频文件**），增益 = `-18 LUFS` − 实测积分
+  响度（ReplayGain 2.0 参考电平，与 `loudgain` 一致）。结果存插件自己的缓存
+  （`$DSH_HOME/storages/dsh-music-player-rg.json`），带 `size`+`mtimeMs` 做失效判断。
+- **优先级是标签 > 测量**。两者都在时用标签（标签是权威，测量只是兜底）；负向对照实测：
+  把顺序反过来 B12 立刻变红。
+- **全静音 ≠ 测量失败**：真峰值是 `-inf`（读不出有限值）时**不做增益、也不猜**，计入 `skipped`
+  而不是 `failed`（当 0dB 用会得出 +52dB 的荒谬增益 —— 对照⑧实测）。
+- **测量必须可取消、且随实例停止**：ffmpeg 子进程要在 `dispose()` 里 `SIGKILL`，否则热重载后
+  它会继续跑到结束（I-06 孤儿进程）；`rgJob` 状态必须放在 **createHost 内**（module 级可变状态
+  在热重载下会被不可回收的 ESM 条目永久钉住，§2.2）。
+- **失败原因要分类且不含路径**（`ffmpeg-not-found` / `spawn-error` / `timeout` /
+  `loudness-not-readable:exit=N,len=N` / `silent-track`）：全失败时这才是可诊断的信息（§2.8 脱敏）。
 
 > **§2.7 的「四个副本」实际是五个**：`Track` 类型 → **`PayloadTrack` 白名单投影** →
 > `lib/index.js` 的 `FETCH_ROUTES`（仅端点）→ `dsh-plugin.json` → 客户端 `MusicTrack`。

@@ -57,7 +57,7 @@
       "endpoints": [
         "GET|HEAD /library",
         "GET|HEAD /session",
-        "POST /refresh",
+        "POST /refresh", "GET|POST /measure",
         "POST /dir",
         "GET|HEAD /cover",
         "GET|HEAD /match",

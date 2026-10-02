@@ -27,10 +27,16 @@ const check = (label, ok, detail) => {
 };
 
 // ── 1. 从 host.js 分派表推导（唯一事实来源）────────────────────────────
-const AWAY = 'pathname === ';
 const dispatch = new Map();
-for (const m of host.matchAll(/pathname === '(\/api\/dsh-music\/[a-z-]+)'(?:\s*&&\s*req\.method === '([A-Z]+)')?/g)) {
-  dispatch.set(m[1], m[2] ?? 'GET');
+// 收集**同一条件表达式里**出现的所有 `req.method === 'X'`：多方法写法写成
+// `(req.method === 'POST' || req.method === 'GET')` 时，旧的正则只认紧跟在路径后的单方法，
+// 结果把方法数读成 0 并误报「注册了 POST 但 handler 是 GET」。这是**推断能力**的加强
+// （能表达更多真实写法），不是放宽判据：声明了 handler 不处理的方法仍然会红。
+for (const m of host.matchAll(/pathname === '(\/api\/dsh-music\/[a-z-]+)'([^{;]*)/g)) {
+  const found = [...m[2].matchAll(/req\.method === '([A-Z]+)'/g)].map((x) => x[1]);
+  const methods = found.length > 0 ? [...new Set(found)] : ['GET'];
+  const prev = dispatch.get(m[1]);
+  dispatch.set(m[1], prev === undefined ? methods : [...new Set([...prev, ...methods])]);
 }
 check('host.js dispatch table is non-trivial', dispatch.size >= 15, dispatch.size + ' endpoints');
 
@@ -63,9 +69,9 @@ const methodProblems = [];
 for (const [path, methods] of FETCH_ROUTES) {
   const dispatched = dispatch.get(path);
   if (dispatched === undefined) { methodProblems.push(path + ': no handler'); continue; }
-  const allowed = new Set([dispatched, ...(dispatched === 'GET' ? ['HEAD'] : [])]);
+  const allowed = new Set([...dispatched, ...(dispatched.includes('GET') ? ['HEAD'] : [])]);
   if (methods.length === 0 || methods.some((m) => !allowed.has(m))) {
-    methodProblems.push(path + ': registered [' + methods.join(',') + '] vs handler ' + dispatched);
+    methodProblems.push(path + ': registered [' + methods.join(',') + '] vs handler [' + dispatched.join(',') + ']');
   }
 }
 check('registered methods match the host handler method', methodProblems.length === 0, methodProblems.join(' ; '));

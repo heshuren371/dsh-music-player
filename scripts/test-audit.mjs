@@ -263,5 +263,18 @@ check('MusicView never references createPlayer locals (retry must not throw Refe
   mvViewLine >= 0 && mvRefTotal > 0 && mvRefAfterView.length === 0,
   mvViewLine < 0 ? 'MusicView not found' : 'mvEscalated referenced inside MusicView at source line(s) ' + mvRefAfterView.map((r) => r.i + 1).join(', '));
 
+// ── 释放面接线（静态）────────────────────────────────────────────────────────
+// `dispose()` 必须停掉**所有持有子进程**的任务。为什么这条是静态的：子进程是否真被杀
+// 在行为上不容易稳定观测（要造一个「刚好还在跑」的测量任务，慢且易抖）；
+// 而「接线被删掉」是这类事故的直接成因（孤儿 ffmpeg 继续写临时目录，A1-03）。
+// 行为面另有 test-replaygain 的 C8（teardown 后端点不再服务）——
+// **它并不能证明子进程被杀**，所以这里补上接线检查，两者合起来才是完整覆盖。
+const disposeStart = host.indexOf('function dispose()');
+const disposeBody = disposeStart < 0 ? '' : host.slice(disposeStart, host.indexOf('\n    }', disposeStart));
+check('dispose() 停掉所有持子进程的任务（MV 与 ReplayGain 测量）',
+  disposeStart >= 0 && disposeBody.includes('killAllMvJobs(') && disposeBody.includes('stopRgMeasure('),
+  disposeStart < 0 ? 'dispose() not found'
+    : 'mv=' + disposeBody.includes('killAllMvJobs(') + ' measure=' + disposeBody.includes('stopRgMeasure('));
+
 console.log(failures === 0 ? 'ALL PASS' : failures + ' CHECK(S) FAILED');
 process.exit(failures === 0 ? 0 : 1);

@@ -16,10 +16,15 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
 import { createServer } from 'node:http';
+import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+// ⚠️ Part B 的 boot 会把 `globalThis.fetch` 换成 mock（客户端要用假宿主）。这里先**捕获真身**，
+// 否则后面的 Part C 会拿假 fetch 去打真宿主 —— 表现是「路由明明存在，却返回空对象 {}」。
+const nodeFetch = globalThis.fetch;
 
 let failures = 0;
 // 崩溃必须显式变成一条 FAIL：否则进程带着非零码死掉却没有任何输出（CI 上尤其致命）。
@@ -103,6 +108,18 @@ const TRACKS = [
   {
     index: 1, id: 'unmeasured.flac', name: 'unmeasured.flac', title: 'unmeasured', artist: 'x', duration: 200, kind: 'audio',
     rgTrackGainDb: null, rgTrackPeak: null, rgAlbumGainDb: null, rgAlbumPeak: null,
+  },
+  // 第 2 首：**没有标签，只有插件测量出来的值**（与 Part C 实测的 tone.flac 一致）
+  {
+    index: 2, id: 'tone.flac', name: 'tone.flac', title: 'tone', artist: 'x', duration: 200, kind: 'audio',
+    rgTrackGainDb: null, rgTrackPeak: null, rgAlbumGainDb: null, rgAlbumPeak: null,
+    rgMeasuredGainDb: 15.1, rgMeasuredPeak: 0.03126,
+  },
+  // 第 3 首：**标签与测量都有** —— 必须用标签（标签是权威，测量只是兜底）
+  {
+    index: 3, id: 'both.flac', name: 'both.flac', title: 'both', artist: 'x', duration: 200, kind: 'audio',
+    rgTrackGainDb: -6.5, rgTrackPeak: 0.988, rgAlbumGainDb: null, rgAlbumPeak: null,
+    rgMeasuredGainDb: 15.1, rgMeasuredPeak: 0.03126,
   },
 ];
 
@@ -276,6 +293,26 @@ async function boot({ fakeCtx = false } = {}) {
     })(), 'rgMode=' + b.state().rgMode);
 }
 
+// B11/B12：标签之外的第二条路（测量），以及两者同时存在时的优先级
+{
+  const b = await boot({ fakeCtx: true });
+  await act(async () => {
+    b.player.setReplayGain('track');
+    b.player.play(2);                       // 只有测量值的那首
+    await b.waitFor(() => b.log.filter((o) => o.op === 'src').length >= 1);
+  });
+  const rg = b.store[1];
+  check('B11: 没有标签时用**测量值**（+15.1dB → ×5.69；不带这个兜底，实测库里 0/40 有标签=空操作）',
+    near(rg.gain.value, dbToLinear(15.1), 0.02), 'rgGain=' + rg.gain.value + ' want=' + dbToLinear(15.1).toFixed(4));
+
+  await act(async () => {
+    b.player.play(3);                       // 标签与测量都有
+    await b.waitFor(() => b.log.filter((o) => o.op === 'src').length >= 2);
+  });
+  check('B12: 标签与测量同时存在时**标签优先**（-6.5dB，不是测量的 +15.1dB）',
+    near(rg.gain.value, dbToLinear(-6.5)), 'rgGain=' + rg.gain.value + ' want=' + dbToLinear(-6.5).toFixed(4));
+}
+
 // B9：回退路径（没有 AudioContext）—— RG 必须折进元素音量，否则静默失效
 {
   const b = await boot({ fakeCtx: false });
@@ -289,6 +326,143 @@ async function boot({ fakeCtx = false } = {}) {
   check('B9: 图不可用时把 RG 折进元素音量（1 × 0.4732），而不是丢掉',
     near(b.media.volume, dbToLinear(-6.5), 0.02),
     'elementVolume=' + b.media.volume + ' want=' + dbToLinear(-6.5).toFixed(4));
+}
+
+// ─────────────────────── Part C：测量（标签之外的第二条路）───────────────────────
+// 实测用户曲库 0/40 首带 REPLAYGAIN 标签 ⇒ 只读标签等于空操作。测量是让它真正生效的那一半。
+// 夹具 tone.flac 的响度是**独立量过并写死**的：I = -33.1 LUFS → 增益 = -18 - (-33.1) = +15.10 dB。
+const EXPECTED_TONE_GAIN_DB = 15.1;
+{
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'dshm-rgm-home-'));
+  const music = await fs.mkdtemp(path.join(os.tmpdir(), 'dshm-rgm-music-'));
+  process.env.DSH_HOME = home;
+  await fs.mkdir(path.join(home, 'storages'), { recursive: true });
+  await fs.writeFile(path.join(home, 'storages', 'dsh-music-player.json'), JSON.stringify({ dir: music }), 'utf8');
+  const fixturesC = fileURLToPath(new URL('./fixtures/', import.meta.url));
+  // ⚠️ **不能靠改 `process.env.DSH_HOME` 切目录**：`lib/host.js` 在模块加载时就把它固化成了
+  // `const DSH_HOME = process.env.DSH_HOME`，本进程早已加载过 ⇒ 改了也没用，宿主仍读旧的
+  // 状态文件（实测症状：Part C 测的是 Part A 目录里的两个静音文件，lufs=-70）。
+  // 正确做法是走**真实传输面** `POST /dir`（它同时会重扫）。
+  await fs.copyFile(path.join(fixturesC, 'tone.flac'), path.join(music, 'tone.flac'));
+  await fs.copyFile(path.join(fixturesC, 'tiny.flac'), path.join(music, 'silent.flac'));
+
+  let handlerC = null;
+  const mod = await import(new URL('../lib/index.js', import.meta.url).href + '?rg-measure');
+  // `effect` 返回的是清理函数（宿主 dispose 挂在它上面）。照 test-teardown.mjs 的做法**收集**它们，
+  // 否则 `apply()` 的返回值不是 dispose（第一版就是这么写错的：`mod.dispose is not a function`）。
+  const cleanups = [];
+  mod.apply({
+    effect: (fn, label) => {
+      const disposer = fn();
+      if (typeof disposer === 'function') cleanups.push({ label, disposer });
+      return disposer;
+    },
+    get: () => undefined,
+    webServer: { register: (route) => { handlerC = route.handler; return () => {}; } },
+  });
+  const serverC = createServer((req, res) => { handlerC(req, res).catch((e) => { if (!res.headersSent) res.writeHead(500).end(String(e)); }); });
+  await new Promise((r) => serverC.listen(0, '127.0.0.1', r));
+  const baseC = 'http://127.0.0.1:' + serverC.address().port + '/dsh-music';
+
+  // 显式把宿主切到本段的目录（见上面的注释）。
+  await nodeFetch(baseC + '/api/dir', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ dir: music }),
+  });
+
+  let libC = null;
+  for (let i = 0; i < 600; i += 1) {
+    const body = await (await nodeFetch(baseC + '/api/library')).json().catch(() => null);
+    if (body && Array.isArray(body.tracks) && body.tracks.length >= 2 && !body.scanning) { libC = body; break; }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  check('C0: 测量夹具的库扫描完成', libC !== null && libC.tracks.length === 2, libC === null ? 'timeout' : 'tracks=' + libC.tracks.length);
+  if (libC === null) { serverC.close(); process.exit(1); }
+
+  // GET 只读状态，**不得**顺手启动一轮测量
+  const idleRes = await nodeFetch(baseC + '/api/measure');
+  const idleText = await idleRes.text();
+  const idle = JSON.parse(idleText || '{}');
+  check('C1: GET /measure 只报状态，不启动测量', idleRes.status === 200 && idle.running === false && idle.done === 0,
+    idleRes.status + ' ' + idleText.slice(0, 120));
+
+  // ffmpeg 是测量的前提；它不在就明确 SKIP（**不等于通过**）
+  const probe = spawnSync('ffmpeg', ['-version'], { encoding: 'utf8' });
+  const hasFfmpeg = probe.status === 0;
+  if (!hasFfmpeg) {
+    console.log('SKIP Part C 的测量断言：本机没有 ffmpeg（**SKIP ≠ 通过**）。端点形状与 teardown 仍已断言。');
+  }
+
+  const started = await (await nodeFetch(baseC + '/api/measure', { method: 'POST' })).json();
+  // POST **立即**返回，此时异步任务还没扫描出 total —— 断言只要求「已经在跑」，
+  // 真实计数由 C3 断言（写死 total===2 是我第一版写错的断言，不是实现的问题）。
+  check('C2: POST /measure 立即返回进行中的状态（不阻塞请求）', started.running === true,
+    JSON.stringify(started));
+  let status = started;
+  for (let i = 0; i < 600 && status.running; i += 1) {
+    await new Promise((r) => setTimeout(r, 100));
+    status = await (await nodeFetch(baseC + '/api/measure')).json();
+  }
+  check('C3: 测量跑完并汇报计数', status.running === false && status.done === 2, JSON.stringify(status));
+
+  libC = await (await nodeFetch(baseC + '/api/library')).json();
+  const tone = libC.tracks.find((t) => t.name === 'tone.flac');
+  const silent = libC.tracks.find((t) => t.name === 'silent.flac');
+  if (hasFfmpeg) {
+    check('C4: 测量值随 payload 下发，且等于独立量出的响度换算值（+15.10 dB）',
+      tone !== undefined && typeof tone.rgMeasuredGainDb === 'number'
+        && Math.abs(tone.rgMeasuredGainDb - EXPECTED_TONE_GAIN_DB) <= 0.5,
+      'rgMeasuredGainDb=' + String(tone?.rgMeasuredGainDb));
+    check('C5: 测量出的峰值也下发（防削波要用它）',
+      tone !== undefined && typeof tone.rgMeasuredPeak === 'number' && tone.rgMeasuredPeak > 0,
+      'rgMeasuredPeak=' + String(tone?.rgMeasuredPeak));
+    check('C6: 全静音文件不产出测量值（峰值 -inf → 不猜，保持 null）',
+      silent !== undefined && silent.rgMeasuredGainDb === null,
+      'silent.rgMeasuredGainDb=' + String(silent?.rgMeasuredGainDb));
+  }
+
+  // 幂等：已测且文件未变 → 直接跳过（重复点按几乎零成本）
+  const again = await (await nodeFetch(baseC + '/api/measure', { method: 'POST' })).json();
+  let status2 = again;
+  for (let i = 0; i < 600 && status2.running; i += 1) {
+    await new Promise((r) => setTimeout(r, 100));
+    status2 = await (await nodeFetch(baseC + '/api/measure')).json();
+  }
+  if (hasFfmpeg) {
+    check('C7: 重复测量走缓存（skipped ≥ 1），且测量值不变',
+      status2.skipped >= 1 && Math.abs((await (await nodeFetch(baseC + '/api/library')).json())
+        .tracks.find((t) => t.name === 'tone.flac').rgMeasuredGainDb - EXPECTED_TONE_GAIN_DB) <= 0.5,
+      JSON.stringify(status2));
+  }
+
+  // teardown：测量任务必须随实例停止（否则热重载后 ffmpeg 继续跑 = 孤儿进程，I-06）
+  for (const entry of cleanups) entry.disposer();
+  const afterDispose = await (await nodeFetch(baseC + '/api/measure')).json().catch(() => null);
+  // teardown 之后宿主实例已被摘除（路由返回 error）—— 判据是「**不再在跑**」，
+  // 而不是「必须能读到 running:false」（那时端点可能已不可用）。
+  // ⚠️ 如实标注：这条**只证明**「teardown 后宿主实例被摘除、端点不再服务」，
+  // **不能**证明子进程被杀（负向对照实测：删掉 dispose 里的 stopRgMeasure，它照样通过）。
+  // 子进程 kill 的**接线**由 test-audit 的静态检查覆盖，两者合起来才是完整覆盖。
+  check('C8: dispose() 后测量端点不再服务（teardown 摘除实例；子进程 kill 由 test-audit 静态覆盖）',
+    afterDispose === null || afterDispose.running !== true, JSON.stringify(afterDispose));
+  serverC.close();
+
+  // 新实例必须是干净的：热重载会不断 createHost()，任务状态若跨实例残留，
+  // 界面会永远显示「正在测量」。
+  let handlerC2 = null;
+  const mod2 = await import(new URL('../lib/index.js', import.meta.url).href + '?rg-measure-2');
+  mod2.apply({
+    effect: (fn) => fn(),
+    get: () => undefined,
+    webServer: { register: (route) => { handlerC2 = route.handler; return () => {}; } },
+  });
+  const serverC2 = createServer((req, res) => { handlerC2(req, res).catch((e) => { if (!res.headersSent) res.writeHead(500).end(String(e)); }); });
+  await new Promise((r) => serverC2.listen(0, '127.0.0.1', r));
+  const fresh = await (await nodeFetch('http://127.0.0.1:' + serverC2.address().port + '/dsh-music/api/measure')).json();
+  check('C9: 新宿主实例的任务状态是干净的（不会有残留的「正在测量」）',
+    fresh.running === false && fresh.done === 0, JSON.stringify(fresh));
+  serverC2.close();
 }
 
 console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)');

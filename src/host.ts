@@ -21,6 +21,38 @@ interface ScannedFile {
   kind: 'audio' | 'video';
 }
 
+/** 一条测量结果。`size`/`mtimeMs` 用于判断文件是否变过（变了要重测）。 */
+interface RgEntry {
+  trackGainDb: number;
+  trackPeak: number;
+  size: number;
+  mtimeMs: number;
+  measuredAt: number;
+}
+
+/**
+ * ReplayGain 参考电平：**-18 LUFS**（ReplayGain 2.0 规范）。
+ * 增益 = 参考 − 实测积分响度（LUFS），与 `loudgain` 的做法一致。
+ */
+const RG_REFERENCE_LUFS = -18;
+
+/**
+ * 解析 `ffmpeg -af ebur128=peak=true` 的摘要输出（纯函数，便于用**真实 ffmpeg 输出**做门禁）。
+ * 摘要出现在末尾，所以要取**最后一次**匹配。峰值可能是 `-inf dBFS`（全静音）→ 返回 null，调用方跳过。
+ */
+function parseEbur128(text: string): { lufs: number; peakDb: number | null } | null {
+  const lufsMatches = [...text.matchAll(/I:\s*(-?\d+(?:\.\d+)?)\s*LUFS/g)];
+  if (lufsMatches.length === 0) return null;
+  const lufs = Number(lufsMatches[lufsMatches.length - 1][1]);
+  if (!Number.isFinite(lufs)) return null;
+  // 真峰值可能是 `-inf dBFS`（全静音）。那不是「读不出来」，而是「无可测内容」：
+  // 返回 peakDb=null 让调用方把它算作**跳过**，而不是失败。
+  const peakMatches = [...text.matchAll(/Peak:\s*(-?\d+(?:\.\d+)?)\s*dBFS/g)];
+  if (peakMatches.length === 0) return { lufs, peakDb: null };
+  const peakDb = Number(peakMatches[peakMatches.length - 1][1]);
+  return { lufs, peakDb: Number.isFinite(peakDb) ? peakDb : null };
+}
+
 /** 深度优先扫描的待访问目录（depth 用于 MAX_SCAN_DEPTH 截断）。 */
 interface ScanFrame {
   directory: string;
@@ -80,6 +112,9 @@ interface PayloadTrack {
   rgTrackPeak: number | null;
   rgAlbumGainDb: number | null;
   rgAlbumPeak: number | null;
+  /** 插件**测量**出来的增益/峰值（不是文件里的标签）；标签优先由客户端决定。 */
+  rgMeasuredGainDb: number | null;
+  rgMeasuredPeak: number | null;
 }
 
 /** 封面：只有 mime 过白名单、且未超字节上限的才会走到这里。 */
@@ -318,6 +353,8 @@ function processTokens() {
 /** 正在进行的 MV 任务：cacheKey → job（同 key 只跑一个）。 */
 const mvJobs = new Map<string, MvJob>();
 /** 终态任务的保留时长（够客户端轮询到结果）与容器容量上限。 */
+/** 单首测量超时：ebur128 通常远快于实时，超过这个数当卡住（避免任务永久挂着）。 */
+const RG_MEASURE_TIMEOUT_MS = 120 * 1000;
 const MV_JOB_TTL_MS = 10 * 60 * 1000;
 const MV_JOBS_MAX = 32;
 
@@ -1159,6 +1196,11 @@ const DSH_HOME = typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOM
   : path.join(os.homedir(), '.dsh');
 const STATE_DIR = path.join(DSH_HOME, 'storages');
 const STATE_FILE = path.join(STATE_DIR, 'dsh-music-player.json');
+/**
+ * ReplayGain **测量结果**的缓存（与状态分文件：它是可重建的派生数据，丢了只是要重测）。
+ * 刻意**不写进音频文件** —— 改用户的文件是不可逆副作用，见 AGENTS.md §2.20。
+ */
+const RG_STATE_FILE = path.join(STATE_DIR, 'dsh-music-player-rg.json');
 const LEGACY_STATE_FILE = fileURLToPath(new URL('./state.json', import.meta.url));
 
 function statusError(statusCode: number, message: string): StatusError {
@@ -1892,6 +1934,209 @@ function createHost(ctx) {
   /** Live scan progress for the UI (reset at every scan start). */
   const scanProgress = { parsed: 0, total: 0 };
 
+  /**
+   * ReplayGain 测量缓存与任务状态。
+   * 刻意放在 **createHost 内**（不是 module 级）：module 级可变状态在热重载下会被不可回收的
+   * ESM 条目永久钉住（§2.2、A1-03），而这里每次热重载重建、随实例丢弃即可。
+   */
+  let rgEntries: Map<string, RgEntry> | null = null;
+  /** 缓存世代：测量写入就 +1，payload 缓存据此失效（否则测完看不到新值）。 */
+  let rgGeneration = 0;
+  const rgJob = { running: false, done: 0, total: 0, failed: 0, skipped: 0, error: null as string | null, child: null as ChildProcess | null, cancelled: false };
+
+  async function loadRgEntries(): Promise<Map<string, RgEntry>> {
+    if (rgEntries !== null) return rgEntries;
+    const map = new Map<string, RgEntry>();
+    try {
+      const raw = JSON.parse(await fs.readFile(RG_STATE_FILE, 'utf8')) as { entries?: Record<string, RgEntry> };
+      for (const [id, entry] of Object.entries(raw.entries ?? {})) {
+        if (typeof entry?.trackGainDb === 'number' && Number.isFinite(entry.trackGainDb)) map.set(id, entry);
+      }
+    } catch {
+      // 不存在 / 损坏：测量结果可重建，不是错误（离线或首次运行都走这里）。
+    }
+    rgEntries = map;
+    return map;
+  }
+
+  async function saveRgEntries(): Promise<void> {
+    if (rgEntries === null) return;
+    const payload = JSON.stringify({ version: 1, entries: Object.fromEntries(rgEntries) });
+    const tmp = RG_STATE_FILE + '.tmp';
+    try {
+      await fs.mkdir(STATE_DIR, { recursive: true });
+      await fs.writeFile(tmp, payload, 'utf8');
+      await fs.rename(tmp, authorize('storage.local.write', RG_STATE_FILE, [STATE_DIR]));
+    } catch {
+      // 写失败不致命：内存里的结果本轮照用，下次重测即可（不要让它打断测量）。
+    }
+  }
+
+  /** 只读地跑一次 ebur128。**不改任何音频文件**，也不写临时目录。 */
+  function measureOne(filePath: string, diag: { reason: string | null }): Promise<{ trackGainDb: number; trackPeak: number } | { silent: true } | null> {
+    return new Promise((resolve) => {
+      const bin = findFfmpeg();
+      if (bin === null) {
+        diag.reason = 'ffmpeg-not-found';
+        resolve(null);
+        return;
+      }
+      let settled = false;
+      const finish = (value: { trackGainDb: number; trackPeak: number } | { silent: true } | null) => {
+        if (settled) return;
+        settled = true;
+        rgJob.child = null;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const child = spawn(bin, ['-hide_banner', '-nostdin', '-i', filePath, '-af', 'ebur128=peak=true', '-f', 'null', '-'], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      rgJob.child = child;
+      let stderr = '';
+      child.stderr?.on('data', (chunk) => {
+        // 摘要很长但只有末尾有用；保留尾部即可，避免整段日志常驻内存。
+        stderr = (stderr + String(chunk)).slice(-8192);
+      });
+      const timer = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // 可能已退出
+        }
+        diag.reason = 'timeout';
+        finish(null);
+      }, RG_MEASURE_TIMEOUT_MS);
+      child.on('error', () => {
+        diag.reason = 'spawn-error';
+        finish(null);
+      });
+      child.on('close', (code) => {
+        if (rgJob.cancelled) {
+          diag.reason = 'cancelled';
+          finish(null);
+          return;
+        }
+        const parsed = parseEbur128(stderr);
+        if (parsed === null) {
+          // 分类原因**不含路径**（§2.8 错误面脱敏），但带上退出码与 stderr 长度：
+          // 「全失败」时这两个数字足以区分「ffmpeg 报错」与「输出格式变了」。
+          diag.reason = 'loudness-not-readable:exit=' + String(code) + ',len=' + String(stderr.length);
+          finish(null);
+          return;
+        }
+        if (parsed.peakDb === null) {
+          // 全静音：稳定原因（客户端/UI 可据此区分「跳过」与「失败」）。
+          diag.reason = 'silent-track';
+          finish({ silent: true });
+          return;
+        }
+        finish({
+          trackGainDb: RG_REFERENCE_LUFS - parsed.lufs,
+          trackPeak: Math.pow(10, parsed.peakDb / 20),
+        });
+      });
+    });
+  }
+
+  /**
+   * 启动一轮测量。**顺序执行**（ffmpeg 已多线程，并发只会抢 CPU），
+   * 已测且文件未变（size+mtime 一致）的直接跳过，因此重复点按几乎零成本。
+   */
+  function startRgMeasure(): void {
+    if (rgJob.running) return;
+    const dir = currentDir;
+    if (dir === null) return;
+    rgJob.running = true;
+    rgJob.done = 0;
+    rgJob.total = 0;
+    rgJob.failed = 0;
+    rgJob.skipped = 0;
+    rgJob.error = null;
+    rgJob.cancelled = false;
+    void (async () => {
+      try {
+        const result = await startScan(dir);
+        const entries = await loadRgEntries();
+        const audio = (result?.tracks ?? []).filter((track) => track.kind === 'audio');
+        rgJob.total = audio.length;
+        for (const track of audio) {
+          if (rgJob.cancelled) break;
+          const filePath = path.join(dir, track.id);
+          let stat: { size: number; mtimeMs: number } | null = null;
+          try {
+            const info = await fs.stat(filePath);
+            stat = { size: info.size, mtimeMs: info.mtimeMs };
+          } catch {
+            stat = null;
+          }
+          const cached = entries.get(track.id);
+          if (stat !== null && cached !== undefined && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+            rgJob.skipped += 1;
+            rgJob.done += 1;
+            continue;
+          }
+          const diag: { reason: string | null } = { reason: null };
+          const measured = await measureOne(filePath, diag);
+          if (measured !== null && 'silent' in measured) {
+            // 全静音：没有可测内容，**不算失败**（它本来就该保持「未测量」）。
+            rgJob.skipped += 1;
+            if (rgJob.error === null) rgJob.error = diag.reason ?? 'silent';
+          } else if (measured === null) {
+            rgJob.failed += 1;
+            // 只记**第一处**失败原因：全失败时最有信息量的是第一个，不是最后一个。
+            if (rgJob.error === null) rgJob.error = diag.reason ?? 'measure-failed';
+          } else {
+            entries.set(track.id, {
+              trackGainDb: measured.trackGainDb,
+              trackPeak: measured.trackPeak,
+              size: stat?.size ?? 0,
+              mtimeMs: stat?.mtimeMs ?? 0,
+              measuredAt: Date.now(),
+            });
+            rgGeneration += 1;
+          }
+          rgJob.done += 1;
+          // 边测边存：中途取消/崩溃也不至于全丢（每 10 首落一次盘）。
+          if (rgJob.done % 10 === 0) await saveRgEntries();
+        }
+        await saveRgEntries();
+      } catch (error) {
+        rgJob.error = error instanceof Error ? error.name : 'measure failed';
+      } finally {
+        rgJob.running = false;
+      }
+    })();
+  }
+
+  /** 停掉在飞的一次测量（停用 / 热重载 / 用户取消）。 */
+  function stopRgMeasure(reason: string): void {
+    rgJob.cancelled = true;
+    rgJob.running = false;
+    rgJob.error = rgJob.error ?? reason;
+    const child = rgJob.child;
+    if (child !== null) {
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // 可能已退出
+      }
+    }
+    rgJob.child = null;
+  }
+
+  function rgJobStatus() {
+    return {
+      running: rgJob.running,
+      done: rgJob.done,
+      total: rgJob.total,
+      failed: rgJob.failed,
+      skipped: rgJob.skipped,
+      error: rgJob.error,
+      measured: rgEntries?.size ?? 0,
+    };
+  }
+
   function startScan(dir) {
     // A scan already running for this exact directory is reused: rapid
     // refreshes must not spin up N concurrent metadata parses (measured ~4x
@@ -1936,6 +2181,8 @@ function createHost(ctx) {
       }
     }
     if (currentDir !== null) startScan(currentDir).catch(() => {});
+    // 测量缓存也在这里预载：`/library` 要能一次性把标签与测量值都带上（否则首帧没有测量值）。
+    await loadRgEntries();
   })();
 
   async function setDirectory(dir) {
@@ -1978,8 +2225,12 @@ function createHost(ctx) {
   let payloadTracksSource: LibraryResult | null = null;
   let payloadTracksScannedAt: number | null = null;
   let payloadTracks: PayloadTrack[] | null = null;
+  /** 生成 payloadTracks 时的测量世代（rgGeneration），用于让测量结果即时可见。 */
+  let payloadTracksGeneration = -1;
   function payloadTracksFor(result: LibraryResult) {
-    if (payloadTracksSource === result && payloadTracksScannedAt === result.scannedAt && payloadTracks !== null) {
+    // 世代也要参与缓存键：测完一轮后必须让客户端看到新的测量值（否则 payload 一直是旧的）。
+    if (payloadTracksSource === result && payloadTracksScannedAt === result.scannedAt
+      && payloadTracksGeneration === rgGeneration && payloadTracks !== null) {
       return payloadTracks;
     }
     payloadTracks = result.tracks.map((track) => ({
@@ -1996,7 +2247,11 @@ function createHost(ctx) {
       rgTrackPeak: track.rgTrackPeak,
       rgAlbumGainDb: track.rgAlbumGainDb,
       rgAlbumPeak: track.rgAlbumPeak,
+      // 测量值：**标签优先**在客户端决定；这里只如实下发两套数据，不在这里替它选。
+      rgMeasuredGainDb: rgEntries?.get(track.id)?.trackGainDb ?? null,
+      rgMeasuredPeak: rgEntries?.get(track.id)?.trackPeak ?? null,
     }));
+    payloadTracksGeneration = rgGeneration;
     payloadTracksSource = result;
     payloadTracksScannedAt = result.scannedAt;
     return payloadTracks;
@@ -2134,6 +2389,14 @@ function createHost(ctx) {
       await ready;
       if (currentDir !== null && library === null && scanning === null) startScan(currentDir).catch(() => {});
       sendJson(res, 200, libraryPayload(library));
+      return;
+    }
+
+    if (pathname === '/api/dsh-music/measure' && (req.method === 'POST' || req.method === 'GET')) {
+      await ready;
+      await loadRgEntries();
+      if (req.method === 'POST') startRgMeasure();
+      sendJson(res, 200, rgJobStatus());
       return;
     }
 
@@ -2570,6 +2833,8 @@ function createHost(ctx) {
     // 在飞 ffmpeg 与它们的容器：漏掉这一步，停用/热重载后子进程会继续跑到结束
     // 往临时目录写 .part，module 级 Map 也会被不可回收的 ESM 条目永久钉住（A1-03）。
     killAllMvJobs('插件已停用');
+    // 测量同样要停：漏掉这一步，热重载/停用后 ffmpeg 会继续跑到结束（I-06 孤儿进程）。
+    stopRgMeasure('插件已停用');
     // 标签 worker 也必须随实例销毁：热重载/停用后不能留着旧线程。
     failAllTagJobs('插件已停用');
     if (tagWorker !== null) {
