@@ -235,7 +235,7 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
       get volume() { return this._volume; },
       set volume(v) { this._volume = v; log.push({ op: 'volume', v, el: tag }); },
       setAttribute: (n, v) => { attrs[n] = v; },
-      removeAttribute: (n) => { if (n === 'crossorigin') delete attrs.crossorigin; },
+      removeAttribute: (n) => { log.push({ op: 'removeAttr', name: n, el: tag }); if (n === 'crossorigin') delete attrs.crossorigin; },
       play() { this.paused = false; log.push({ op: 'play', el: tag }); return Promise.resolve(); },
       pause() { this.paused = true; log.push({ op: 'pause', el: tag }); },
       load() { log.push({ op: 'load', el: tag }); },
@@ -425,15 +425,22 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
   const ramps = tail.filter((o) => o.op === 'ramp' || o.op === 'setValue');
   // 必须是**两条 ramp**（采样级渐变）落在**两个不同**节点上：一条降到 0（旧元素）、
   // 一条升到 1（新元素）—— 这才叫重叠。写成 `find(v===1)` 会误命中 setValue（本轮踩到）。
-  const down = ramps.find((o) => o.op === 'ramp' && o.v === 0);
-  const up = ramps.find((o) => o.op === 'ramp' && o.v === 1);
+  // ⚠️ 角色必须**显式**取：交叉淡化里除两个电平节点外，RG 节点也在 ramp，
+  // 只按「v===1」找会拿 RG 冒充电平节点（那样即便电平没重叠也照样绿）。
+  // ⚠️ 从**整段日志**取（`connectSource` 发生在起播时，不在 `tail` 里 —— 第一版就是从 tail 取的，
+  // 结果两个角色都是 undefined，D2/D5 变成「恒红」，而对照看起来也红，等于什么都没测）。
+  const srcTargets = b.log.filter((o) => o.op === 'connectSource').map((o) => o.to);
+  const levelA = srcTargets[0];
+  const levelB = srcTargets[1];
+  const down = ramps.find((o) => o.op === 'ramp' && o.v === 0 && o.id === levelA);
+  const up = ramps.find((o) => o.op === 'ramp' && o.v === 1 && o.id === levelB);
   // 「重叠」= 两条 ramp 在**同一时刻起算**（都以同一个 now 为基准）。若实现退化成
   // 「先淡出、再淡入」（有缝隙），新元素那条 ramp 会晚 `changeFadeOutMs` —— 所以这条
   // 时间断言才是 D2 的判别力所在（只看「节点不同」的话，串行实现也会通过）。
   const sameStart = down !== undefined && up !== undefined && Math.abs(up.t - down.t) < 0.05;
-  check('D2: 交叉是**重叠**的 —— 两条电平 ramp 同刻起算（串行的「先淡出再淡入」会红）',
-    down !== undefined && up !== undefined && down.id !== up.id && sameStart,
-    JSON.stringify(ramps.slice(0, 4)));
+  check('D2: 交叉是**重叠**的 —— 两条**电平** ramp 同刻起算（串行的「先淡出再淡入」会红）',
+    down !== undefined && up !== undefined && levelA !== levelB && sameStart,
+    'levelA=' + String(levelA) + ' levelB=' + String(levelB) + ' ' + JSON.stringify(ramps.slice(0, 4)));
 
   // 电平与**用户音量**分离：音量节点（gain1）在交叉期间不得被写
   const volumeTouched = ramps.filter((o) => o.id === 'gain1');
@@ -444,14 +451,34 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
     b.player.media() === b.media2 && b.media.paused === true,
     'activeIsB=' + (b.player.media() === b.media2) + ' oldPaused=' + b.media.paused);
 
+  // D5：交叉淡化期间两首**同时在响**，而 RG 节点是**共享**的 —— 瞬时写值等于给两首一起做阶跃，
+  // 听感就是那「一丝丝杂音」。必须按过渡时长**斜坡**过去（且从当前值起算）。
+  // 节点角色：媒体源接进去的那个是**电平节点**，电平节点接进去的那个才是 **RG 节点**。
+  // 角色：媒体源接进去的是**电平节点**（本曲目那一个），电平节点接进去的才是 **RG 节点**。
+  const levelId = srcTargets[0];
+  const rgId = b.log.find((o) => o.op === 'connect' && o.from === levelId)?.to;
+  const rgOps = tail.filter((o) => o.id === rgId);
+  const rgRamp = rgOps.find((o) => o.op === 'ramp');
+  const rgStart = rgOps.find((o) => o.op === 'setValue');
+  check('D5: 交叉淡化时 RG 增益走**斜坡**（不是瞬时写值），并从当前值起算',
+    rgId !== undefined && rgRamp !== undefined && rgStart !== undefined
+      && rgRamp.t - rgStart.t > 0.05,
+    'rg=' + String(rgId) + ' ops=' + JSON.stringify(rgOps.slice(0, 3)));
+
+  // D6：交接时**不得**清掉旧元素的 src / load() —— 那会再触发一次媒体管线拆除
+  //（设备侧看到两次事件而不是一次）。让它等下一次预取直接覆盖。
+  check('D6: 交接时不清旧元素的 src（一次过渡 = 一次换源，少一次媒体管线拆除）',
+    !b.log.some((o) => o.op === 'removeAttr' && o.name === 'src'),
+    'removeAttr src 次数=' + b.log.filter((o) => o.op === 'removeAttr' && o.name === 'src').length);
+
   // 预取是**链式**的：交接后立刻为新空闲元素预取再下一首
-  check('D5: 交接后继续链式预取（下一首挂到新的空闲元素上）',
+  check('D8: 交接后继续链式预取（下一首挂到新的空闲元素上）',
     b.log.filter((o) => o.op === 'src' && o.el === 'A').length >= 2,
     'A src ops=' + b.log.filter((o) => o.op === 'src' && o.el === 'A').length);
 
 }
 
-// D6 单独跑：**在交叉进行中** halt —— 那一刻「活跃」仍是旧元素，正在淡入的新元素是空闲元素，
+// D7 单独跑：**在交叉进行中** halt —— 那一刻「活跃」仍是旧元素，正在淡入的新元素是空闲元素，
 // 只有 `halt()` 主动停空闲元素才能让它不继续出声（否则 teardown 后它还在播，I-06）。
 // 不这么写的话，交接已经 pause 过空闲元素，断言恒绿（本轮实测：删掉 halt 里的停止调用，旧写法照样通过）。
 {
@@ -465,7 +492,7 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
     await b.waitFor(() => b.log.some((o) => o.op === 'play' && o.el === 'B'), 1000);
     b.player.halt();                   // 交接（320ms 后）之前 teardown
   });
-  check('D6: 交叉进行中 halt() 会停掉空闲元素（只停当前那个会留下它继续出声）',
+  check('D7: 交叉进行中 halt() 会停掉空闲元素（只停当前那个会留下它继续出声）',
     b.media.paused === true && b.media2.paused === true,
     'A=' + b.media.paused + ' B=' + b.media2.paused);
 }

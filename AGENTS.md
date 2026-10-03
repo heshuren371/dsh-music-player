@@ -1,29 +1,24 @@
-# Repository instructions
+# AGENTS.md
 
-本文件是**强制约定**。改代码、写功能模块、动 manifest 之前先读它。
+DSH 的本地音乐播放器插件，Web + Desktop 同一份包。**改代码前读本文件**；规则的完整措辞、逐轮
+实测与编号裁定在 [docs/rules-detail.md](docs/rules-detail.md) 与 [docs/audit-ledger.md](docs/audit-ledger.md)。
+本文件只写**可执行结论**——一条规则一句，理由压进括号或链接。
 
-## 0. 给 agent 的快速上手（先读这一节）
+## 命令
 
-> 为「第一次接手本仓库的模型」准备的自检入口：读完它就能安全改代码，不必先通读全文。
-> 每条都给出**能被机械抓住**的门禁名 —— 违反时不需要靠人发现。
-
-### 0.1 这是什么
-
-DSH 的本地音乐播放器插件，**Web + Desktop 同一份包**。`src/*.ts` 是唯一真源；
-`lib/*.js` 是 tsc 产物**且提交进仓库**（`dsh plugin add` 不跑构建）。
-
-### 0.2 三条命令就是全部验证
-
-```bash
-pnpm run build && pnpm run typecheck   # 编译 + 类型棘轮（基线 0，含死代码开关）
-npm test                               # 产物新鲜度 + 逐文件严格 + 31 套回归
-pnpm run check:manifest                # 只在动了 dsh-plugin.json 时必跑
+```sh
+pnpm run build          # src/*.ts → lib/*.js（产物**提交进仓库**，改了 src 必须重建）
+pnpm run typecheck      # 类型棘轮：错误数只许变少（基线 0）
+npm test                # 产物新鲜度 + 逐文件严格 + 31 套回归（= check-build-fresh && check-strict && run-all）
+pnpm run check:manifest # 只有动了 dsh-plugin.json 时才必跑；基线缺失时它 SKIP，**SKIP ≠ 通过**
+node scripts/check-whitespace.mjs  # 空白/冲突标记（npm test 已含；**排除 lib/**，理由见 docs/rules-detail.md）
+pnpm run dev            # tsc --watch：保存即重编，宿主按 lib/host.js 的 mtime 热重载
 ```
 
-**全绿才算改完。顺序不能颠倒：先 build 再跑测试** —— 门禁读 `lib/`，不 build 就是在验旧产物
-（第 15 轮真踩过：负向对照因此是空的，差点误判「断言没有判别力」）。
+**顺序不能颠倒：先 build 再跑测试**（门禁读 `lib/`；不 build 就是在验旧产物）。新增回归套件必须
+在 [scripts/run-all.mjs](scripts/run-all.mjs) 注册——没注册等于没门禁。逐条门禁表见 [docs/gates.md](docs/gates.md)。
 
-### 0.3 五个文件各管什么（不要改错地方）
+## 目录与改动生效路径
 
 | 文件 | 职责 | 改动生效 |
 | --- | --- | --- |
@@ -33,613 +28,207 @@ pnpm run check:manifest                # 只在动了 dsh-plugin.json 时必跑
 | `src/http-bridge.ts` | Fetch ⇄ node:http 适配（背压 / abort 释放 fd / HEAD） | 刷新页面 |
 | `src/tagwriter.ts` | 标签写入 worker 入口 | 刷新页面 |
 
-### 0.4 改动的完成定义（DoD）
-
-1. 改了 `src/` → 跑过 `pnpm run build`
-2. `pnpm run typecheck` 0 错误（含 `noUnusedLocals`/`noUnusedParameters`：死代码直接红）
-3. `npm test` 31 套全绿
-4. 新增功能/修复 → **在 `scripts/run-all.mjs` 注册了回归套件**（没注册等于没门禁）
-5. 新增断言 → **做过对照**：把缺陷改回去，断言必须变红（§6.1 第 7 条）
-6. 改了文档 → README ≤ 220 行，深度材料进 `docs/`（§7.2）
-7. **收口 = 提交 + 推送 + `git status --short` 为空 + CI 绿。** 只跑门禁**不算**完成 ——
-   门禁验的是**工作区**，`git status` 才验**仓库**（§6.1 第 9 条、台账 §5.24）
-
-### 0.5 最先该知道的 6 条不变量（完整清单见 §8）
-
-| 不变量 | 违反症状 | 抓住它的门禁 |
-| --- | --- | --- |
-| 端点面四处逐字一致 | 端点在某个宿主形态**不可达** | `test-route-consistency` |
-| 媒体源必须是 token 直连的**绝对地址** | 进度条**一拖就回 0 秒** | `test-mv-seek` |
-| 能力 token **进程级** + **按用途分签** | 音乐全不能播 / MV 照播 | `test-token-lifetime`、`test-security` |
-| 每个副作用位置过 `authorize(action, scope)` | 越界读写 | `test-audit` |
-| teardown 后不得再启动（timer / 在飞 await / 子进程） | 卸载后请求风暴、孤儿 ffmpeg | `test-poll-teardown`、`test-teardown-race`、`test-mv-teardown` |
-| 凭据不进任何日志或落盘 | 同机任意进程可读库内文件 | `test-audit` 凭据扫描 |
-
-### 0.6 想做新功能？按这个顺序
-
-1. 先查 §10「明确接受的设计取舍」—— **别修**那些是故意的
-2. 端点类改动 → 同步四处（§2.7）并加进 `FETCH_ROUTES`，否则不可达
-3. 碰文件系统 → 在副作用位置加 `authorize()` 并同步 manifest 的 `permissions`（§2.4）
-4. 新门禁必须打在**生产真正用的传输面**（默认 `connection.fetch`）上，并做对照
-5. 若属**通用形态**（不是一次性 bug）→ 补进 §2；否则只进台账
-
-
-## 1. 规范基线
-
-本仓库遵循 **dsh-std Community v0.15 基线**（`BASE-STD-001`）。权威资产在仓库外，固定 revision、只读引用：
-
-```
-references/dsh-ecosystem-spec/vendor/dsh-std/
-├── packages/manifest/schema/dsh-plugin-0.15.schema.json   # Manifest schema
-├── packages/manifest/lib/index.js                          # validateManifest / parseManifest / projectManifest
-└── docs/proposals/{manifest,lifecycle,composition,permission,storage}.zh.md
-```
-
-三条元规则：
-
-1. **禁止复制** std schema 或 validator 进本仓库，再以同名维护（治理规则明确禁止「复制旧 schema 后继续以同一名称维护」）。要校验就指向上面那份。
-2. **禁止让 `$schema` 指向分支**（如 `.../dsh-std/main/...`）。Manifest 规范（`manifest.zh.md:31`）要求 schema identifier 与 `manifestVersion` 一致，且**已发布的 identifier 不得在原位置改成另一份结构**——分支会漂移。本仓库已改为版本固定的 `https://dsh.community/schemas/dsh-plugin-0.15.json`。
-3. **本仓库是 Web + Desktop 插件，不属于 dsh-TUI 生态。** `references/dsh-ecosystem-spec/spec/tui-admission-v0.15.md` 的 `TUI-*` 要求（以及 TUI profile 禁止 `client` facet 等约束）**不适用**，除非明确要把本插件收进 TUI 市场。
-
-> 规范状态为 Draft / Experimental。它**不是** DSH 官方标准，不得声称「官方认证」「已通过官方审核」。
-
-## 2. 不可协商的规则
-
-### 2.1 Manifest（`manifest.zh.md`）
-
-- 包根目录**至多一个** `dsh-plugin.json`；不得把 `package.json` 字段或别的文件名当等价 Manifest（L25）。
-- Manifest **必须是静态 JSON**。不得根据插件提供的 `$schema` URL 联网下载并执行 schema / definition / validator（L27、L163）。
-- `facets.host.entry` 形成 activation；`facets.host.apiVersion` **只约束 activation API，不是领域协议版本**（L108）。
-- 未知 Manifest 版本 → `manifest-version-unsupported`，**不得**回退旧 schema 或忽略新版本的 required 字段（L33）。
-- **扩展字段不得暗含 required 行为**（L64）。凡是影响兼容性、激活、权限或运行时调用的东西，必须表达为 protocol requirement/support、activation、permission、subscription，或带 definition 的 extension。
-- `optional: true` 的契约应写 `fallback`，说明宿主没有该契约时的降级行为（L98–101；TUI profile 用 `invalid-plugin-optional-no-fallback.json` 卡这一条）。
-- `compat`、`overrides` 只进 admission / provenance，**不产生 live support**（L113）。
-- 通过 schema 只证明文件结构有效，**不等于**能激活（L116）。Artifact digest 证明字节内容，**不证明发布者身份**（L165）。
-
-### 2.2 Lifecycle —— 激活与清理（`lifecycle.zh.md`）
-
-- `activate` 里注册的一切（service、协议 support、event handler、timer、后台任务、UI contribution）**必须绑定当前 activation instance 的 cleanup scope**（L29）。SDK 观察不到的、自己创建的资源由 `deactivate` 负责（L107）。
-- Scope 关闭顺序：**先 abort signal，再按注册逆序执行 disposer**；每个 disposer **至多调用一次**；某项清理失败**不能阻止**其余 disposer（L105）。
-- 停止后要**验证已发布的 support 与 owner records 都已移除**（L118）。
-- 超过 deadline **必须留下 timeout 诊断，不能报告为正常停止**（L121）。
-- Reload **创建新 instance、不复用旧 activation scope**；**不允许把旧 handler 隐式转移给新 instance**（L125）。
-- Lifecycle record / 诊断**不应持久化 activation context、凭据或未处理的异常对象**（L133）。
-- Activation context 不得暴露未在 manifest 声明、未在 plan 接纳、未获 grant 的产品 API（L82）。
-- Observer 不能通过监听事件改变状态机（L139）。
-- **不得依赖 module 卸载来完成清理**：JavaScript module 通常无法真正卸载，cleanup scope 以 owner 为单位撤销注册与任务（L165、L22）。→ 本仓库的宿主热重载走「mtime + 带查询串的动态 import」，**旧实例的 handler / timer 必须自己撤销**，不能指望旧 module 被回收。
-- 纯声明 facet 不执行 module，也不得为它创建可执行 activation instance（L58、L5）。
-- **释放面清单必须逐类覆盖**，不能只处理其中一类：SDK 注册项、timer、**子进程**、**worker**、**module 级可变状态（Map / Set / 计数器）**。任何一项漏掉，在「卸载」或「热重载」下都会变成孤儿。→ 子进程必须留 `kill` 路径；module 级容器必须留 `clear`/`delete` 路径**并计入容量上限**。
-- **module 级状态在热重载下会整份复制**：本仓库每次重载产生一个新的 module 实例，旧的被 ESM 注册表永久持有。因此 module 级容器**既是每次重载的泄漏源，又是无界增长的载体**，必须显式清理 + 设上限。
-
-> 本仓库有宿主热重载（`lib/index.js` 按 mtime 重载 `host.js`）与自动续播定时器，**是上面第 5、1、2 条的高危区**——历史上出过「卸载后定时器仍跑」的 bug。
-
-### 2.3 Composition —— 契约协商（`composition.zh.md`）
-
-- **Facet 名称与发现顺序不构成选择条件**；不得按 `web` / `server` / `runtime` 等名称推断运行位置（L65）。
-- 未被选中的 facet **不把** requirements / extensions / permission requests 带入 plan（L71）。
-- **Preflight 成功不是 agreement**；运行时不符必须失败、回滚或重组（L80）。
-- 未知 required → 阻止计划；未知 optional → 报告为未满足；**未知 potential support 不作为候选实现**（L82）。
-- 同一坐标存在内容不一致的 definitions → 输入无效，**不得用注册/发现顺序解决冲突**（L84）。
-- **没有通用「最后注册者覆盖」规则**（L118）。Plan 排序由标识与协议规则确定，**不得把发现顺序当隐式语义**（L135）。
-- 每次实际注册都要记录 activation instance owner 且可清理（L141）。
-- 实际激活偏离 plan → **必须报告 activation failure**，触发重组/降级/回滚；**不能悄悄把静态声明当 live implementation**（L143）。
-- component 的 priority / selector / relationship **不得自行扩大权限**；agreement ≠ 用户授权（L147、L149）。
-- 协议 requirement **优先于** component dependency；只有确实依赖实现包而非协议时才用 `depends`/`recommends`/`breaks`/`conflicts`（L106、L99–104）。
-
-### 2.4 Permission（`permission.zh.md`）
-
-- 静态请求是所属 facet 的**上限**。**缩小 scope 不需要改 manifest；扩大 scope 必须新增声明并走 policy 决策**（L55）。→ 改代码时一旦多碰一类资源，同步改 `dsh-plugin.json` 的 `permissions`。
-- 插件自带的默认值**只能缩小请求，不能覆盖产品 policy**（L68）。
-- 不能通过字符串查询未授予的 Host service（L32）。
-- 每项受保护操作都要**在产生副作用的位置**检查授权。validator、composition report、UI 上显示「已允许」**都不能替代运行时检查**（L86）。
-- 序列化的 grant record **不是可重放的 bearer token**；**不能用 grant id 构造权限**（L82）。
-- Activation instance 停止即撤销其全部 grant（L99）。
-- 审计记录前**移除凭据、文件内容、工具输入**（L111）。
-- **不得用字符串前缀等未经协议规定的方法判断路径、域名或 resource scope**（L119）。
-
-### 2.5 Storage（`storage.zh.md`）
-
-- 需要 `LocalStorage` 的 consumer **通过 protocol requirement 声明**（`storage.dsh/v1alpha1` / `LocalStorage`）（L20）。多个候选 provider 且组合层未确定选择时，协商**必须失败**（L22）。
-- 读需要 `storage.local.read`，写与删除需要 `storage.local.write`（L75）。
-- value 必须是 JSON value；不得依赖对象 identity / prototype / key 顺序（L34–36）。
-- 同 Component 命名空间内、同一 key 的操作必须串行化；本协议**不提供**多 key transaction、CAS、enumeration、watch，实现不得把这些当兼容前提（L69、L71）。
-- `deactivate` **不删除** Component 数据；uninstall 的保留规则必须声明；purge 删整个命名空间（L81）。
-- cleanup / purge **必须可重复执行**；**失败的 cleanup 不得报告为已完成**（L83）。
-- **禁止把 value、凭据或 secret 写入普通日志**（L101）。
-- 协议声明**不是沙箱保证**（L99）。
-
-### 2.6 若新增 `docs/proposals/`（dsh-std `AGENTS.md`）
-
-- 写成 RFC 体例的协议规范：scope、术语、数据模型、必需行为、协商规则、生命周期、错误、安全考虑、兼容性规则。规范级用语统一用 MUST / MUST NOT / SHOULD / SHOULD NOT / MAY（中文用「必须/禁止/应/不应/可以」）。
-- **禁止**写实现路线图、任务清单、进度报告、仓库重构计划、自我批评、回顾叙事，或「我接下来要写什么」。
-- **禁止**在协议提案里指定某个项目为参考实现。**禁止**把未完成的实现工作写成协议要求。
-- **禁止**把实现便利、当前仓库布局、或某个产品的限制变成规范要求。
-- 替换重复材料时保留稳定文档路径，改成简洁的规范性引用。
-
-### 2.7 声明面一致性（第 1 轮沉淀）
-
-本插件的能力面有**四个必须逐字一致的副本**，任何一处漏改都是静默失效：
-
-```
-lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plugin.json 的 endpoints
-                              ↑
-                    scripts/test-desktop-routes.mjs 的 expected（必须从分派表推导，不得手工抄）
-```
-
-- **门禁必须三向集合相等**，不是单向包含。写成 `expected.every(p => routes.has(p))` 只查一个方向，**结构上发现不了漂移**。
-- `connection.fetch.register` 是**精确路径匹配**，没有前缀/通配语义（`dsh 0.1.7-rc.2` 的 `packages/client/connection/lib/index.js:625-634`）。新增端点**必须**同时加进 `FETCH_ROUTES`；只在 `host.js` 加一条 `pathname ===` 是**不可达**的。
-- 只有 `webServer` 存在时旧 `/dsh-music` 前缀路由才兜底。因此「只在 `host.js` 实现」的端点，在无 `webServer` 的宿主形态（0.1.6 desktop-host）下必然 404。
-- `dsh-plugin.json` 的 `endpoints` 是**对外声明**，不是注释：`manifest.zh.md:64` 要求影响运行时调用的能力必须表达为声明。少声明同样是缺陷。
-
-### 2.8 错误面与降级（第 1 轮沉淀）
-
-- **不得用业务错误码充当基础设施信号**。`404` 在本插件是正常语义（无内嵌封面 `lib/host.js:1696`/`:1715`、MV 缓存未命中 `:2021`/`:2073`、文件不存在 `:1472`/`:1474`）。任何「探测宿主是不是新入口」的逻辑**不能以 404 为唯一判据**，否则会被一次正常业务失败永久带偏。
-- **探测/回落必须可重入**：一次性标志位若在探测**之前**置位（`lib/client.js:667`），失败一次就永久失去重试机会。
-- **不得静默降级信任边界**：`composition.zh.md:143` 要求偏离 plan 必须报告。从 `/api`（连接层 Host/Origin 栅栏 + 浏览器会话）切到 `/dsh-music` 旧前缀（插件自建栅栏）是**信任模型降级**，必须显式记录，不能顺带发生。
-- **错误响应必须脱敏**：`storage.zh.md:95`「不能暴露路径等」、`permission.zh.md:111`「记录前移除文件内容、路径」。把 `error.message` 原样返回（`lib/index.js:132`、`:153`）会把本地绝对路径与文件名单（`'文件不存在：' + track.name`，`lib/host.js:1472`）送到客户端。
-
-### 2.9 诊断与日志（第 2 轮沉淀）
-
-- **禁止把凭据写进任何日志**（`storage.zh.md:101`「禁止把 value、凭据或 secret 写入普通日志」、`permission.zh.md:111`、`lifecycle.zh.md:133`）。**`req.url` 的 query 里就带能力 token** —— 把 `req.url` / `headers` / `cookie` 整体落盘等于泄漏凭证，哪怕文件在 `/tmp`、哪怕只在自己机器上。落盘前必须剥离 `t=` / `token` / `authorization` / `cookie` 等字段。
-- **诊断代码不得进默认分支**：临时探针必须有开关、有 TTL、有清理责任人；**不得提交进 HEAD**（见 `A2-01`：一个 `TEMP DIAGNOSTIC` 探针已提交，把 token 写进 `/tmp`）。
-- **写盘路径必须落在已声明的 permission scope 内**：`permission.zh.md:55` 静态请求是上限。`dsh-plugin.json` 的 `fs.write` scope 是「当前音乐目录内的音频文件」，往 `/tmp` 写日志**不在**该 scope 内 → 要么改路径，要么补声明。
-- **禁止在请求关键路径上同步落盘**：`await fs.appendFile(...)` 放在路由分发**之前**，会让每个请求（含每次 Range 流媒体请求）都被一次磁盘 I/O 阻塞，与 README 的性能叙事直接矛盾。
-
-### 2.10 客户端 activation 归属与「teardown 后不得再启动」（第 3 轮沉淀）
-
-- **一个 activation instance 的资源不得被下一个复用**：**禁止**用 `window.*` 把上一代的
-  player / timer / handler 交给下一代（`A3-03`）；disposer 只能作用于**自己那一代**。
-- **`await` 挂起后恢复的路径必须检查 `disposed`**（只置 `null` 不够，挂起分支会重新赋值，`A3-02`）。
-- **「清 timer」≠「阻止再武装」**：teardown 必须**显式复位**守卫依赖的状态（如 `scanning`，`A3-01`）。
-- **自建 DOM 与全局键必须释放**（`remove()` / `delete`，`A3-04`）。
-- **不得读取未在 manifest 声明的 context API**（`A3-05`，现状三者未声明）。
-
-→ 细则与证据见 [`docs/rules-detail.md`](docs/rules-detail.md#210)。
-
-### 2.11 契约坐标必须真实可解析（第 4 轮沉淀）
-
-- **禁止发明坐标，写进 manifest 前必须实测**（「0 命中」先用已知为真的样本校准搜索面，§6.1）。
-  实测：候选坐标在 DSH 运行时全部 0 命中 ⇒ 本插件**不消费**任何 Community 契约，
-  `requires.contracts` 为空是**诚实状态**（`A4-03`）。
-- **`fallback` 不能把不存在的坐标洗成合规声明**（`D-05`）；**声明无 definition 的扩展 ≠ 声明能力**
-  （`manifest.zh.md:62`，不声明优于假声明，`A4-02`）。
-- **extension id 必须有运行时对应**；**`prefix` 必须等于 `webServer.register` 的 path**（`A4-05`）；
-  **`requires.contracts` 至少一条 `required`**，否则 preflight 永不阻塞（`A4-03`）。
-
-→ 细则见 [`docs/rules-detail.md`](docs/rules-detail.md#211)。
-
-### 2.12 自建 bearer token 三律（第 5 轮沉淀）
-
-自建路径凭证（`?t=<randomUUID>`）必须：① **按用途分签**（`systemArtToken` / `systemStreamToken`
-不得互换）；② **基址钉回环字面量**，不得回显请求 Host（`loopbackAuthority`，只取端口）；
-③ **被豁免栅栏的端点**（`system-*`）不得承担读能力，凭证不得进入任何持久通道，Host 非回环一律 403。
-**仍待修**：token 不过期、无轮换、不按 session 区分（唯一撤销边界是 `createHost()` 闭包销毁）。
-
-> token 通道**既不走平台鉴权、也不走插件栅栏**，唯一防线是保密性 ⇒ 不得进入任何世界可读位置。
-
-→ 细则（含 `A5-02`/`A5-03` 的实测）见 [`docs/rules-detail.md`](docs/rules-detail.md#212)。
-
-### 2.13 错误不得被报告为成功（第 5 轮沉淀）
-
-`storage.zh.md:83`「失败的 cleanup 不得报告为已完成」是**通用形态**，适用所有持久化/副作用路径：
-
-- **吞掉写失败后仍返回成功是违规**。现状 `A5-09`：`saveState` 全量吞错后 `/dir` 仍返回 `200`。
-- **持久化层必须有稳定错误码**（`storage.zh.md:87-93` 的五个码目前**一个都没有**），不能只靠
-  「有没有抛异常」表达。
-
-### 2.14 能力 token 必须与 activation 生命周期对齐（第 10 轮沉淀）
-
-客户端会把 `/session` 下发的 token 基址**缓存整个页面生命周期**，而宿主**每次热重载都会 `createHost()`**。因此：
-
-- **token 不得随 activation instance 轮换**。它要钉在**进程**上（`Symbol.for` + `globalThis`），否则一次「保存文件」就会让页面上所有取图/取媒体 URL 变成废纸。
-- **消费者必须能自愈**：缓存要带 TTL，并在**失败时**作废重取；否则症状会停在「刷新前一直坏」。
-- **判断症状归属的一条经验**：`/api/mv` 返回的是**相对地址**（走平台会话、不经 token），而**音频永远走 token 直连** —— 所以「**音乐不能播、MV 能播**」几乎总是 token 通道的问题，不是流本身的问题。排查时先直接 `curl` 那条 token URL 验证 200/206。
-
-> 第 10 轮线上故障即此条被违反：token 曾是 `createHost()` 里的 `randomUUID()`。
-
-### 2.15 TypeScript：真源、产物与类型棘轮（第 11 轮沉淀）
-
-**真源与产物**
-
-- **唯一真源是 `src/*.ts`**。`lib/*.js` 是 `tsc` 产物 —— **禁止直接改 `lib/`**：下次构建会覆盖它，而门禁 `scripts/check-build-fresh.mjs` 会把「手改了产物」判红。
-- **产物也提交进仓库**。`dsh plugin add github:` 只克隆 + 装依赖、**不跑构建**，所以 `lib/` 必须在仓库里。这也是本仓库显式不声明 `prepare` 等生命周期脚本的原因（见 `docs/compatibility.md §5`）。
-- 代价是「改了 src 忘了 build」会发旧行为出去 ⇒ 由新鲜度门禁兜住（编译到临时目录，逐字节比对）。
-- 改完跑 `pnpm run build`；开发时挂 `pnpm run dev`（= `tsc --watch`），保存即重编，`lib/host.js` 的 mtime 一变热重载就生效。
-
-**类型档位是棘轮**：`strictNullChecks` / `noImplicitThis` / `strictBindCallApply` /
-`useUnknownInCatchVariables` / `noFallthroughCasesInSwitch` / `alwaysStrict` **全开**
-（零或极低代价；`strictNullChecks` 正是能防住本仓库两个真实线上故障的那一项）；
-`noImplicitAny` **暂关**（全开仍多 343 处），改由**逐文件允许清单**单向收严。
-
-- 类型棘轮基线在 `scripts/typecheck-baseline.json`，**已降到 0 并锁死**：新增类型错误直接变红。
-  **禁止为了让棘轮变绿而放宽档位或上调基线**（同 §6.2）。
-- 逐文件清单：`tsconfig.strict.json` 的 `include` 即允许清单（当前 `src/http-bridge.ts`、
-  `src/tagwriter.ts`），由 `check-strict.mjs` 守着（已接进 `npm test` 与 CI）。**清理干净一个就加
-  一个，严格度单向增长**；**禁止删名单项**，空名单会被门禁自己拒绝（空名单 = 恒绿）。
-
-**静态断言的四个坑**（第 12 轮起反复踩，**每条都付过代价**）：① 先剥注释（注释里会出现被断言的
-名字 → 恒红/恒绿）；② 按行号而非字符偏移（`clientPortion` 剥掉了 CSS，行号与源文件不一致）；
-③ 别依赖字面缩进（`tsc` 把 8 空格重排成 16 后正则**静默返回 0 个方法** → 本该报警反而变绿）；
-④ 按**角色**而非创建顺序选节点（第 22 轮：均衡器插进链后，RG 套件按索引取的「RG 节点」变成 EQ
-前级，B3–B12 集体变红）。**检验方法本身也需要被检验**（§6.1 第 3 条）。
-
-**`client.ts` 必须保持零 import**：客户端 bundle 由宿主在浏览器里 `eval`（`window.__ModuleLoader__`），
-**它的 import 无法解析** —— 类型只能就地声明在 `client.ts` 内；宿主侧的共享类型同理不要新建模块。
-
-### 2.16 平台栅栏在**路由之前**拒答 —— 回落判据不能只认 404（第 13 轮沉淀）
-
-平台 `/api` 的 `admit()` 在**路由之前**判 Host/Origin 与浏览器会话 ⇒ 实测答的是 **401/403**，
-不是 404。「宿主没有这个端点」与「这道栅栏不让这个请求过」是**两件事**。
-
-- **回落判据必须覆盖全部「这道传输送不到」的状态码**（401/403/404）+ **正向识别** + **显式报告降级**。
-- **例外只给 `/session`**（它的存在意义就是绕开这道栅栏）；其余端点不得享受（403 洗成降级是违规）。
-- **降级成不可 seek 的源比等待更糟**：拿不到基址必须**重取**。
-- **按可观测症状兜底自愈**必须有界、成功才停，**禁止**一次失败就置永久标志。
-- **诊断日志无歧义且不带凭据**；**夹具保真度也是判别力**（§9 陷阱 4）。
-
-→ 细则见 [`docs/rules-detail.md`](docs/rules-detail.md#216)。
-
-### 2.17 视图局部状态活不过 `conversation.view` 的卸载（第 16 轮沉淀）
-
-`conversation.view` **只在被选中时挂载** ⇒ 切走再回来是一次全新挂载。因此：
-
-- **要跨视图保留的 UI 状态禁止放视图局部 `useState`**（放进 player 单例 store）。
-- **视图驱动的定时器归资源所有者**（否则 `phase` 永久停在 `closing`）。
-- **重挂载后把外部资源搬回来**（MV 的 `<video>`），断言覆盖「同一个元素、不是新建第二个」。
-- **UI 过渡定时器禁止用 `disposed` 早退**（`disposed` 永不复位 ⇒ 死锁）；**禁止**给 `openPlayer`
-  加 `disposed` 守卫（会让插件重载后打不开全屏）。
-
-→ 门禁与细节（含必须用真实 `<video>` 夹具）见 [`docs/rules-detail.md`](docs/rules-detail.md#217)。
-
-### 2.18 过渡必须淡入淡出，且时长要够长（第 18 轮起；第 20 轮按 fooyin 校准）
-
-**fooyin**（开源本地音乐播放器）的引擎默认值是权威参考（`include/core/engine/fadingdefs.h`）：
-manualChange `{in=300,out=300}` · autoChange `{in=700,out=700}` · **seek `{in=120,out=120}`** ·
-pause `{in=120,out=120}` · stop `{in=120,out=300}`。**本仓库采用同一组数值**，不自行调小。
-
-- **常驻输出流与过渡淡入淡出不是二选一，两个都要**（fooyin 两者都做：输出会话常驻 + terminal
-  resampling，**并且**每次过渡都淡入淡出，含 seek；本仓库第 18/19 轮各只做了一半）。
-- **时长决定遮蔽力**：70ms 与 300ms 完全是两种效果。**禁止**为了「手感更脆」把过渡调到
-  200ms 以下 —— 门禁 H1/H2 会红。
-- **拖动进度也要淡**（fooyin 120ms），但**只在常驻音频图接管增益时**做：图未启用时用元素音量
-  延迟 seek 会让拖动发粘且没有采样级保证，那条路径保持**同步** seek。
-- **要消失先淡出，起播后淡入。** `state.volume` 始终是**用户设定值**，渐变只改**瞬时值**。
-- **渐变必须可取消，取消时要结算 promise**（只清定时器不 settle 会让 `await` 它的调用方
-  **永久挂住**，与 §2.10 同族）。快速连点/连拖时**最后一次赢**。
-- **「没有声音要淡出」的路径必须保持同步**，判据是「**确定正在出声**」：
-  `paused === false && volume > 0.001`。**禁止**写成 `paused || volume <= 0.001` —— 属性缺失时
-  两个分支都是 false，会把「暂停中」误判成「正在播」而走异步路径，起播时序整体后移。
-- **用户拖动音量优先于任何在飞渐变**；**卸载路径不等渐变**（§2.10；stop 的 300ms 淡出在这里
-  刻意不等待）。
-
-### 2.19 「电流声」的真因是**设备被反复重建**，必须常驻同一条输出流（第 19 轮沉淀）
-
-第 18 轮的判断被实测**推翻**（音量淡入淡出做完，电流声依旧）—— 真因在**增益级之外**。
-
-- **机制**：Chromium 为**每一条媒体源**单独建一条音频输出流；换 `src` = 销毁旧流 + 按新文件
-  采样率/位深建新流 ⇒ macOS 必须重协商设备格式 = **那一声电流声**（本机曲库 44.1k/48k/96k 与
-  16/24bit **混排**，几乎每次切歌都触发）。
-- **修法**：一个**常驻 `AudioContext`**（`createMediaElementSource` + `GainNode`）只有一条流、
-  一个固定采样率，所有媒体重采样进去，设备格式不再变。
-- **跨源是前提**：桌面版页面 origin 是 `dsh-app://app`、媒体在 `127.0.0.1` ⇒ Web Audio **必须有
-  CORS**，否则输出**静音**。宿主只对**窄名单**回显 ACAO（不用 `*`，§2.12），并对媒体端点应答
-  `OPTIONS` 预检（`Range` 不是 CORS 安全列表头）。
-- **降级不许变成故障**：建图失败 → **永久退回元素音量**；跨源未确认 CORS → **先直连、后台探一次**；
-  兜底开关 `?musicGraph=0` / `window.__dshMusicNoGraph`。
-- **建图后必须把元素音量置中性**（否则「元素 0 × 增益」= **第一次起播静音**，比电流声更严重）。
-- **音频图 `halt()` 只 suspend 不 close** —— close 之后媒体元素再也接不回音频图。
-- **`AudioContext.sampleRate` 创建时即固定** ⇒ ctx 必须在**第一次播放时**才建，并把
-  `sampleRate`/`state` 打进诊断（只记数字与状态，绝不记 URL/token；门禁 B13）。
-- **`location` 一律写 `window.location`**（bundle 由宿主 eval）。
-
-### 2.20 ReplayGain：标签是**不可信输入**，增益必须走**独立节点**（第 21 轮沉淀）
-
-本仓库**只读标准标签**（`REPLAYGAIN_TRACK_GAIN` / `_ALBUM_GAIN` / `_PEAK`），**不改文件**，
-也不自己扫描测量。做法与 fooyin 一致（它是 GPL-3.0、本仓库 MIT：**只借鉴做法，不抄代码**）。
-
-- **未测量 ≠ 0dB**：`REPLAYGAIN_*` 缺失时增益必须是 **1**（当 0dB 等于「声称已测量且无需调整」）。
-  `Track` 的四个字段未测量时一律 `null`，客户端见到 `null` 直接跳过。
-- **增益必须走独立节点**（`source → rgGain → volumeGain → destination`），否则淡入淡出与响度
-  归一化会**互相覆盖**（门禁 B8）。
-- **回退路径要把 RG 折进元素音量**，且 `readVolume()` 要**除回去**，否则渐变从被缩过的值起步。
-- **防削波默认恒开**：增益后峰值可能越过满刻度，按 `peak` **收窄**增益（fooyin 的
-  `PreventClipping`）。**禁止**为了「响一点」去掉它 —— 门禁 B6 会红。
-- **标签是文件里来的，必须先收窄**：`typeof v !== 'number' || !Number.isFinite(v)`
-  （`Number.isFinite` **不做类型收窄**，`strictNullChecks` 下要显式判类型）；**范围要夹住**：
-  增益 ±40dB、前级 ±15dB、峰值 ≤4（超出当损坏）。
-- **`null` 标签在 payload 里也要是 `null`**（不是 undefined）：客户端据此区分「未测量」与「字段缺失」。
-- **只读标签不够**（本机曲库实测 **0/40 首**带标签 ⇒ 必须有**测量**兜底）：ffmpeg 的
-  `ebur128=peak=true` **只读**测量（绝不写回音频文件），增益 = `-18 LUFS` − 实测积分响度；
-  结果存 `$DSH_HOME/storages/dsh-music-player-rg.json`，带 `size`+`mtimeMs` 失效判断。
-- **优先级是标签 > 测量**（标签是权威，测量只是兜底）—— 反过来的话 B12 立刻红。
-- **全静音 ≠ 测量失败**：峰值 `-inf` 时**不做增益、也不猜**，计入 `skipped` 而非 `failed`
-  （当 0dB 用会得出 +52dB —— 对照⑧实测）。
-- **测量必须可取消、且随实例停止**：ffmpeg 子进程要在 `dispose()` 里 `SIGKILL`，否则热重载后
-  它会继续跑到结束（I-06 孤儿进程）；`rgJob` 状态必须放在 **createHost 内**（module 级可变状态
-  在热重载下会被不可回收的 ESM 条目永久钉住，§2.2）。
-- **失败原因要分类且不含路径**（`ffmpeg-not-found` / `spawn-error` / `timeout` /
-  `loudness-not-readable:exit=N,len=N` / `silent-track`，§2.8 脱敏）。
-
-> **§2.7 的「四个副本」实际是五个**：`Track` 类型 → **`PayloadTrack` 白名单投影** →
-> `lib/index.js` 的 `FETCH_ROUTES`（仅端点）→ `dsh-plugin.json` → 客户端 `MusicTrack`。
-> 本轮就栽在这里：字段在宿主解析出来了、类型也加了，但 **`payloadTracksFor()` 的 map 没加**
-> ⇒ 下发永远是 undefined，而门禁 A1–A3 立刻变红（负向对照①正是把投影删掉验证的）。
-> **给 `Track` 加字段时，必须同时改 `PayloadTrack` 与客户端 `MusicTrack`。**
-
-### 2.21 预取 + 交叉淡化：消除切歌「缝」（第 22 轮起；第 25 轮**默认开启**）
-
-第 20 轮按 fooyin 把过渡校准到 300/700ms —— 遮蔽力上去了，代价是**手动切歌多出约 300ms 淡出缝**。
-fooyin 没有这个代价，因为它的 300ms 是**重叠**的交叉淡化。本轮补上浏览器里的等价物。
-
-- **两个媒体元素 + 每元素一个电平节点**：`sourceX → levelX → rg → volume → dest`。两个元素接进
-  **同一个常驻 AudioContext** ⇒ 设备流仍只开一条，§2.19 的前提不变。
-- **`audio` 必须是 `let`**：交接时交换绑定（`audio = inEl`），90+ 处引用自动跟随。活跃元素查询走
-  `player.media()`（调用时才读 `audio`）。
-- **电平必须**每元素**独立**：用共享音量节点做淡出会连新元素一起压掉（门禁 D3：交叉期间音量节点
-  **零写入**）。
-- **「重叠」的判据是「同刻起算」**：两条电平 ramp 都以同一个 `now` 为基准。只断言「节点不同」时，
-  串行的「先淡出再淡入」也会通过（对照⑫实测）—— 本轮第二次踩「断言看着强、其实不判别」。
-- **teardown 要停两个元素**：交叉进行中活跃的仍是旧元素，正在淡入的新元素是**空闲**元素，只停当前
-  那个会让它卸载后继续出声（对照⑬）。**切歌是异步的**：断言必须等新元素真的 `play()` 后再 teardown，
-  否则 halt 抢跑、断言恒绿（本轮实测踩到）。
-- **默认开启**（第 25 轮用户实测后翻转）：用户确认**换页面时也有电流声** ⇒ 与平台/其它来源有关，
-  不再是本插件的设备重协商，所以 300ms 淡出的「保险」理由不再成立，而交叉淡化能消掉切歌缝。
-  显式关闭：`?crossfade=0` 或 `window.__dshMusicCrossfade = false`。
-- **翻转默认值必须同时改门禁语义**：H1/H2 断言的是**单元素**淡出路径 —— 现在它只在
-  `?crossfade=0` 下成立，其它套件（RG / 均衡器 / CORS）一律**显式固定**模式（`?crossfade=0`）
-  做隔离，否则「默认值」会变成每个套件的隐藏变量。D 段同时断言**默认开启（D0a）**与
-  **显式关闭（D0b）**两条 —— 只断言一条等于没人守默认值。
-
-### 2.22 均衡器：0dB 即直通，前级必须自动补偿（第 23 轮沉淀）
-
-10 段 ISO 中心频率（31…16k）的 peaking 滤波器串成一条链，**插在 RG 与音量之间**；
-频点、Q 值与预设曲线都是本仓库自定（fooyin 是 GPL-3.0：只借鉴「多段 + 预设」这个做法）。
-
-- **0dB 的 peaking 滤波器就是直通** —— 所以「关闭」不需要旁路开关，也就没有「开关状态与曲线
-  状态不同步」这类 bug。默认必须是 `flat`：用户没要求就不要偷偷改声音。
-- **自动前级 = `10^(-max(0, 最大提升)/20)`**：只提升某几段会把峰值推过满刻度（与 RG 的防削波
-  同一思路）。**禁止**去掉它 —— 门禁 E5 会红。
-- **曲线要夹范围**（±12dB），**两处都要夹**（API 边界 + 应用层）：对照实测只删一处**仍会通过**，
-  所以对照必须按「两处都删」做。
-- **非法输入不动现状**：未知预设、长度不对的曲线一律**返回不动**（不猜）—— 对照⑱删掉校验后
-  E7/E8/E9 立刻变红。
-- **缺 `createBiquadFilter` 时只跳过 EQ**，绝不能因此把整条音频图判为失败 —— 那会连 §2.19 的
-  常驻输出流一起丢掉（门禁 E10）。
-- **常量必须在模块级**：视图与 player 是两个作用域，放 `createPlayer` 内视图读不到（本轮吃了
-  5 个类型错误）。
-- **`check()` 的 detail 是无条件求值的**：没有滤波器时 `filters[0].gain` 会在 detail 里崩、掩盖
-  后面的断言。**非空护栏要同时加在条件与 detail 上**（`[].every()` 恒真 = 空过）。
-
-### 2.23 波形进度条：包络要**忠实**，取不到就**静默降级**（第 24 轮沉淀）
-
-进度条只有一条线时看不出「哪儿是副歌、哪儿是静音」，拖动全凭猜。做法与 fooyin 的 waveform
-seekbar 同源（GPL-3.0：只借鉴做法，不抄代码）。
-
-- **内存必须与曲长无关**：ffmpeg 只读解码成单声道后**按 0.25s 流式聚合**取峰值，绝不缓冲整段
-  PCM（一小时 8kHz 单声道就是 56MB）。桶数设上限（超长曲目只保留前半，**有界**优先于完整）。
-- **不做低通式的"假波形"**：解码率要够高（8kHz），否则把高频削掉会让鼓点看起来是平的
-  （§9 陷阱 4 的同类：夹具/参数不保真，断言就没有判别力）。
-- **每首各自归一化到 0..1**：安静的歌在 UI 上才看得见；**全静音保持全 0**（不猜）。
-  对照实测：改成按满刻度除 → 前半 0 / 后半 **0.80** → B2/B3 红。
-- **缓存要按 `size`+`mtimeMs` 失效**：只判「有没有条目」会让波形永远停在旧内容上
-  （对照实测：去掉失效判断 → B5 红）。
-- **取不到就静默降级**：没有 ffmpeg / 非音频 / 未知曲目 → 回**空波形 + 稳定原因**（不是 500），
-  客户端退回原来的细轨，**不报红字、不影响播放**（门禁 A6/B6/B7）。
-- **客户端必须丢弃迟到的结果**：快速连切时先发的那首会晚回来，画上去就与正在播的歌对不上。
-  ⚠️ **对照要让它真的能红**：得让「先发的慢、后发的快」，否则迟到的先写、正确的后写，
-  看起来反而正确（本轮实测：两边一样慢时，删掉守卫**照样全绿**）。
-- **进度用 CSS 变量传给遮罩**（`--dshm-played` + `clip-path`）：拖动的 rAF 循环**不必**触发
-  React 重渲染（进度条是刻意非受控的，见 §4）。
-- **两层柱子**（底层暗 / 上层亮）而不是「把已播部分重画一遍」：只渲染一次，遮罩裁剪是免费的。
-
-### 2.24 性能：客户端侧也要缓存/预取，常驻 UI 有**节点预算**（第 25 轮沉淀）
-
-宿主侧的缓存（RG / 波形）只解决了「重复计算」；**客户端每一次往返与每一个 DOM 节点**同样要计账。
-
-- **预取要和功能开关解耦**：波形的预取挂在「取下一首」这条已有的预取路径上，但**不依赖**
-  交叉淡化开关 —— 关掉淡化也该预取（否则一个优化被另一个开关悄悄关掉）。
-- **预取只填缓存、不动 UI**：预取回来的包络绝不能写进 `state.wavePeaks`（那是当前曲目的）。
-- **客户端缓存必须有界**（这里是 30 条）：§2.2 的容器上限同样适用于客户端 Map。
-- **可量化的收益要写进门禁**：切歌 3 次从 **4 次请求降到 2 次**（起播各取一次当前+下一首），
-  底栏柱子 **120→60 根**（节点 240→120）。这两条都不是「感觉快了」，而是断言里的数字。
-- **常驻可见的 UI 要单独给预算**：全屏播放器可以给细节（120 根），**常驻底栏减半**（60 根）——
-  它在浏览列表时一直可见，节点数是持续成本。
-- **默认值本身也要有断言**：翻转默认值（如交叉淡化）时，必须同时断言「默认走新路径」与
-  「显式关闭仍能回到旧路径」，否则默认值无人守（对照实测：把默认改回去 → D0a 立刻红）。
-
-## 3. 可跑门禁
-
-改完**必须**跑，全绿才算完成：
-
-```bash
-pnpm run build                # src/*.ts → lib/*.js（改了 src 必须跑）
-pnpm run typecheck            # 类型棘轮：错误数只许变少（基线 0）
-npm test                      # 产物新鲜度 + 逐文件严格 + 31 套回归
-                              # = check-build-fresh && check-strict && run-all
-pnpm run check:manifest       # dsh-plugin.json 对 pinned Community v0.15 校验
-node scripts/check-whitespace.mjs   # 空白/冲突标记（`npm test` 已包含）
-                              # ⚠️ 它**排除 `lib/`**：tsc 的 JSX 输出会在部分行尾留空格（HEAD 实测 16 处），
-                              #    而手改 `lib/` 违反 §2.15 ⇒ 那个失败按规则**无法修复**。产物的
-                              #    质量由 `check-build-fresh`（逐字节比对）保证，不由空白门禁保证。
-```
-
-`.github/workflows/ci.yml` 在每次 push / PR 上跑同一组门禁（`pnpm install --frozen-lockfile` → `typecheck` → 全部 `lib/*.js` 与 `scripts/*.mjs` 的 `node --check` → `npm test`（= 新鲜度 + 逐文件严格 + 31 套）→ manifest 校验 → 冲突标记扫描）。**CI 故意不先 build**：新鲜度门禁只在 `lib/` 未被就地覆盖时才有判别力。**CI 绿不等于 manifest 校验过**：CI 里没有 vendor 基线，`check:manifest` 会走 SKIP 分支并打 `::warning::` —— SKIP 不是通过（见上）。
-
-- **只要动了 `dsh-plugin.json` 或 manifest 相关字段，`check:manifest` 是必跑项。** 它用固定 revision 的 `@dsh-std/manifest` 校验，不是照 `main` 分支。基线找不到时它以 **SKIP** 退出（exit 0 + 明确警告），**那不是通过**——用 `DSH_STD_MANIFEST=/path/to/@dsh-std/manifest/lib/index.js` 指过去。
-- 新增功能**必须**在 `scripts/run-all.mjs` 的 `suites` 里注册回归套件；没注册等于没有门禁。
-- 交回改动前**保留工作区中与本任务无关的用户改动**，不要顺手重构。
-
-## 4. 本仓库既有约定
-
-- **改动生效路径**：改的是 `src/*.ts`（`lib/*.js` 是产物，见 §2.15）。挂 `pnpm run dev` 让保存即重编，然后：`src/client.ts` → 刷新页面；`src/host.ts` → **也是刷新页面**（入口薄壳按 `lib/host.js` 的 mtime 重载）；**只有改 `src/index.ts` 才需要重启进程**。
-- **测试防线（逐条标注真实状态，第 2 轮核实）**：
-
-  | # | 防线 | 真实状态 |
-  | --- | --- | --- |
-  | ① | `scripts/test-audit.mjs` 静态审计——CSS class 双向引用、`@keyframes` 必须被引用、BEM 修饰类不被基类规则顶掉、中英字典键一致、无未调用的 player API 方法、client 的 `api()` 调用都有宿主路由 | ✅ **真实存在**，6 项全落地，且多数带非空护栏（`kf.length > 0`、`methods.length > 10`、`hostRoutes.size >= 10`）。BEM 那一项**无护栏**，见 `A2-14` |
-  | ② | 按钮接线检查——读 `__reactProps$*`，断言每个 `<button>` 都挂了处理函数或处于 disabled | ✅ **真实存在**（`test-client-shell.mjs:202-209` 定义读取器，`:393`/`:398-399` 断言，`test-match-client.mjs:146-152` 覆盖弹层） |
-  | ③ | 「布局结论一律用真实 Chromium 量盒模型（headless Chrome + CDP）」 | ❌ **不存在**。该主张已从 README 删除（原在 `README.md:270`；现改为显式「本仓库没有布局测量能力」的警告），`scripts/` 下无任何浏览器启动器；8 个客户端套件全部走 jsdom，布局类结论实际靠**伪造 `scrollWidth`/`clientWidth`** 得出。见 `A2-02` |
-
-  → **③ 是 README 的错误主张**。本仓库当前**没有**布局测量能力；涉及「位置/宽度/是否溢出」的判断要么补一个真实 Chromium 门禁，要么明确标注为**未验证**。不得再引用这条防线。
-- **不留死代码**：**第 15 轮起 `noUnusedLocals` + `noUnusedParameters` 已永久开启**（开启前实测全仓仅 5 处，已全部清掉）—— 新增未使用的局部变量 / 参数 / 死声明会让 `typecheck` 直接变红。另有 `scripts/test-audit.mjs` 的死方法 / 死字典键 / 死 CSS class 检查作为补充。（`A2-15` 原记录「无 typescript / 无 tsconfig」已在第 11 轮推翻。）
-- 文案与注释以中文为主；新增 UI 文案必须同时补中英字典键。
-- 交付说明里**区分「已验证」与「未验证」**：写清用什么命令、在哪个运行时、什么结果；别把「没跑」写成「通过」。
-
-## 5. 审计台账（完整证据 → [`docs/audit-ledger.md`](docs/audit-ledger.md)）
-
-> **台账正文在 `docs/audit-ledger.md`，只追加不删。** 本节只留索引与当前状态 ——
-> `AGENTS.md` 有 **64 KiB 注入预算**，撞上后**尾部会被静默截断**（已实测），
-> 所以细节一律放 `docs/`（§7.2、§11）。
-
-**一句话历史**：13 条高危（`A1-01…A1-03`、`A2-01…A2-03`、`A3-01`、`A4-02`/`A4-03`/`A4-06`、
-`A5-02…A5-04`）**已于第 8/9 轮清零**；此后转入「线上故障」轮次。
-
-**逐轮要点见台账**（第 7–19 轮的维度、证据与结论都在 `docs/audit-ledger.md` 的 §5.11–§5.25）。
-
-**当前状态（第 24 轮）**：高危 **13 → 0**，只剩中/低与**明确接受项**（§10）；套件 18 → **31**
-（全绿、每条新门禁都做过对照）；类型错误 **243 → 0** 且基线锁 0；审计维度全覆。
-自推翻的记录（**不得覆盖，只能新写**）：`D-05` 误标「已修」、`A1-02` 的冷却设计、第 13 轮自愈的修法。
-
-
-## 6. 审计与迭代协议
-
-### 6.1 每轮固定动作
-
-1. **选定维度**：一次只审一个（manifest/声明面 · lifecycle/释放面 · composition/协商面 · permission+storage/数据面 · 门禁有效性）。
-2. **禁止把 README / 注释的自我描述当事实**：任何「已有防线 / 已有约定 / 已有测试」的说法，**引用前必须实测存在**（`glob`/`grep`/实跑）。本条第 1 轮被违反，代价见台账 [`docs/audit-ledger.md`](docs/audit-ledger.md) 里的 `E-01`…`E-04`。
-3. **取证**：只能报**真读过并给出 `文件:行号`** 的条目。静态推断必须显式标注为推断，不能混进「违规」。
-   - **「0 命中」的结论必须先用一个已知为真的样本校准同一搜索面。** 第 7 轮实测教训：我曾用 `grep -c <pattern> bin.js` 得到 `webserver.dsh`/`browser.ui.dsh`/`HttpPrefixRoutes` 全为 `0`，**但同一命令对宿主确实在用的 `conversation.view` 也是 `0`** —— 说明搜错了产物（`bin.js` 是 CLI 入口，不是 client bundle），那个 `0` **不含任何信息**。纠正方法：先在候选产物里搜一个已知为真的字符串（`conversation.view` → 命中 `cordis-client-runner/lib/client.js` 等），再在同一批产物里搜待证字符串。
-   - 这与「按动词搜日志」（台账 §5.7.5）同族：**检验方法本身也需要被检验。**
-4. **登记**：按台账 [`docs/audit-ledger.md`](docs/audit-ledger.md) 的字段（严重度 / 位置 / 规范依据 / 判定 / 门禁 / 状态）写入，**只追加**。
-5. **复核**：基线跑 `node scripts/run-all.mjs`，明确写出该条**是否被现有门禁拦住** —— 拦不住就是门禁盲点。
-6. **沉淀规则**：若发现的是**通用形态**（不是一次性 bug），把规则补进 §2，而不是只在台账里记个例。
-7. **升级门禁**：判定为「违规」且**可机械校验**的条目，必须补一个 `scripts/test-*.mjs` 断言并在 `run-all.mjs` 注册。
-   - 若补了断言会让套件变红（缺陷真实存在），**先登记为待修并报告，不要为了绿而放宽断言** —— 恒绿测试比没测试更坏。
-   - 新断言必须打在**生产真正使用的传输面**上（默认 `connection.fetch`），否则是 `A2-03` 式误导性绿灯。
-8. **记录轮次**：在 §5 追加「第 N 轮」小节，写清维度、基线、结论。
-9. **收口**：提交 + 推送 + `git status --short` **为空** + CI 绿。**「验证通过」与「已交付」是两个
-   断言**，各有各的证据来源 —— 拿门禁（验工作区）的绿灯去说「已进仓库」，就是台账 §5.24 的失误。
-   **上一轮的结论同样是待证事实，不是这一轮的前提。**
-
-### 6.2 硬约束
-
-- 台账条目**不得删除**；判定推翻要新写一条说明理由。
-- 报告中**必须同时列出「符合」的证据**（哪些规范条款已落实、落在哪个文件哪一行）—— 只列问题会让后续迭代误判覆盖度。
-- **禁止**为了让门禁变绿而删除断言、放宽阈值、或把 `assert` 改成 `console.log`。
-- 「规范未覆盖」是合法判定：写清规范没管这件事，以及本仓库自定的处理方式。
-
-### 6.3 门禁总表（按轮次）
-
-**第 8 轮已实现 4 条**：`声明面一致性`（`test-route-consistency.mjs`）、`凭据不进日志`（`test-audit.mjs` ⑦）、`停止后无自续期定时器`（`test-poll-teardown.mjs`）、`teardown 优先于在飞重载`（`test-teardown-race.mjs`）。其余仍待建；按 §6.1 第 7 条实现后**会先变红**，届时按 §6.2 登记待修、**不得放宽断言**。
-
-| 轮次 | 已实现的门禁（详细断言见 [`docs/gates.md`](docs/gates.md)） |
-| --- | --- |
-| 8–15 | 声明面一致性 · 传输面覆盖 · 释放面完整性 · 死代码（`noUnusedLocals`/`noUnusedParameters`）· 停止后无自续期定时器 · teardown 优先于在飞重载 · 客户端 release 面 · 恒绿断言扫描 · 门禁诊断可用 |
-| 16 / 18–24 | 视图卸载不丢全屏播放器 · 音频不得硬切换（时长按 fooyin 校准）· 音频常驻输出流 + 媒体 CORS · **ReplayGain 响度归一化** |
-| 待建 | `ctx 读取面一致性` · `契约坐标可解析` · `prefix 语义一致` · `凭据不进日志`（落盘面已覆盖）· `错误面脱敏` · `声明面覆盖实际调用` · `副作用前置授权` · `存储失败不得报成功`（`A5-09`） |
-
-**逐条断言、覆盖的审计条目与负向对照证据 → [`docs/gates.md`](docs/gates.md)。**
-
-
-## 7. 文档分层与关系
-
-### 7.1 分层地图
-
-| 文件 | 面向谁 | 放什么 | **不放**什么 |
+## 完成定义（DoD）
+
+1. 改了 `src/` → 跑过 `pnpm run build`。
+2. `pnpm run typecheck` 0 错误（`noUnusedLocals`/`noUnusedParameters` 已开：死代码直接红）。
+3. `npm test` 31 套全绿。
+4. 新增功能/修复 → 在 `run-all.mjs` 注册了回归套件。
+5. 新增断言 → **做过对照**：把缺陷改回去，断言必须变红（见「审计与迭代协议」第 7 条）。
+6. 改了文档 → README ≤ 220 行，深度材料进 `docs/`。
+7. **收口 = 提交 + 推送 + `git status --short` 为空 + CI 绿。** 只跑门禁不算完成——门禁验工作区，
+   `git status` 才验仓库。
+
+## 不可协商的规则
+
+> 每条给出**能机械抓住**的门禁或审计条目；完整论证见 [docs/rules-detail.md](docs/rules-detail.md)。
+
+**Manifest**（`manifest.zh.md`）。包根至多一个 `dsh-plugin.json`，必须是静态 JSON，不联网执行
+schema/validator；未知版本不得回退旧 schema。扩展字段不得暗含 required 行为；`optional` 必须写
+`fallback`；`compat`/`overrides` 不产生 live support；schema 通过 ≠ 能激活，digest ≠ 发布者身份。
+
+**Lifecycle**（`lifecycle.zh.md`）。`activate` 里注册的一切必须绑定当前 activation 的 cleanup
+scope；scope 关闭先 abort 再**逆序**执行 disposer，每个至多一次，单个失败不阻止其余；停止后要
+验证 support 与 owner record 已移除；超 deadline 必须留 timeout 诊断。**不得依赖 module 卸载完成
+清理**：热重载下旧 module 被 ESM 注册表永久持有，旧实例的 handler/timer/子进程/module 级容器
+必须自己撤销并设上限。
+
+**Composition**（`composition.zh.md`）。facet 名称与发现顺序**不是**选择条件；未被选中的 facet 不
+带入 requirements；preflight 成功 ≠ agreement，运行时不符必须失败/回滚/重组；同坐标冲突不得靠
+注册顺序解决；没有「最后注册者覆盖」；实际激活偏离 plan 必须报告 activation failure。
+
+**Permission**（`permission.zh.md`）。静态请求是 facet 的**上限**：缩小 scope 不必改 manifest，
+**扩大必须新增声明**。每个产生副作用的位置都要 `authorize(action, scope)`——validator、report、
+UI 上的「已允许」都不能替代运行时检查。审计记录前移除凭据/文件内容/工具输入；不得用字符串前缀
+判断路径或 scope。
+
+**Storage**（`storage.zh.md`）。`LocalStorage` 通过 protocol requirement 声明；读需
+`storage.local.read`，写/删需 `storage.local.write`；value 必须是 JSON value；同命名空间同 key
+串行化，**不得**假设 transaction/CAS/enumeration/watch；`deactivate` 不删数据；cleanup 可重复执行，
+**失败不得报告为已完成**；禁止把 value/凭据/secret 写进普通日志。
+
+**声明面五副本**。`host.ts` 分派表 ←→ `index.ts` 的 `FETCH_ROUTES` ←→ `dsh-plugin.json` 的
+endpoints ←→ `Track`→`PayloadTrack` 白名单投影 ←→ 客户端 `MusicTrack`——**给 `Track` 加字段必须
+同时改后两处**，否则下发永远是 undefined。`connection.fetch.register` 是**精确匹配**，新端点必须
+同步加进 `FETCH_ROUTES` 才可达。
+
+**错误面与降级**。404 在本插件是正常语义，**不得**用它当「宿主是不是新入口」的唯一判据（平台
+栅栏在路由前答 401/403）；探测必须可重入（禁止一次性标志）；降级信任边界必须显式报告；错误响应
+必须脱敏（不得回显路径/文件名）。
+
+**诊断与日志**。禁止把凭据写进任何日志或落盘（`req.url` 的 query 就带 token，落盘前必须剥
+`t=`/`token`/`authorization`/`cookie`）；诊断代码不得进 HEAD；写盘路径必须在已声明 scope 内；
+禁止在请求关键路径同步落盘。
+
+**客户端 activation 归属**。禁止用 `window.*` 把上一代 player/timer/handler 交给下一代；
+`await` 挂起后恢复必须检查 `disposed`；**「清 timer」≠「阻止再武装」**，teardown 要显式复位守卫
+依赖的状态；自建 DOM 与全局键必须释放；不得读取未在 manifest 声明的 context API。
+→ [细则](docs/rules-detail.md#210)
+
+**契约坐标必须真实可解析**。禁止发明 `apiVersion + kind`，写进 manifest 前必须实测；`fallback`
+不能洗白不存在的坐标；无 definition 的扩展 ≠ 能力声明；extension id 必须有运行时对应；声明的
+`prefix` 必须等于 `webServer.register` 的 path；`requires.contracts` 至少一条 `required`。
+→ [细则](docs/rules-detail.md#211)
+
+**自建 bearer token 三律**。① 按用途分签（art/stream 不得互换）；② 基址钉回环字面量，不回显
+请求 Host；③ 被豁免栅栏的端点不得承担读能力，凭证不得进入任何持久通道。token 通道既不走平台
+鉴权也不走插件栅栏，**唯一防线是保密性**。 → [细则](docs/rules-detail.md#212)
+
+**失败不得报告为成功**。吞掉写失败仍返回 200 是违规（现 `A5-09`：`saveState` 全量吞错后 `/dir`
+仍 200）；持久化层需要有稳定错误码。
+
+**能力 token 与 activation 生命周期对齐**。token 必须钉在**进程**上（`Symbol.for` + `globalThis`），
+不得随 `createHost()` 轮换；消费者缓存要带 TTL 且失败时作废重取。判断症状归属：`/api/mv` 是相对
+地址、**音频永远走 token 直连**——「音乐不能播、MV 能播」几乎总是 token 通道问题。
+
+**TypeScript 真源与棘轮**。`src/*.ts` 是**唯一真源**，`lib/*.js` 是 tsc 产物且提交进仓库
+（`dsh plugin add` 不跑构建）——**禁止手改 `lib/`**（`check-build-fresh` 逐字节比对）。
+`strictNullChecks` 等全开、`noImplicitAny` 暂关但由 `tsconfig.strict.json` 的**允许清单**单向收严；
+**禁止**为让门禁变绿而放宽档位、上调基线或删名单项。`client.ts` 必须零 import（bundle 由宿主
+`eval`，import 无法解析）。静态断言的四个坑：先剥注释、按行号而非偏移、别依赖字面缩进、
+按**角色**而非创建顺序选节点。
+
+**平台栅栏在路由之前拒答**。回落判据必须覆盖 401/403/404 全部「送不到」的状态码 + 正向识别 +
+显式报告降级；例外只给 `/session`；拿不到基址必须**重取**（降级成不可 seek 比等待更糟）；
+按可观测症状兜底自愈要有界、成功才停；夹具保真度就是判别力。 → [细则](docs/rules-detail.md#216)
+
+**视图卸载**。`conversation.view` 切走即卸载：要跨视图保留的 UI 状态禁止放视图局部 `useState`；
+视图驱动的定时器归资源所有者；重挂载要把外部资源搬回来且断言「同一个元素」；UI 过渡定时器禁止
+用 `disposed` 早退，也禁止给 `openPlayer` 加 `disposed` 守卫（会让全屏播放器再也打不开）。
+→ [细则](docs/rules-detail.md#217)
+
+**过渡时长**。淡入淡出时长取 fooyin 默认值（manual 300/300 · auto 700/700 · seek 120/120 ·
+pause 120/120 · stop 120/300 ms），**禁止**调到 200ms 以下；拖动进度也要淡（只在常驻音频图接管
+增益时）；`state.volume` 始终是用户设定值，渐变只改瞬时值；渐变必须可取消且取消时结算 promise；
+「没有声音要淡出」的路径必须**同步**（判据 `paused === false && volume > 0.001`）。
+
+**电流声 = 设备被反复重建**。Chromium 为每条媒体源建一条输出流 ⇒ 换 `src` 会重协商设备格式。
+修法是**常驻 `AudioContext`**（一条流、固定采样率）；跨源接 Web Audio 必须先确认 CORS（否则静音）；
+建图失败永久退回元素音量；**建图后元素音量必须置中性**；`halt()` 只 suspend 不 close；
+`sampleRate` 创建即固定所以 ctx 必须首播时才建；`location` 一律写 `window.location`。
+
+**ReplayGain**。只读标准标签、不改文件；**未测量 ≠ 0dB**（缺标签必须不做增益）；增益走**独立
+节点**；回退路径把 RG 折进元素音量且 `readVolume()` 要除回去；防削波恒开（按 `peak` 收窄）；
+标签先收窄再夹范围（±40dB / 前级 ±15dB / 峰值 ≤4）；`null` 要**原样下发**；标签缺失时用 ffmpeg
+`ebur128` **只读**测量兜底（本机实测 0/40 首带标签）；优先级**标签 > 测量**；全静音计入 skipped
+而非 failed；测量子进程必须可取消且在 `dispose()` 里杀掉；失败原因分类且不含路径。
+
+**交叉淡化**。两个媒体元素 + 每元素一个电平节点，接进**同一个**常驻 AudioContext；`audio` 必须是
+`let`（交接时交换绑定，90+ 处引用自动跟随）；电平必须每元素独立（共享音量节点会连新元素一起压掉）；
+「重叠」的判据是两条 ramp **同刻起算**；teardown 要停两个元素，且断言必须等新元素真的 `play()`
+之后（切歌是异步的，否则 halt 抢跑）；**默认开启**，`?crossfade=0` 显式关闭；翻转默认值必须同时
+断言「默认走新路径」与「显式关闭可回旧路径」，并让其它套件**显式固定**模式做隔离。
+
+**均衡器**。10 段 ISO peaking 串在 RG 与音量之间；**0dB 即直通**（所以不需要旁路开关），默认
+`flat`；自动前级 `10^(-max(0,最大提升)/20)` 不得去掉；曲线夹 ±12dB 且**两处都夹**（API 边界 +
+应用层）；非法输入一律**不动现状**；缺 `createBiquadFilter` 时只跳过 EQ，绝不因此丢掉常驻音频图；
+参数常量必须在模块级（视图与 player 是两个作用域）。曲线按**入耳式真能重放的频段**分布——小动圈
+对 31/62Hz 几乎无输出，把能量堆在那里只会让自动前级压低整体音量。
+
+**波形**。ffmpeg 只读解码后**流式**聚合（内存与曲长无关，绝不缓冲整段 PCM）；每首各自归一化到
+0..1、全静音保持全 0；缓存按 `size`+`mtimeMs` 失效；取不到就**静默降级**（空波形 + 稳定原因，
+不是 500）；客户端必须丢弃**迟到**的结果；进度经 CSS 变量给遮罩（拖动不触发 React 重渲染）。
+
+**性能：客户端也要缓存/预取，常驻 UI 有节点预算**。预取与功能开关**解耦**；预取**只填缓存、
+不动 UI**；客户端缓存必须有界；常驻底栏柱子减半（全屏 120 根 / 底栏 60 根）；可量化收益要写进
+门禁（切歌 3 次 4→2 次请求）。
+
+## 不变量
+
+| # | 不变量 | 违反症状 | 门禁 |
 | --- | --- | --- | --- |
-| `README.md` | 使用者 / 市场复核 | 定位、截图、兼容性状态、安装与从源码运行、功能（短条目）、权限表、开发与测试命令、排查、文档索引 | 逐条技术论证、实现叙事、历史沿革、术语表、**完整端点表**（在 `docs/compatibility.md`）、**结构树**、死代码/门禁细节（在 §6.3） |
-| `docs/desktop.md` | 改宿主接缝 / 排查 Desktop 问题的人 | 两代宿主形态差异、macOS 通知与「正在播放」的能力边界与验证方法、官方组件与图标命名演变、媒体直连（token 通道）的原因、技术名称表 | 与 Desktop 无关的内容 |
-| `docs/compatibility.md` | DSH STORE 收录 / 供应链与权限审查 | 声明位置与取值、逐版本依据、尚未提供的证据、已知断点、依赖、权限与代码信号的对应关系、外部服务、失败边界、**端点面与信任边界**（README 在这里链接） | 使用说明 |
-| `AGENTS.md`（本文件） | 改代码的人与 agent | 规范基线、不可协商的规则（§2）、可跑门禁（§3）、既有约定（§4）、审计与迭代协议（§6） | 台账正文（已移出） |
-| `docs/gates.md` | 改代码 / 查门禁的人 | **门禁总表**（逐条断言、覆盖的审计条目、负向对照证据）。第 21 轮从 `AGENTS.md` §6.3 移出 | 规则本身（在 `AGENTS.md`） |
-| `docs/rules-detail.md` | 查规则细节的人 | `AGENTS.md` §2.10–§2.12、§2.16–§2.17 的**完整正文**（论证、实测数据、编号裁定）。第 25 轮因 64 KiB 注入预算外移 | 新规则（新规则先写进 `AGENTS.md` §2） |
-| `docs/audit-ledger.md` | 审计者 | 逐轮台账全文（证据、复现、符合项清单、编号裁定） | 规则本身 |
-| `docs/images/` | README 读者 | 真机截图（音乐标签页 / 全屏 MV）。**README 顶部引用**；新增截图请降采样到 1600px 宽再入库 | —— |
-| `dsh-plugin.json` `x-dsh-transition` | 跨版本核对者 | 接缝的实测记录。**升级 DSH 后按运行中的应用核对，不要按本地 checkout。** | —— |
-| `src/*.ts` → `lib/*.js` | 改代码的人 | 源码在 `src/`，产物在 `lib/`；两者都提交，由 `check-build-fresh.mjs` 保证一致。见 §2.15 | 手改 `lib/` |
-| `tsconfig.json` + `scripts/typecheck-baseline.json` | 改代码的人 | 类型档位与棘轮基线（当前 **0**）。**禁止为了让门禁变绿而放宽档位或上调基线** | —— |
-| `tsconfig.strict.json` + `scripts/check-strict.mjs` | 改代码的人 | 逐文件收严的**允许清单**：名单里的文件必须在 `noImplicitAny: true` 下零错误。清干净一个就加一个，**禁止删**（见 §2.15） | —— |
+| I-01 | 声明面五副本逐字一致 | 端点在某个宿主形态**不可达** | `test-route-consistency` |
+| I-02 | 媒体源是 token 直连的**绝对地址** | 进度条一拖就回 0 秒 | `test-mv-seek` |
+| I-03 | 能力 token 进程级 + 按用途分签 | 音乐全不能播 / 交叉越权 | `test-token-lifetime`、`test-security` |
+| I-04 | 栅栏豁免只到 Origin/Sec-Fetch，Host 必须回环 | 局域网可读库内任意文件 | `test-security` |
+| I-05 | 每个副作用位置过 `authorize(action, scope)` | 越界读写 | `test-audit` |
+| I-06 | teardown 后不得再启动（timer / 在飞 await / 子进程 / 全局键 / DOM） | 卸载后请求风暴、孤儿进程 | `test-poll-teardown`、`test-teardown-race`、`test-mv-teardown`、`test-teardown` |
+| I-07 | 凭据不进日志 / 落盘 / 持久通道 | 同机可读库内文件 | `test-audit` 凭据扫描 |
+| I-08 | 偏离 plan、降级信任边界必须显式报告 | 静默降级 | `test-audit` |
+| I-09 | 失败不得被报告为成功 | 以为保存了其实没写 | **待建**（`A5-09`） |
+| I-10 | `src/` 与 `lib/` 一致；`lib/` 不得手改 | 发出去的还是旧行为 | `check-build-fresh` |
+| I-11 | 类型错误只许变少；允许清单只许加 | 类型质量倒退 | `typecheck-ratchet`、`check-strict` |
+| I-12 | 不留死代码 | 维护成本与误读 | `noUnusedLocals` / `noUnusedParameters` |
+| I-13 | 每个断言都必须**能变红** | 门禁形同虚设 | 人工对照 + §陷阱 |
+| I-14 | 跨视图保留的状态只在 player store；视图定时器归资源所有者 | 切回音乐页看到列表页 / 卡在 closing | `test-view-persistence` |
+| I-15 | 每次过渡都淡入淡出，时长取 fooyin 默认；无声音可淡时必须同步 | 电流声 / 起播时序后移 | `test-audio-fade`、`test-audio-graph` |
+| I-16 | 音频必须有**常驻固定采样率**输出流；跨源先确认 CORS；建图后元素音量置中性 | 切歌电流声 / 静音 / 首播无声 | `test-audio-graph` |
+| I-17 | ReplayGain 走独立节点；未测量不做增益；按峰值收窄；标签先收窄再夹范围 | 响度跳变 / 互相覆盖 / 削波 / NaN | `test-replaygain` |
+| I-18 | 交叉淡化：同一常驻 AudioContext；电平每元素独立；teardown 停两个 | 切歌有缝 / 音量被压 / 卸载后仍出声 | `test-audio-graph`（D 段） |
+| I-19 | 均衡器：0dB 即直通；自动前级；曲线夹 ±12dB（两处）；非法输入不动；缺 API 只跳过 EQ | 削波 / 脏数据刺耳 / 丢常驻流 | `test-audio-graph`（E 段） |
+| I-20 | 波形：内存与曲长无关；包络忠实；缓存按 size+mtime 失效；取不到静默降级；丢弃迟到结果 | 长曲目吃内存 / 波形不更新 / 报错 / 画错歌 | `test-waveform` |
+| I-21 | 客户端缓存/预取解耦、只填缓存、有界；默认值有断言；常驻 UI 有节点预算 | 优化被开关关掉 / 画错歌 / 默认无人守 | `test-waveform`、D0a/D0b |
 
-### 7.2 分层规则（改文档前先读）
+## 已知陷阱
 
-- **README 的写法对齐 DSH 官方 [`README.zh.md`](https://github.com/deepseek-ai/deepseek-harness/blob/master/README.zh.md)**：纯中文标题、无 emoji、每节 2–4 句 + 链接到 `docs/`、装/跑命令用 ```sh 围栏、需要被外部引用的节加 `<a id="..."></a>` 锚点。**不要在 README 里做功能堆砌**——功能列表保持短条目，细节留给截图与 `docs/`。
-- **README 只放「怎么用」与「一张表」**。任何超过 3 行的论证、因果叙事、历史沿革、术语解释，**一律放 `docs/`**，README 只留一句结论 + 链接。目标：**≤ 220 行**，超出就要把内容下移。
-- **深度材料不得因为「README 要短」而被删掉**。搬家时保留全部事实与数字；本仓库的 `docs/` 就是这些材料的位置。删事实需要单独的理由与记录。
-- **不新增同义文档**。要写「关于 X」之前先查 §7.1 是否已有归属；有就并进去，不要开第三个讲同一件事的文件。
-- **README 里不许出现未验证的数字与不在仓库里的防线**。实测数字要标注是否纳入门禁（例：性能数字标注「未纳入门禁」）；曾出现过的「headless Chrome + CDP 布局门禁」是**不实主张**，已删除，不得再写回。
-- **与 README 冲突时以本文件的规范条目为准，并同步修 README。**
+1. 静态断言先剥注释（注释里会出现被断言的名字 → 恒红/恒绿）。
+2. 按行号判断，不要按字符偏移（`clientPortion` 剥掉了 CSS）。
+3. 断言不要依赖字面缩进（tsc 重排后正则静默返回 0 个方法）。
+4. **夹具保真度 = 判别力**（假元素缺 `currentSrc`/`seekable`、`[].every()` 恒真 ⇒ 空过）。
+5. **负向对照必须重建产物**（门禁读 `lib/`；不 build 控制组是空的）。
+6. 「0 命中」先校准搜索面（用已知为真的样本验证命令本身）。
+7. 一次性标志 / 冷却窗口是同一类错误。
+8. 「清 timer」≠「阻止再武装」。
+9. 修 bug 会点亮下游从未执行过的代码。
+10. 「只在出问题时记日志」不够——要在**行为发生的那一刻**记。
+11. **「本地全绿」≠「已进仓库」**：每轮收口看 `git status --short`。
+12. **禁止 `git checkout <路径>` 撤销临时改坏的文件**（会连未提交的真改动一起回滚）——用 `cp 备份`。
+13. **GC 时机敏感的断言测的不是保留量**：改**测量**（排除自身噪声 + 取稳态最小值 + 缺能力时明说
+    SKIP），不是放宽阈值。
+14. **对照要能真的变红**：波形的「丢弃迟到结果」在两边同样慢时删掉守卫**照样全绿**——得让
+    「先发慢、后发快」；均衡器的双处夹范围只删一处也照样绿——对照要删到断言真正依赖的那层。
 
----
+## 明确接受的取舍（不要「顺手修好」）
 
-## 8. 不变量索引（不可破坏清单）
+`system-art`/`system-stream` 不在 `connection.fetch` 上；保留 `/dsh-music` 旧前缀；`lib/*.js` 提交
+进仓库；`/library` payload 的 `mime` 为 `null`；不做随机播放/歌词页；封面只补缺失不覆盖已有；
+`noImplicitAny` 暂关；客户端套件跑 jsdom（**没有**布局测量能力，相关结论一律标「未验证」）；
+token 在进程生命周期内不过期。
 
-> 让接手者**不读完全文也能自检**。某条若找不到门禁，那本身就是缺口（§6.1 第 7 条要求补上）。
+## 审计与迭代协议
 
-| # | 不变量 | 违反症状 | 门禁 | 详情 |
-| --- | --- | --- | --- | --- |
-| I-01 | 端点面四处逐字一致 | 端点在某个宿主形态不可达 | `test-route-consistency` | §2.7 |
-| I-02 | 媒体源是 token 直连的绝对地址 | 进度条一拖就回 0 秒 | `test-mv-seek` | §2.14 §2.16 |
-| I-03 | 能力 token 进程级 + 按用途分签 | 音乐全不能播 / 交叉越权 | `test-token-lifetime`、`test-security` | §2.12 §2.14 |
-| I-04 | 栅栏豁免只到 Origin/Sec-Fetch，Host 必须回环 | 局域网可读库内任意文件 | `test-security` | §2.12 |
-| I-05 | 每个副作用位置过 `authorize(action, scope)` | 越界读写 | `test-audit` | §2.4 |
-| I-06 | teardown 后不得再启动（timer / 在飞 await / 子进程 / 全局键 / DOM） | 卸载后请求风暴、孤儿进程 | `test-poll-teardown`、`test-teardown-race`、`test-mv-teardown`、`test-teardown` | §2.2 §2.10 |
-| I-07 | 凭据不进日志 / 落盘 / 持久通道 | 同机可读库内文件 | `test-audit` 凭据扫描 | §2.9 |
-| I-08 | 偏离 plan、降级信任边界必须**显式报告** | 静默降级 | `test-audit` 降级上报 | §2.8 |
-| I-09 | 失败不得被报告为成功 | 以为保存了其实没写 | **待建**（`A5-09`） | §2.13 |
-| I-10 | `src/` 与 `lib/` 一致；`lib/` 不得手改 | 发出去的还是旧行为 | `check-build-fresh` | §2.15 |
-| I-11 | 类型错误只许变少；允许清单只许加 | 类型质量倒退 | `typecheck-ratchet`、`check-strict` | §2.15 |
-| I-12 | 不留死代码 | 维护成本与误读 | `noUnusedLocals` / `noUnusedParameters` | §2.15 |
-| I-13 | 每个断言都必须**能变红**（禁恒绿） | 门禁形同虚设 | 人工对照 + §9 | §6.1 §6.2 |
-| I-14 | 跨视图切换要保留的 UI 状态只在 player store；视图驱动的定时器归资源所有者 | 切回音乐页看到列表页 / 卡在 closing | `test-view-persistence` | §2.17 |
-| I-15 | 每次过渡都淡入淡出（换源 / 启播 / 暂停 / **seek**），时长取 fooyin 默认（300/700/120ms）；无声音可淡时必须保持同步 | 耳机里的「电流声」/ 起播时序整体后移 | `test-audio-fade`、`test-audio-graph` | §2.18 |
-| I-16 | 音频必须有**常驻固定采样率**的输出流；跨源接 Web Audio 必须先确认 CORS；建图后元素音量置中性 | 切歌/起播的「电流声」/ 静音 / 首次起播无声 | `test-audio-graph` | §2.19 |
-| I-17 | ReplayGain 走**独立节点**；未测量 → 不做增益（≠0dB）；增益按峰值收窄；标签先收窄再夹范围 | 响度跳变 / 互相覆盖 / 削波失真 / NaN 静音 | `test-replaygain` | §2.20 |
-| I-18 | 交叉淡化：两元素接进**同一**常驻 AudioContext；电平**每元素独立**；teardown 停两个 | 切歌有缝 / 用户音量被过渡压掉 / 卸载后仍出声 | `test-audio-graph`（D 段） | §2.21 |
-| I-19 | 均衡器：0dB 即直通；自动前级按最大提升补偿；曲线夹 ±12dB（两处）；非法输入不动现状；缺 `createBiquadFilter` 只跳过 EQ | 削波失真 / 脏数据变刺耳 / 连常驻输出流一起丢 | `test-audio-graph`（E 段） | §2.22 |
-| I-20 | 波形：内存与曲长无关；包络忠实且每首归一化；缓存按 size+mtime 失效；取不到**静默降级**；客户端丢弃迟到结果 | 长曲目吃内存 / 波形不随内容变 / 拿不到就报错 / 画错歌的波形 | `test-waveform` | §2.23 |
-| I-21 | 客户端缓存/预取：预取与功能开关解耦、只填缓存不动 UI、缓存有界；**默认值有断言**（默认走新路径 + 显式关闭可回旧路径）；常驻 UI 有节点预算 | 优化被另一个开关悄悄关掉 / 预取画错歌 / 默认值无人守 / 常驻 UI 越来越重 | `test-waveform`、`test-audio-graph`（D0a/D0b） | §2.24 |
+1. 一次只审一个维度：声明面 · lifecycle/释放面 · composition/协商面 · permission+storage · 门禁有效性。
+2. **不得把 README / 注释的自我描述当事实**：引用前必须实测存在。
+3. 取证只能报真读过并给出 `文件:行号` 的条目；静态推断要标注为推断。「0 命中」先用已知为真的样本校准。
+4. 登记进 [docs/audit-ledger.md](docs/audit-ledger.md)（**只追加**；判定推翻要新写条目，不得覆盖）。
+5. 复核：明确写出该条**是否被现有门禁拦住**——拦不住就是门禁盲点。
+6. 通用形态才进本文件；一次性 bug 只进台账。
+7. 可机械校验的违规必须补断言并在 `run-all.mjs` 注册；会让套件变红时**先登记待修并报告，不得放宽断言**
+   （**恒绿测试比没测试更坏**）。新断言必须打在**生产真正使用的传输面**上。
+8. 每轮在台账追加小节：维度、基线、结论。
+9. 收口 = 提交 + 推送 + `git status --short` 为空 + CI 绿；「验证通过」与「已交付」是两个断言。
+   上一轮的结论是待证事实，不是这一轮的前提。
 
-## 9. 已知陷阱速查
+## 文档分层
 
-> 按「写代码 / 写测试时最容易被骗的地方」排序。**每一条我都犯过并付了代价。**
+`README.md` 只放「怎么用」与一张表（≤220 行）；深度材料进 `docs/`：`docs/desktop.md`（Desktop 接缝）、
+`docs/compatibility.md`（STORE 收录与信任边界）、`docs/gates.md`（逐条门禁断言与负向对照）、
+`docs/rules-detail.md`（规则完整措辞）、`docs/audit-ledger.md`（逐轮台账）、`docs/images/`（截图）。
+**不新增同义文档**；README 里不得出现未验证的数字或不存在的防线。
 
-1. **静态断言先剥注释** —— 说明性文字里会出现被断言的名字。我为此写出过**恒红**与**恒绿**两种坏断言。
-2. **按行号判断，不要按字符偏移** —— `clientPortion` 是剥掉 CSS 块的文本，行号与源文件不一致。
-3. **断言不要依赖字面缩进** —— tsc 把 8 空格重排成 16 后会**静默返回 0 个方法**。
-4. **夹具保真度 = 断言判别力** —— 假媒体元素缺 `currentSrc`/`seekable`、`play()` 不模拟 `AbortError`，被测路径就失真甚至恒绿。
-5. **负向对照必须重建产物** —— 门禁读 `lib/`，改了 `src/` 不 build，控制组是空的。
-6. **「0 命中」先校准搜索面** —— 先用已知为真的样本（如 `conversation.view`）验证命令本身有效。
-7. **一次性标志 / 冷却窗口是同一类错误** —— 任何让「无关失败」影响「真实重试」的机制都会静默失效。
-8. **「清 timer」≠「阻止再武装」** —— 清句柄清不掉在飞回调的自我续期。
-9. **修 bug 会点亮下游从未执行过的代码** —— 修好基址后才暴露出 cue 路径的 `AbortError` 误报。
-10. **「只在出问题时记日志」不够** —— 要在**行为发生的那一刻**记（挂源时记「挂的是不是 token 源」）。
-11. **「本地全绿」≠「已进仓库」** —— 第 16 轮的修复在工作区放了两轮没提交，而文档已在声称完成，
-    第 17 轮推出去的代码里没有它（台账 §5.24）。**每轮收口必须看 `git status --short`**；
-    `git add -A` 之后只列出少数文件，本身就是异常信号。
-12. **禁止用 `git checkout <路径>` 撤销「临时改坏文件做对照」** —— 索引里是上一次 commit 的版本，
-    这条命令会**连未提交的真改动一起回滚**。第 21 轮就这么丢掉过整个 `src/client.ts` 的
-    ReplayGain 实现（台账 §5.30）。**做对照前后一律 `cp 文件 /tmp/xxx.bak` 再还原**。
-13. **GC 时机敏感的断言测的不是「保留量」** —— 同一 commit：本地 60.0MB / CI 83.9MB（cap 64MB）
-    ⇒「本地绿、CI 红」。修法是**改测量**，不是放宽阈值：① 测量进程自己别留大临时对象
-    （24×6MB 的 `await r.arrayBuffer()` = 144MB 噪声 → 改流式排空）；② 反复 GC 取**稳态最小值**；
-    ③ 没有 `--expose-gc` 时**明说 SKIP**。对照仍必须红（关掉宿主上限 → 144MB → FAIL）。
+## 改本文件的硬约束
 
-## 10. 明确接受的设计取舍（**不要「顺手修好」**）
-
-| 项 | 为什么这样 | 详情 |
-| --- | --- | --- |
-| `system-art` / `system-stream` 不在 `connection.fetch` 上 | 服务 Chromium 内部请求，平台 `/api` 的 `admit()` 必然拒绝。**代价**：无 `webServer` 的宿主形态不可达 | §2.7 |
-| 保留 `/dsh-music` 旧前缀 | 0.1.6 形态唯一可达通路，且 `system-*` 只能挂它 | §2.7 |
-| `lib/*.js` 提交进仓库 | `dsh plugin add github:` 不跑构建；显式不声明生命周期脚本 | §2.15 |
-| `/library` payload 里 `mime` 为 `null` | 只有 `streamTrack` 需要 mime，客户端从不读它 | 台账 |
-| 不做随机播放 / 歌词页 | 刻意保持简单 | README |
-| 封面只补缺失、不覆盖已有 | 覆盖用户文件里的封面是不可逆破坏 | README |
-| `noImplicitAny` 暂关 | 全开仍多 343 处；改为**逐文件允许清单**单向收严 | §2.15 |
-| 客户端套件跑 jsdom，无真实盒模型测量 | 本仓库**没有**布局测量能力，相关结论一律标「未验证」 | §4 |
-| token 在进程生命周期内不过期 | 唯一撤销边界是进程退出；已知代价 | §2.12 |
-
-## 11. 扩展本文件的三条硬约束
-
-- **64 KiB 注入预算，撞上后尾部会被静默截断**（已实测）。改完必须 `wc -c AGENTS.md`；接近 60 KiB 就把细节移进 `docs/`，这里只留结论 + 链接。
-- **一条规则 = 一个失败类别**。不要为一次性 bug 加规则；先加台账条目，确认是通用形态再进 §2。
-- **新增不变量必须同时加进 §8 索引并给出门禁名**；没有门禁的条目标注「待建」。推翻既有判定要**新写条目**，不得覆盖（§6.2）。
+- **64 KiB 注入预算**：撞上后**尾部会被静默截断**（实测两次）。改完必须 `wc -c AGENTS.md`；
+  接近上限就把细节移进 `docs/rules-detail.md`，这里只留结论 + 指针。
+- 一条规则 = 一个失败类别；**一条一句**，理由压进括号或链接（对齐 DeepSeek Harness 的 AGENTS.md 写法）。
+- 新增不变量必须同时加进 §不变量表并给出门禁名；没有门禁的标「待建」。推翻判定要新写条目。

@@ -2149,9 +2149,22 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       };
 
       /** 把 RG 落到图上（或折进回退路径的元素音量）。切曲与改设置都要调。 */
-      const applyReplayGain = () => {
+      const applyReplayGain = (rampMs = 0) => {
         const next = rgForTrack(state.tracks[state.current]);
-        if (rgGainNode !== null) rgGainNode.gain.value = next.linear;
+        const node = rgGainNode;
+        if (node !== null) {
+          // 交叉淡化期间新旧两首**同时出声**，而 RG 节点是**共享**的：瞬时写值等于在重叠中间
+          // 给两首一起做了个阶跃 —— 听感就是那「一丝丝杂音」。所以按过渡时长**斜坡**推过去。
+          // 顺序播放路径（旧曲已静音）保持瞬时写值：那里没有可听的不连续。
+          if (rampMs > 0 && audioCtx !== null) {
+            const now = audioCtx.currentTime;
+            node.gain.cancelScheduledValues(now);
+            node.gain.setValueAtTime(Number.isFinite(node.gain.value) ? node.gain.value : next.linear, now);
+            node.gain.linearRampToValueAtTime(next.linear, now + rampMs / 1000);
+          } else {
+            node.gain.value = next.linear;
+          }
+        }
         // 回退路径的 RG 折在**元素音量**里，所以 RG 没变就不必再写一次 ——
         // 冗余写入会让「起播前不得有渐变写入」这类断言失去分辨力（test-audio-fade A2）。
         if (next.linear === rgLinear) {
@@ -2306,8 +2319,8 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           if (prefetchedUrl !== url || !(inEl.readyState >= 2)) return false;
           const outEl = audio;
           const outLevel = activeLevelNode;
-          // 共享 RG 节点按**新**曲目设值（关闭状态下这里是活动的旧曲目，不涉及）。
-          applyReplayGain();
+          // 共享 RG 节点按**新**曲目设值 —— 用**斜坡**（两首同时在响，见 applyReplayGain 注释）。
+          applyReplayGain(changeFadeInMs);
           try { inEl.currentTime = 0; } catch { /* 假元素可能没有 setter 语义 */ }
           const now = audioCtx.currentTime;
           const down = outLevel;
@@ -2323,10 +2336,11 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           set({ playing: true, error: null });
           const settle = () => {
             if (disposed) return;
+            // ⚠️ **不要**清掉旧元素的 `src` / 调 `load()`：那会再触发一次媒体管线拆除 ——
+            // 设备侧看到的是**两次**事件而不是一次。让它保持原样，等下一次预取直接覆盖即可
+            // （交换后它就是空闲元素，紧接着就会被 `schedulePrefetch` 换上下一首）。
             try {
               outEl.pause();
-              outEl.removeAttribute("src");
-              outEl.load?.();
             } catch { /* 假元素 */ }
             if (outLevel !== null) outLevel.gain.value = 0;
             // 交换角色：`audio` 是 let，其余 90+ 处引用自动跟随；电平节点跟着换。
