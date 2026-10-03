@@ -1225,6 +1225,8 @@ const WAVEFORM_BUCKET_CAP = 4000;
 /** 下发分辨率：缓存与 UI 宽度解耦，客户端再按需要抽样到 ~120 根。 */
 const WAVEFORM_BUCKETS = 400;
 const WAVEFORM_TIMEOUT_MS = 60 * 1000;
+/** 同时最多几个波形 ffmpeg：超过就**立即拒绝**（`reason: busy`），不排队、不阻塞。 */
+const WAVEFORM_MAX_CONCURRENT = 2;
 /** 进程内条目上限与落盘条目上限（§2.2：module 级容器必须设上限）。 */
 const WAVEFORM_CACHE_MAX = 512;
 const WAVEFORM_CACHE_PERSIST_MAX = 200;
@@ -2073,6 +2075,14 @@ function createHost(ctx) {
       const bin = findFfmpeg();
       if (bin === null) {
         diag.reason = 'ffmpeg-not-found';
+        resolve(null);
+        return;
+      }
+      // **并发闸门**（借鉴 Navidrome 的 TranscodeLimiter）：波形解码是 CPU 密集的子进程，
+      // 用户快速连点时不能让它把机器打满。**立即拒绝、不排队**（排队只会把延迟堆到后面），
+      // 而客户端本来就允许「拿不到波形」——静默降级，下次进这首再算。
+      if (waveChildren.size >= WAVEFORM_MAX_CONCURRENT) {
+        diag.reason = 'busy';
         resolve(null);
         return;
       }

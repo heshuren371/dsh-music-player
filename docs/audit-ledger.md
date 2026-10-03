@@ -1942,3 +1942,65 @@ AGENTS §2 只留**结论 + 指针**（规则编号与判定一条不少，细�
 `typecheck` 0 · **`ALL 31 SUITES PASS`** · `check-build-fresh` 一致 · `check-strict` 通过 ·
 `check-whitespace` PASS · `AGENTS.md` 19,503 B。**杂音是否彻底消失仍需用户耳朵确认**（jsdom
 没有音频设备）。
+
+---
+
+## 5.40 第 27 轮 —— 向开源播放器学「想不到的失败模式」（防御性编程）
+
+### 5.40.1 方法
+
+读**高质量开源实现的源码**（不是 README），逐条对照本插件，只登记**实测过**的差异。
+参考：[feishin](https://github.com/jeffvli/feishin)（Electron + Web Audio）、
+[navidrome](https://github.com/navidrome/navidrome)（`core/stream/limiter.go`、`token.go`）、
+[fooyin](https://github.com/fooyin/fooyin)（已在 §2.18/§2.21 用过）、
+[mutagen 的原子保存讨论](https://github.com/quodlibet/mutagen/issues/241)。
+完整对照表与待办清单见 [`docs/defensive-audit.md`](defensive-audit.md)。
+
+### 5.40.2 本轮落地 4 项（都有门禁 + 对照）
+
+| # | 失败模式 | 来源 | 实现 | 对照 |
+| --- | --- | --- | --- | --- |
+| H1 | 快速连切时**并发 spawn 波形 ffmpeg** 打满 CPU | navidrome `TranscodeLimiter` | 并发闸门（上限 2），超额**立即** `busy` 不排队 | 去掉闸门 → `ok=5 busy=0` **红**（B9） |
+| H2 | 交叉淡化的**迟到交接**在下一段过渡后才跑，会换错元素 | §2.10 同族 | `settlePending` + 新切歌**即时结算** | 去掉 → D9a **红**（D9b 仍绿，见下） |
+| H3 | 源根本不可用仍烧 3 次徒劳尝试（400ms×3） | feishin `MediaError` 分派 | `MEDIA_ERR_SRC_NOT_SUPPORTED` 短路到「放弃 + 下一首」 | 短路失效 → D10 **红** |
+| H4 | 系统单方面挂起 ctx →「界面在放、耳机没声」，无从判断 | 本仓库独有症状 | `ctx.onstatechange` 自愈（按**元素**判断 + 只含状态诊断） | 处理器 no-op → D11 **红** |
+
+### 5.40.3 本轮第 7/8 次踩「断言或对照本身不判别」——四条，全部改强
+
+1. **D9 只查 pause 状态**：去掉守卫时迟到的交接把角色换到另一首，pause 状态看起来一样正常 ⇒ 恒绿。
+   改成断言**正在放的是最后一首**（src 含 `p=c.mp3`）。
+2. **D9 证明不了守卫的必要性**：现有时长配置下迟到交接恰好落在 `startNow` 赋 src **之前**，
+   最终状态**碰巧也对**（D9b 在对照下仍绿）。⇒ 拆出 **D9a**（150ms 时刻角色就该换好 = 即时结算）
+   才有判别力，并把 D9b 的标签改成「最终状态一致（回归保护）」——**不谎称它证明了必要性**。
+3. **D10 测到了别的分支**：夹具 src 含 `system-stream` ⇒ 先命中「token 基址自愈」那条分支，
+   它一定会重新 attachSource。改成把 src 换成普通流地址，并**等 500ms**（小于「放弃后 600ms
+   自动下一首」）才测到真正的行为。
+4. **D11 只看「有没有 resume」**：起播路径本身就会 resume 一次 ⇒ no-op 处理器照样绿。
+   改成比**增量**（+1）。顺带发现实现缺陷：判据用 `state.playing`（UI 标志会滞后，夹具里
+   永远是 false）⇒ 改用**媒体元素**（元素仍在放）作权威判据。
+
+### 5.40.4 一个更危险的坑：**对照在旧产物上跑**
+
+有两轮对照「没变红」，原因不是断言弱，而是 **`tsc` 构建失败**：把变异写成「删掉调用」会让
+`noUnusedLocals` 报错 ⇒ `lib/` 没更新 ⇒ 对照跑的是**修好的旧产物**。而我当时把 `tsc` 输出
+重定向到了 `/dev/null`，错误被完全掩盖。
+⇒ 新增纪律：**对照前必须确认构建成功**（保留输出、非零退出即判「对照无效」），并且变异要
+**保留标识符的引用**（`void f;`）以免被死代码开关挡住。
+
+### 5.40.5 核查后确认**已经做了**的（避免重复造轮子）
+
+媒体错误恢复链（比 feishin 更强：token 自愈 → 原位置重试 → 跳坏区 → 放弃 + 自动下一首，带上限）、
+MediaSession（`setPositionState` + play/pause/prev/next/**seekto**）、跨源 `crossOrigin`,
+缓存按 `size`+`mtimeMs` 失效。
+
+### 5.40.6 待办（已取证、本轮未改，按风险排序）
+
+① 标签写入/改名的**原子性与回滚**（不可逆操作，参考 mutagen 的讨论；本轮未逐行核实那段流程）；
+② 大小写不敏感文件系统（APFS）上的改名碰撞；③ Unicode NFD/NFC 覆盖范围（实测各 1 处 `normalize(`）；
+④ 磁盘满/只读文件系统（与 `A5-09` 同族）；⑤ 客户端 seek 风暴下的并发 Range 上限（H1 只覆盖波形）；
+⑥ `stalled`/`waiting` 的缓冲反馈。**明确不做**：页面隐藏时停 rAF（Chromium 本就节流且循环随视图卸载）。
+
+### 5.40.7 验证
+
+`typecheck` 0 · **`ALL 31 SUITES PASS`**（连跑 3 次稳定）· `check-build-fresh` 一致 ·
+`check-strict` 通过 · `check-whitespace` PASS。**听感仍需用户确认**。

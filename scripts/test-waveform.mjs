@@ -231,6 +231,10 @@ async function boot({ wave = 'ok', delayFor = null } = {}) {
   process.env.DSH_HOME = home;
   await fs.mkdir(path.join(home, 'storages'), { recursive: true });
   await fs.copyFile(path.join(HERE, 'fixtures', 'wave.flac'), path.join(music, 'wave.flac'));
+  // 并发闸门要 5 个**未缓存**曲目同时命中（同一个文件复制 4 份即可，波形只与内容/大小有关）。
+  for (const name of ['wave2.flac', 'wave3.flac', 'wave4.flac', 'wave5.flac']) {
+    await fs.copyFile(path.join(HERE, 'fixtures', 'wave.flac'), path.join(music, name));
+  }
   // 非音频文件：ffmpeg 解不出音频流 —— 端点必须**优雅降级**而不是 500
   await fs.writeFile(path.join(music, 'broken.mp3'), Buffer.from('not audio at all'));
 
@@ -252,7 +256,7 @@ async function boot({ wave = 'ok', delayFor = null } = {}) {
     if (body && Array.isArray(body.tracks) && body.tracks.length >= 2 && !body.scanning) { lib = body; break; }
     await new Promise((r) => setTimeout(r, 50));
   }
-  check('B0: 波形夹具的库扫描完成', lib !== null && lib.tracks.length === 2, lib === null ? 'timeout' : 'tracks=' + lib.tracks.length);
+  check('B0: 波形夹具的库扫描完成', lib !== null && lib.tracks.length === 6, lib === null ? 'timeout' : 'tracks=' + lib.tracks.length);
   if (lib === null) { server.close(); process.exit(1); }
   const waveId = lib.tracks.find((t) => t.name === 'wave.flac').id;
   const brokenId = lib.tracks.find((t) => t.name === 'broken.mp3').id;
@@ -286,6 +290,40 @@ async function boot({ wave = 'ok', delayFor = null } = {}) {
     const third = await (await nodeFetch(base + '/api/waveform?p=' + encodeURIComponent(waveId))).json();
     check('B5: 文件被改动后重新计算（size/mtime 失效，不吃旧缓存）',
       third.cached === false && Array.isArray(third.peaks), 'cached=' + String(third.cached));
+  }
+
+  if (hasFfmpeg) {
+    // 并发闸门（借鉴 Navidrome 的 TranscodeLimiter）：波形解码是 CPU 密集子进程，用户快速连点时
+    // 不能把机器打满。超上限的请求必须**立即**拿到 `busy` —— 不排队（排队只是把延迟堆到后面），
+    // 客户端本来就会静默降级，下次进这首再算。
+    const flacs = lib.tracks.filter((t) => t.name.endsWith('.flac'));
+    /**
+     * 每轮都重新取（缓存过的会直接命中缓存、不进闸门）⇒ 用**新的**曲目 id 或先改文件让缓存失效。
+     * 为消除「机器太快、5 个请求没真正重叠」的抖动，最多试 3 轮，**任一轮**看到 busy 即算生效
+     * （没有闸门时任何一轮都不会出现 busy ⇒ 仍然精确变红）。
+     */
+    let okN = 0;
+    let busyN = 0;
+    let total = 0;
+    for (let attempt = 0; attempt < 3 && busyN === 0; attempt += 1) {
+      if (attempt > 0) {
+        // 让缓存失效：给每个夹具追加一个字节（size 变了 ⇒ 重新计算 ⇒ 重新进闸门）
+        for (const name of ['wave.flac', 'wave2.flac', 'wave3.flac', 'wave4.flac', 'wave5.flac']) {
+          await fs.appendFile(path.join(music, name), Buffer.alloc(1));
+        }
+      }
+      const results = await Promise.all(flacs.map(async (t) => (
+        await nodeFetch(base + '/api/waveform?p=' + encodeURIComponent(t.id))
+      ).json()));
+      total = results.length;
+      okN = results.filter((r) => Array.isArray(r.peaks) && r.peaks.length > 0).length;
+      busyN = results.filter((r) => r.reason === 'busy').length;
+    }
+    // 判据是「闸门确实生效」而不是「恰好只有 2 个成功」：闸门限的是**并发**，槽位一腾出来
+    // 后面的请求就会成功（实测 ok=3 busy=2）。所以断言「至少有请求被立即拒绝」+「不是全部成功」。
+    check('B9: 同时 ' + flacs.length + ' 个波形请求时，超出并发上限的**立即**得到 busy（不排队、不阻塞）',
+      flacs.length >= 5 && busyN >= 1 && okN < flacs.length && okN + busyN === total,
+      'ok=' + okN + ' busy=' + busyN + ' total=' + total);
   }
 
   const unknown = await (await nodeFetch(base + '/api/waveform?p=nope')).json();

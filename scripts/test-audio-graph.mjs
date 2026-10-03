@@ -131,12 +131,13 @@ const check = (label, ok, detail) => {
 
 // ─────────────────────────── Part B：客户端常驻音频图 ───────────────────────────
 const SOURCE = await fs.readFile(new URL('../lib/client.js', import.meta.url), 'utf8');
-const TRACKS = ['a.mp3', 'b.mp3'].map((name, index) => ({
+// 3 首：第 3 首用于「快速连切两次」的状态机断言（迟到的交接不能停掉新曲）。
+const TRACKS = ['a.mp3', 'b.mp3', 'c.mp3'].map((name, index) => ({
   index, id: name, name, title: name, artist: 'x', duration: 200, kind: 'audio', mime: 'audio/mpeg',
 }));
 
 /** 假 AudioContext：记录建图与增益调度，供断言「常驻」「采样级渐变」。 */
-function makeFakeAudioContext(log, store, { throwOnSource = false, state = 'running', noBiquad = false } = {}) {
+function makeFakeAudioContext(log, store, ctxs, { throwOnSource = false, state = 'running', noBiquad = false } = {}) {
   return class FakeAudioContext {
     constructor() {
       log.push({ op: 'ctx' });
@@ -145,6 +146,8 @@ function makeFakeAudioContext(log, store, { throwOnSource = false, state = 'runn
       this.currentTime = 1;
       this.destination = { id: 'destination' };
       this._n = 0;
+      this.onstatechange = null;
+      ctxs.push(this);
     }
     // ⚠️ 每次必须是**新节点**：真实 createGain() 就是这样。先前返回同一个对象，
     // 两个增益（音量 / ReplayGain）会互相覆盖 —— 夹具不保真，断言就没有判别力（§9 陷阱 4）。
@@ -194,6 +197,7 @@ function makeFakeAudioContext(log, store, { throwOnSource = false, state = 'runn
 async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:3080', pageOrigin = null } = {}) {
   const log = [];
   const store = [];
+  const ctxs = [];
   // ⚠️ 跨源要用「页面端口 ≠ 媒体端口」来构造，**不能**用 `dsh-app://app` 当 jsdom 的 URL：
   // 非 special scheme 是 opaque origin，jsdom 的 localStorage 会直接抛 SecurityError。
   const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', { url: (pageOrigin ?? origin) + '/' + search, pretendToBeVisual: true });
@@ -210,7 +214,7 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
   globalThis.IS_REACT_ACT_ENVIRONMENT = true;
   win.Element.prototype.scrollIntoView = function () {};
   if (fakeCtx !== null) {
-    const Ctor = makeFakeAudioContext(log, store, fakeCtx);
+    const Ctor = makeFakeAudioContext(log, store, ctxs, fakeCtx);
     if (fakeCtx.noBiquad) delete Ctor.prototype.createBiquadFilter;   // 模拟老实现：只跳过 EQ
     win.AudioContext = Ctor;
   }
@@ -239,7 +243,11 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
       play() { this.paused = false; log.push({ op: 'play', el: tag }); return Promise.resolve(); },
       pause() { this.paused = true; log.push({ op: 'pause', el: tag }); },
       load() { log.push({ op: 'load', el: tag }); },
-      addEventListener: () => {},
+      // 真实元素一定有 addEventListener —— 夹具要能派发事件，否则「媒体 error 分类」这类
+      // 路径根本没被执行（§9 陷阱 4：夹具保真度 = 判别力）。
+      _on: {},
+      addEventListener(type, fn) { (this._on[type] = this._on[type] ?? []).push(fn); },
+      _fire(type) { for (const fn of this._on[type] ?? []) fn({ type, target: this }); },
     };
   };
   const el = makeEl('A');
@@ -286,7 +294,7 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
     }
     return pred();
   };
-  return { log, store, win, player, media: el, media2: el2, attrs: () => el._attrs, sleep, waitFor, origin, infoLines, restoreInfo, state: () => player.getState() };
+  return { log, store, ctxs, win, player, media: el, media2: el2, attrs: () => el._attrs, sleep, waitFor, origin, infoLines, restoreInfo, state: () => player.getState() };
 }
 
 // B1/B2/B3：建图一次、常驻、增益接管音量
@@ -495,6 +503,88 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
   check('D7: 交叉进行中 halt() 会停掉空闲元素（只停当前那个会留下它继续出声）',
     b.media.paused === true && b.media2.paused === true,
     'A=' + b.media.paused + ' B=' + b.media2.paused);
+}
+
+// D11：系统把 AudioContext 挂起时（设备切换 / 休眠唤醒 / iOS 中断）必须**恢复** ——
+// 只 suspend 不恢复的症状是「界面在放、耳机没声」，而且从外部完全看不出原因。
+{
+  const b = await boot({ fakeCtx: {}, search: '?crossfade=0' });
+  await act(async () => {
+    b.player.play(0);
+    await b.waitFor(() => b.log.some((o) => o.op === 'src'));
+  });
+  const ctx = b.ctxs[0];
+  // ⚠️ 必须比**增量**：起播路径本身就会 `resume()` 一次，只看「有没有 resume」时把处理器改成
+  // no-op 也照样绿（第一版就是这个毛病，对照实测恒绿）。
+  const resumesBefore = b.log.filter((o) => o.op === 'resume').length;
+  await act(async () => {
+    ctx.state = 'suspended';            // 系统单方面挂起（不是我们调的 halt）
+    if (typeof ctx.onstatechange === 'function') ctx.onstatechange();
+    await b.sleep(30);
+  });
+  const resumesAfter = b.log.filter((o) => o.op === 'resume').length;
+  check('D11: ctx 被系统挂起且**本该出声**时**新增**一次 resume（「界面在放、耳机没声」的自愈）',
+    resumesAfter === resumesBefore + 1, 'resume ' + resumesBefore + ' → ' + resumesAfter);
+}
+
+// D-H2：**快速连切两次** —— 第一段交叉淡化的**迟到交接**不得停掉第二首。
+// （没有「结算在飞交接」的守卫时，迟到的 settle 会 pause 掉用户正在听的那一首。）
+{
+  const b = await boot({ fakeCtx: {}, search: '?crossfade=1' });
+  let swappedEarly = false;           // 在 act 外声明：act 的回调作用域里声明会取不到
+  await act(async () => {
+    b.player.play(0);
+    await b.waitFor(() => b.log.some((o) => o.op === 'src' && o.el === 'B'));
+    b.player.play(1);                 // 第一段交叉淡化开始（交接在 +320ms）
+    await b.sleep(60);                // 交接还没到点
+    b.player.play(2);                 // 用户马上又切一次 → 触发「结算在飞的交接」
+    // 判据落在**即时结算**上：150ms 时刻（远早于 320ms 的交接定时器）角色就该换好了。
+    // 只断言最终状态是不够的 —— 现有时长配置下迟到的交接恰好落在 startNow 赋 src 之前，
+    // 最终状态**碰巧也对**（对照实测：去掉守卫 D9b 照样绿 ⇒ 证明不了守卫的必要性）。
+    await b.sleep(150);
+    swappedEarly = b.player.media() === b.media2 && b.media.paused === true;
+    await b.sleep(600);               // 两次过渡都该走完
+  });
+  check('D9a: 新的切歌**即时结算**在飞的交叉淡化（不等 320ms 的定时器）——角色/暂停状态立刻一致',
+    swappedEarly, 'swappedEarly=' + swappedEarly);
+  const active = b.player.media();
+  const other = active === b.media ? b.media2 : b.media;
+  const activeSrc = String(active.currentSrc ?? active.src ?? '');
+  // ⚠️ 必须断言**在放哪一首**（src 里是 c.mp3）。只查「恰好一个在放」是不够的：迟到的交接把
+  // 角色换到**另一首**（b）身上时，pause 状态看起来一样正常 —— 第一版就是这么写的，对照恒绿。
+  check('D9b: 快速连切两次后，**正在放的是最后一首**且只有一个元素在放（最终状态一致）',
+    b.state().current === 2 && activeSrc.includes('p=c.mp3') && active.paused === false && other.paused === true,
+    'current=' + b.state().current + ' activeSrc=' + activeSrc.slice(-18)
+      + ' activePaused=' + active.paused + ' otherPaused=' + other.paused);
+}
+
+// D-H3：媒体错误分类 —— `MEDIA_ERR_SRC_NOT_SUPPORTED` 不该再做徒劳的重试/跳区。
+// 借鉴 Feishin 的 MediaError 分派；我们原有的恢复链（重试→跳坏区→放弃）对**局部坏帧**是对的，
+// 但对「源根本不可用」只会白等 3 次（每次 400ms）并放出垃圾声。
+{
+  const b = await boot({ fakeCtx: {}, search: '?crossfade=0' });
+  await act(async () => {
+    b.player.play(0);
+    await b.waitFor(() => b.log.some((o) => o.op === 'src'));
+  });
+  const before = b.log.filter((o) => o.op === 'src').length;
+  await act(async () => {
+    // ⚠️ 位置必须 >0：否则 `mayRetrySame` / 跳区分支本来就进不去，断言对「有没有 code 短路」
+    // 完全没有分辨力（第一版就是 resumeAt=0，对照实测照样全绿）。
+    b.player.media().currentTime = 30;
+    // ⚠️ 把 src 换成**不含 `system-stream`** 的地址：否则先命中的是「token 基址自愈」那条分支，
+    // 它一定会重新 attachSource ⇒ 测到的是自愈而不是「code=4 短路」（第一版就是这样，正常构建下也红）。
+    b.player.media()._src = 'http://127.0.0.1:3080/dsh-music/api/stream?t=x&p=a.mp3';
+    b.player.media().error = { code: 4 };        // MEDIA_ERR_SRC_NOT_SUPPORTED
+    b.player.media()._fire('error');
+    // 只等 500ms：**小于**「放弃后 600ms 自动下一首」的延迟 —— 否则测到的是自动下一首的换源，
+    // 而不是「有没有做徒劳重试」（第一版等 900ms，正常构建下也红）。
+    await b.sleep(500);                          // > 重试延迟 400ms
+  });
+  const after = b.log.filter((o) => o.op === 'src').length;
+  check('D10: 源不可用（code=4）时**不做**徒劳重试/跳区，直接进放弃路径',
+    after === before && b.state().playing === false,
+    'src 次数 ' + before + '→' + after + ' playing=' + b.state().playing);
 }
 
 // D0：**默认开启**（第 25 轮用户确认噪声与平台相关后翻转）—— 不带参数就该走交叉淡化；

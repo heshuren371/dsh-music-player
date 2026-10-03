@@ -1819,6 +1819,20 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       let activeLevelNode: GainNode | null = null;
       /** 已经预取到空闲元素上的 URL（切换时用它判断「能否直接交叉进入」）。 */
       let prefetchedUrl: string | null = null;
+      /**
+       * **在飞的交叉淡化交接**。定时器到点时若发现它已被取代（`settlePending !== settle`）就放弃，
+       * 而任何**新的切歌**都会先把上一段交接**结算掉**（`commitPendingCrossfade`）。
+       * 否则一段迟到的交接会在新过渡开始后交换角色、pause 掉用户正在听的那一首
+       * （与 §2.10「清 timer ≠ 阻止再武装」同一类：只 guard `disposed` 不够）。
+       */
+      let settlePending: (() => void) | null = null;
+
+      /** 结算在飞的交叉淡化（幂等）；没有在飞的就是空操作。 */
+      const commitPendingCrossfade = () => {
+        const pending = settlePending;
+        settlePending = null;
+        if (pending !== null) pending();
+      };
       /** 均衡器的滤波器链与自动前级（惰性建于音频图创建时）。 */
       let eqNodes: BiquadFilterNode[] = [];
       let eqPreampNode: GainNode | null = null;
@@ -1874,6 +1888,20 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             return false;
           }
           const ctx = new Ctor();
+          /**
+           * 系统可能在我们**没有主动做什么**的情况下把 ctx 挂起（切换音频设备、休眠唤醒、
+           * iOS 的 interrupted）。只 suspend 不恢复的症状是「界面在放、耳机没声」，而且从外部
+           * 完全看不出原因。这里只处理「该出声却没在跑」：尝试恢复 + 一行只含状态的诊断
+           * （§2.9：绝不记 URL / token）。
+           */
+          ctx.onstatechange = () => {
+            // 判据用**媒体元素**（权威）而不是 `state.playing`（UI 标志会滞后一拍，实测：
+            // 夹具里 play 事件没派发时它一直是 false，恢复逻辑就永远不触发）。
+            // teardown 后一律不恢复 —— 那时 suspend 是我们自己调的。
+            if (disposed || audio.paused !== false || ctx.state === "running") return;
+            console.info("[dsh-music-player] AudioContext state=" + String(ctx.state) + " → 尝试恢复（未记任何 URL/凭据）");
+            void ctx.resume();
+          };
           // 「在行为发生的那一刻」记一行无凭据诊断（§2.16）。**只记数字与状态**，
           // 绝不记 URL / token（§2.9）。sampleRate 是关键：ctx 的采样率**创建时固定**，
           // 所以要能看到它到底钉在多少（howler.js 也为此专门 unload 重建 ctx）。
@@ -2254,6 +2282,9 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 
       /** 换源并开播（音频与 MV 共用；MV 的 URL 由 /mv 决定）。 */
       const attachSource = (url) => {
+        // 任何新的切歌先把**上一段在飞的交叉淡化**结算掉：角色/电平/`audio` 绑定必须是一致状态，
+        // 否则迟到的交接会把刚起播的那一首 pause 掉（本轮实测：快速连切时能听见「切过去又停」）。
+        commitPendingCrossfade();
         logAttach(url);
         /** 挂源 + 起播 + 淡入。**必须同步执行**，调用方的时序依赖它。 */
         const startNow = () => {
@@ -2352,7 +2383,13 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             prefetchedUrl = null;
             schedulePrefetch();
           };
-          setTimeout(settle, changeFadeOutMs + 20);
+          settlePending = settle;
+          setTimeout(() => {
+            // 被更新的过渡取代了就**什么都不做**（新过渡已经接手元素角色）。
+            if (settlePending !== settle) return;
+            settlePending = null;
+            settle();
+          }, changeFadeOutMs + 20);
           if (promise !== undefined) promise.catch(() => { /* AbortError 等：不是失败 */ });
           return true;
         };
@@ -3029,6 +3066,12 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             return;
           }
         }
+        // 错误分类（借鉴 Feishin 的 MediaError 分派）：`MEDIA_ERR_SRC_NOT_SUPPORTED (4)` 意味着
+        // **格式/源根本不可用** —— 原位置重试与「跳过坏区」都救不了它，直接走「放弃 + 自动下一首」，
+        // 省掉 1 次重试 + 2 次跳区（每次 400ms，还会放出一段垃圾声）。
+        // `MEDIA_ERR_DECODE (3)` 保持现有策略（跳坏区对**局部**坏帧是对的）；`NETWORK (2)` 走重试。
+        const mediaErrorCode = typeof audio.error?.code === "number" ? audio.error.code : 0;
+        const hopelessSource = mediaErrorCode === 4;
         const failedIndex = state.current;
         const failedTrack = state.tracks[failedIndex];
         // MV 直出失败（容器解不了 / 该构建没有这个解码器）：升级成 ffmpeg 转码再试一次。
@@ -3046,7 +3089,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         const knownDuration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : state.duration;
         // 1) 流中途被切断（宿主 requestTimeout 截断长连接、瞬时网络错误等）：
         //    原位置重试一次，恢复后 timeupdate 会把预算清零。
-        const mayRetrySame = failedTrack !== undefined && resumeAt > 0 && resumeAttempts < 1
+        const mayRetrySame = !hopelessSource && failedTrack !== undefined && resumeAt > 0 && resumeAttempts < 1
           && (!Number.isFinite(audio.duration) || resumeAt < audio.duration - 2);
         if (mayRetrySame) {
           resumeAttempts += 1;
@@ -3056,7 +3099,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         }
         // 2) 同一位置再次失败 = 文件局部坏帧（坏源/下载损坏）：
         //    向前跳过坏区继续播放，而不是让几 KB 垃圾废掉整首歌。
-        const jump = FAILURE_JUMPS[skipAttempts];
+        const jump = hopelessSource ? undefined : FAILURE_JUMPS[skipAttempts];
         if (failedTrack !== undefined && resumeAt > 0 && jump !== undefined
           && (knownDuration === 0 || resumeAt + jump < knownDuration - 1)) {
           const target = resumeAt + jump;
