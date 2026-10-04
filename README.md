@@ -2,9 +2,9 @@
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）的本地音乐播放器插件。
 
-它在会话视图的标签环里加一个「音乐」标签页，交互与视觉参考 macOS 的 Music 应用，**Web 与 DSH Desktop 共用同一份包**。宿主侧由 `facets.host.entry` 激活，通过 `ctx.connection.fetch` 注册一组精确的 `/api/dsh-music/*` 路由；客户端通过 `ctx.slots.register` 注册会话视图。
+它在会话视图的标签环里加一个「音乐」标签页，交互与视觉参考 macOS 的 Music 应用，Web 与 DSH Desktop 共用同一份包。宿主侧由 `facets.host.entry` 激活，通过 `ctx.connection.fetch` 注册一组精确的 `/api/dsh-music/*` 路由；客户端通过 `ctx.slots.register` 注册会话视图。
 
-源码用 TypeScript 编写，`lib/` 是 `tsc` 产物并**提交进仓库**（`dsh plugin add` 不执行构建）。
+源码用 TypeScript 编写，`lib/` 是 `tsc` 产物并提交进仓库（`dsh plugin add` 不执行构建）。
 
 ![音乐标签页](docs/images/music-tab.jpg)
 
@@ -14,7 +14,7 @@
 
 ## 兼容性状态
 
-本插件跟随 DSH 快速迭代。**DSH 升级可能出现破坏兼容性的变更。**
+本插件跟随 DSH 快速迭代。DSH 升级可能出现破坏兼容性的变更。
 
 | 项 | 字段 | 值 |
 | --- | --- | --- |
@@ -22,9 +22,9 @@
 | DSH 范围（描述性） | `dsh.compatibility.dsh` | `>=0.1.6-alpha.1 <0.2.0` |
 | DSH 精确记录（证据） | `dsh.compatibility.dshReleases` | `0.1.7-rc.2`: `compatible`；`0.1.7-rc.1` / `0.1.7-alpha.2`: `unknown` |
 
-**范围不等于证据**：没跑过验收的版本一律写 `unknown`。`install` / `start` / `uninstall` / `rollback` 四项一次性 Profile 证据尚未提供。
+范围不等于证据：没跑过验收的版本一律写 `unknown`。`install` / `start` / `uninstall` / `rollback` 四项一次性 Profile 证据尚未提供。
 
-跨版本接缝变过三处（`dsh.client.platform`、`ctx.webServer` 是否存在、官方图标导出名），插件用运行时探测与双形态回落处理。**升级 DSH 后请以运行中的应用为准，不要以本地 checkout 为准。** 逐条依据与已知断点见 [docs/compatibility.md](docs/compatibility.md)。
+跨版本接缝变过三处（`dsh.client.platform`、`ctx.webServer` 是否存在、官方图标导出名），插件用运行时探测与双形态回落处理。升级 DSH 后请以运行中的应用为准，不要以本地 checkout 为准。 逐条依据与已知断点见 [docs/compatibility.md](docs/compatibility.md)。
 
 <a id="install"></a>
 
@@ -46,7 +46,7 @@ dsh plugin --profile web remove @local/dsh-music-player
 
 更新即先 `remove` 再 `add` 同一条命令。
 
-**DSH Desktop**：桌面 profile 由 Electron 应用独占，CLI 会拒绝写入。请用应用菜单里的插件管理窗口安装同一个 GitHub 源，装完重启应用。
+DSH Desktop：桌面 profile 由 Electron 应用独占，CLI 会拒绝写入。请用应用菜单里的插件管理窗口安装同一个 GitHub 源，装完重启应用。
 
 <a id="run-from-source"></a>
 
@@ -64,15 +64,15 @@ cd .. && dsh plugin --profile web add link:./dsh-music-player
 ## 功能
 
 - 递归扫描本地目录，支持 flac / mp3 / m4a / aac / ogg / opus / wav / mp4 / mov / webm / mkv / avi；原生目录选择器覆盖 macOS / Windows / Linux，也可手动粘贴路径
-- 波形进度条：全屏播放器的进度条上叠**真实包络**（ffmpeg 只读解码取峰值，**不改文件**、内存与曲长无关），一眼看出副歌与静音；**会预取下一首并缓存**（切歌 3 次从 4 次请求降到 2 次，返回上一首不再请求）；取不到波形时**静默退回原来的细轨**
-- 均衡器：10 段（31Hz–16kHz）预设曲线，能量按**入耳式真能重放的频段**分布（低音落在 62–250Hz）（原声 / 流行 / 摇滚 / 古典 / 爵士 / 低音增强 / 人声 / 电子），**自动前级**按最大提升量补偿、不会因提升而削波；也可用 `player.setEqualizer([...])` 自定义曲线。**默认原声**（不动音色）
-- 交叉淡化（**默认开启**）：切歌时新旧两首**重叠**淡入淡出，`300ms/700ms`（手动/曲末，与 fooyin 同值）；显式关闭用 `?crossfade=0` 或 `window.__dshMusicCrossfade = false`
-- 单曲循环与列表循环。**播放顺序等于可见列表顺序**，排序或搜索后「下一首」就是你看到的下一行
+- 波形进度条：全屏播放器的进度条上叠真实包络（ffmpeg 只读解码取峰值，不改文件、内存与曲长无关），一眼看出副歌与静音；会预取下一首并缓存（切歌 3 次从 4 次请求降到 2 次，返回上一首不再请求）；取不到波形时静默退回原来的细轨
+- 均衡器：10 段（31Hz–16kHz）预设曲线，能量按入耳式真能重放的频段分布（低音落在 62–250Hz）（原声 / 流行 / 摇滚 / 古典 / 爵士 / 低音增强 / 人声 / 电子），自动前级按最大提升量补偿、不会因提升而削波；也可用 `player.setEqualizer([...])` 自定义曲线。默认原声（不动音色）
+- 交叉淡化（默认开启）：切歌时新旧两首重叠淡入淡出，`300ms/700ms`（手动/曲末，与 fooyin 同值）；显式关闭用 `?crossfade=0` 或 `window.__dshMusicCrossfade = false`
+- 单曲循环与列表循环。播放顺序等于可见列表顺序，排序或搜索后「下一首」就是你看到的下一行
 - 列表显示歌曲名 / 歌手 / 时长；标签与封面来自音频文件内嵌数据，缺省回退「歌手 - 歌名」文件名约定
-- MV 三档判定 `direct` / `remux` / `transcode`（参考 Jellyfin），后两档调用 ffmpeg 并把产物缓存在临时目录。**没有 ffmpeg 也能用**：直出格式照常播，其余给出安装提示
+- MV 三档判定 `direct` / `remux` / `transcode`（参考 Jellyfin），后两档调用 ffmpeg 并把产物缓存在临时目录。没有 ffmpeg 也能用：直出格式照常播，其余给出安装提示
 - 在线补全元数据：宿主并行查询 QQ 音乐 / iTunes / 网易云，置信不足时用 MusicBrainz 兜底；勾选后写回标签并按「歌手 - 原名」重命名文件
 - 一键补全全部：逐首限速、进度可见、可随时停止
-- 响度归一化（ReplayGain）：优先读文件内嵌的 `REPLAYGAIN_*` 标准标签；**没有标签的曲目可以用 ffmpeg 测量**（`ebur128`，只读、**不改你的文件**，结果存在插件自己的缓存里）。提供单曲 / 专辑两种模式与前级增益，防削波默认开启；既无标签也未测量的曲目不做任何增益
+- 响度归一化（ReplayGain）：优先读文件内嵌的 `REPLAYGAIN_*` 标准标签；没有标签的曲目可以用 ffmpeg 测量（`ebur128`，只读、不改你的文件，结果存在插件自己的缓存里）。提供单曲 / 专辑两种模式与前级增益，防削波默认开启；既无标签也未测量的曲目不做任何增益
 - 系统集成：MediaSession（媒体键与 macOS 控制中心 / 锁屏「正在播放」）以及换曲原生通知
 - Apple 离线包（`.movpkg`）是 FairPlay 加密的 HLS，任何第三方播放器都无法解密，扫描时整体跳过并在统计里说明
 
@@ -86,16 +86,16 @@ cd .. && dsh plugin --profile web add link:./dsh-music-player
 | --- | --- |
 | `fs.read` | 选定音乐目录后的递归扫描与 Range 流式读取 |
 | `fs.write` | 只在「写入标签并重命名文件」流程里 |
-| `fs.delete` | 只在删除确认条里点「删除」后执行，`fs.unlink` **永久删除**（不进废纸篓），且仅限当前库内曲目 |
-| `net.fetch` | 点「✦」补全元数据或需要取封面时。全部 HTTPS，**没有任何上传** |
+| `fs.delete` | 只在删除确认条里点「删除」后执行，`fs.unlink` 永久删除（不进废纸篓），且仅限当前库内曲目 |
+| `net.fetch` | 点「✦」补全元数据或需要取封面时。全部 HTTPS，没有任何上传 |
 | `transport.api` | 插件激活时注册 `ctx.connection.fetch` 上的精确路由 |
 | `storage.local` | `$DSH_HOME/storages/dsh-music-player.json` 与 `localStorage`（`dsh-music:*` 前缀） |
 
-`node:child_process` 只用于调用 `ffmpeg` / `ffprobe`，参数以数组直传、**不经过 shell**。出网主机仅限元数据搜索（`c.y.qq.com` / `itunes.apple.com` / `music.163.com` / `musicbrainz.org`）与封面取图（`mzstatic.com` / `*.gtimg.cn` / `*.music.126.net` / `coverartarchive.org`）。读取的环境变量只有 `DSH_HOME` / `DSH_MUSIC_FFMPEG` / `DSH_MUSIC_ITUNES_COUNTRY` / `PATH`。
+`node:child_process` 只用于调用 `ffmpeg` / `ffprobe`，参数以数组直传、不经过 shell。出网主机仅限元数据搜索（`c.y.qq.com` / `itunes.apple.com` / `music.163.com` / `musicbrainz.org`）与封面取图（`mzstatic.com` / `*.gtimg.cn` / `*.music.126.net` / `coverartarchive.org`）。读取的环境变量只有 `DSH_HOME` / `DSH_MUSIC_FFMPEG` / `DSH_MUSIC_ITUNES_COUNTRY` / `PATH`。
 
 ## 端点
 
-宿主把 18 个端点注册为 `ctx.connection.fetch` 上的**精确** `/api/dsh-music/*` 路由，Web 与 Desktop 共用同一条接缝。最后一个旧前缀例外、完整的端点表、以及三种通道的信任边界见 [docs/compatibility.md](docs/compatibility.md#9-端点面)。
+宿主把 18 个端点注册为 `ctx.connection.fetch` 上的精确 `/api/dsh-music/*` 路由，Web 与 Desktop 共用同一条接缝。最后一个旧前缀例外、完整的端点表、以及三种通道的信任边界见 [docs/compatibility.md](docs/compatibility.md#9-端点面)。
 
 ## 开发
 
@@ -108,21 +108,21 @@ pnpm run check:manifest # dsh-plugin.json 对 pinned dsh-std Community v0.15 校
 
 改动生效方式：`src/client.ts` 刷新页面；`src/host.ts` 同样是刷新页面（入口薄壳按 `lib/host.js` 的 mtime 热重载）；只有改 `src/index.ts` 才需要重启进程。
 
-CI（[.github/workflows/ci.yml](.github/workflows/ci.yml)）在每次 push 与 PR 上跑同一组门禁。**CI 故意不先 build** —— 产物新鲜度门禁只在 `lib/` 未被就地覆盖时才有判别力。
+CI（[.github/workflows/ci.yml](.github/workflows/ci.yml)）在每次 push 与 PR 上跑同一组门禁。CI 故意不先 build —— 产物新鲜度门禁只在 `lib/` 未被就地覆盖时才有判别力。
 
-注意：本仓库**没有布局测量能力**。客户端套件全部跑 jsdom，涉及「位置 / 宽度 / 是否溢出」的结论是靠伪造 `scrollWidth` / `clientWidth` 得出的，请标注为未验证。
+注意：本仓库没有布局测量能力。客户端套件全部跑 jsdom，涉及「位置 / 宽度 / 是否溢出」的结论是靠伪造 `scrollWidth` / `clientWidth` 得出的，请标注为未验证。
 
 面向 agent：请遵循 [AGENTS.md](AGENTS.md)。§0 是给第一次接手本仓库的模型的快速上手。
 
 ## 排查
 
-**Desktop 上改了插件看不到效果、`Cmd+R` 没反应**：Desktop 主窗口没有绑定重新加载快捷键（应用菜单里只注册了 `toggleDevTools`，没有 `reload` 角色）。按 `F12` 打开 DevTools，在 Console 里执行 `location.reload()`；或直接重启应用。`src/host.ts` 会热重载自动生效，`src/client.ts` 必须重载渲染进程 —— 否则会出现「Web 上修好了、Desktop 上还是坏的」。
+Desktop 上改了插件看不到效果、`Cmd+R` 没反应：Desktop 主窗口没有绑定重新加载快捷键（应用菜单里只注册了 `toggleDevTools`，没有 `reload` 角色）。按 `F12` 打开 DevTools，在 Console 里执行 `location.reload()`；或直接重启应用。`src/host.ts` 会热重载自动生效，`src/client.ts` 必须重载渲染进程 —— 否则会出现「Web 上修好了、Desktop 上还是坏的」。
 
-**看不到「音乐」标签**：依次确认页面已刷新、`dsh plugin --profile web ls` 里有 `@local/dsh-music-player`、profile 的 `dsh.profile.bundles` 里有包名、link 方式下克隆目录存在 `node_modules/`；Desktop 需确认装好后重启过应用。
+看不到「音乐」标签：依次确认页面已刷新、`dsh plugin --profile web ls` 里有 `@local/dsh-music-player`、profile 的 `dsh.profile.bundles` 里有包名、link 方式下克隆目录存在 `node_modules/`；Desktop 需确认装好后重启过应用。
 
-**换歌不出声**：先确认 token 通路，`curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:<端口>/dsh-music/api/session"` 应返回 200。
+换歌不出声：先确认 token 通路，`curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:<端口>/dsh-music/api/session"` 应返回 200。
 
-**通知不弹**：系统设置 → 通知 → DeepSeek Harness 允许通知；并关闭专注模式。
+通知不弹：系统设置 → 通知 → DeepSeek Harness 允许通知；并关闭专注模式。
 
 ## 文档
 
