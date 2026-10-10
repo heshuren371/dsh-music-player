@@ -11,6 +11,10 @@
   `window.*` 这类全局槽位把上一代的 player / timer / handler 交给下一代。确有必要时必须**显式声明
   为跨 activation 共享资源，且每代的 disposer 只作用于自己那一代**。→ `window.__dshMusicPlayer`
   是未声明的隐式转移（`A3-03`）。
+- **页级设备的归属例外**：`AudioContext` + 增益链 + CORS 结果归页面（`Symbol.for`），
+  媒体元素与监听归本代；`halt()` 释放本代并摘掉 `window` 键，下一代只接管未释放的实例。
+- **释放要比较并释放**：实例记 activation 租约号（`acquire()`/`lease()`），旧 disposer 晚于
+  新 bundle 求值时不得停掉新一代。
 - **disposer 必须作用于「自己的」实例**：对共享对象调 `dispose()`/`halt()` 会停掉新实例仍在使用的东西。
 - **`await` 挂起后恢复的路径必须检查 `disposed`**：只把引用置 `null` 不够 —— 挂起的异步分支会
   把它重新赋值（`A3-02`：`ensureHost` 两个挂起点、客户端轮询回调）。
@@ -199,6 +203,10 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 
 - **一个 activation instance 的资源不得被下一个复用**：**禁止**用 `window.*` 把上一代的
   player / timer / handler 交给下一代（`A3-03`）；disposer 只能作用于自己那一代。
+- 页级设备是唯一例外且必须显式：`AudioContext` 与增益链归页面（`Symbol.for`），
+  媒体元素与监听仍归本代；`halt()` 释放本代并**摘掉** `window` 键，下一代新建实例接管设备。
+- **释放必须比较并释放**：实例上记 activation 租约号（`acquire()`/`lease()`），热重载的旧
+  disposer 晚于新 bundle 求值时不得停掉新一代（顺序不定是常态）。
 - **`await` 挂起后恢复的路径必须检查 `disposed`**（只置 `null` 不够，挂起分支会重新赋值，`A3-02`）。
 - 「清 timer」≠「阻止再武装」：teardown 必须显式复位守卫依赖的状态（如 `scanning`，`A3-01`）。
 - **自建 DOM 与全局键必须释放**（`remove()` / `delete`，`A3-04`）。
@@ -338,6 +346,11 @@ pause `{in=120,out=120}` · stop `{in=120,out=300}`。本仓库采用同一组�
   兜底开关 `?musicGraph=0` / `window.__dshMusicNoGraph`。
 - **建图后必须把元素音量置中性**（否则「元素 0 × 增益」= 第一次起播静音，比电流声更严重）。
 - 音频图 `halt()` 只 suspend 不 close —— close 之后媒体元素再也接不回音频图。
+- 设备归页面（ctx / 增益链 / CORS 结果，`Symbol.for` 挂 `window`），元素与监听归本代；
+  `halt()` 停元素、断开本代节点、移除自建 DOM、撤 watcher、suspend 设备、摘 window 键。
+- 每个播放起点（`attachSource` / `toggle()` 播放 / 交叉淡化进入）都要 `resumeGraph()`：
+  `onstatechange` 只在状态变化时触发，暂停期间被挂起就没人管（界面在放、耳机没声）。
+- 瞬时音量一律 `readVolume()`（图建好后元素音量恒为中性 1，读它会把每首起播推到满幅）。
 - `AudioContext.sampleRate` 创建时即固定 ⇒ ctx 必须在第一次播放时才建，并把
   `sampleRate`/`state` 打进诊断（只记数字与状态，绝不记 URL/token；门禁 B13）。
 - `location` 一律写 `window.location`（bundle 由宿主 eval）。
@@ -457,6 +470,19 @@ seekbar 同源（GPL-3.0：只借鉴做法，不抄代码）。
 - 默认值本身也要有断言：翻转默认值（如交叉淡化）时，必须同时断言「默认走新路径」与
   「显式关闭仍能回到旧路径」，否则默认值无人守（对照实测：把默认改回去 → D0a 立刻红）。
 
+### 2.25 MV：音轨能不能播是判定的一部分，「有画面没声音」要能被观测到
+
+- `mvPlan` 不按容器豁免音轨判定（同一编码在不同容器里曾给出不同判定）；音轨不在直出名单里一律
+  `remux`，档位从 `audio` 起（`copy` 只换壳，产物仍没声音还被缓存成 `ready`）。
+- `null` 只表示「没有这条轨」：认不出的编码名原样保留（小写），不得吞成 `null`。
+- 音轨看门狗：已知有音轨（`audioCodec` 非 null）而 `webkitAudioDecodedByteCount` 播 3.5s 仍为 0
+  且元素在放 ⇒ 升级转码。WASM 画面旁路是同一前提（它只补画面）。
+- 升级预算按次播放：`mvEscalated` 每次 `playIndex` 复位；「重试」必须真重跑（`retry=1` 删掉
+  10 分钟 TTL 的失败记录），自动升级不带它。
+- 停用只杀子进程不够：`close` 回来后会继续下一档，档位循环要认「已放弃」标记；夹具必须让
+  `close` 真能到（`exec` 而非 `sh` + `sleep`），否则恒绿。
+- 单档要有超时，否则卡住的任务永久停在 `preparing`（重试按钮只在 `failed` 下渲染）。
+- `/api/mvconvert` 的失败清理按真实产物路径授权，否则半成品留在库里被扫成曲目。
 ---
 
 ## 已知陷阱（完整 14 条）

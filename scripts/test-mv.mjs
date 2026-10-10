@@ -33,6 +33,8 @@ if (FFMPEG !== null) {
   if (generated) {
     run(['-hide_banner', '-y', '-i', clip, '-c', 'copy', path.join(music, 'clip.mkv')]);
     run(['-hide_banner', '-y', '-i', clip, '-c:v', 'mpeg4', '-q:v', '5', '-c:a', 'pcm_s16le', path.join(music, 'clip.avi')]);
+    // 容器认不出来但编码认得的组合（h264 + aac 装进 mpegts）：判定必须落在**容器**上走换壳。
+    run(['-hide_banner', '-y', '-i', clip, '-c', 'copy', '-f', 'mpegts', path.join(music, 'clip.ts')]);
     run(['-hide_banner', '-y', '-i', clip, '-c:v', 'libx265', '-tag:v', 'hvc1', '-c:a', 'aac', path.join(music, 'clip-hevc.mp4')]);
     // 用户实际踩到的那个：MPEG-4 Part 2 (Simple Profile) 的 MP4 —— Chromium 没这个解码器，
     // 播出来只有声音没画面、而且不报 error，所以必须靠判定拦住（走转码）。
@@ -44,6 +46,7 @@ if (!generated) {
   await fs.writeFile(path.join(music, 'clip.mp4'), Buffer.from('not a real mp4'));
   await fs.writeFile(path.join(music, 'clip.mkv'), Buffer.from('not a real mkv'));
   await fs.writeFile(path.join(music, 'clip.avi'), Buffer.from('not a real avi'));
+  await fs.writeFile(path.join(music, 'clip.ts'), Buffer.from('not a real ts'));
 }
 
 let handler = null;
@@ -77,7 +80,15 @@ check('mp4 plans to direct play', mp4.status === 200 && mp4.body.mode === 'direc
 const mkv = await mv('clip.mkv');
 check('mkv also plans to direct play (Chromium demuxes Matroska)', mkv.status === 200 && mkv.body.mode === 'direct', JSON.stringify(mkv.body));
 const avi = await mv('clip.avi');
-check('avi plans to remux (Chromium cannot open the container)', avi.status === 200 && avi.body.mode === 'remux', JSON.stringify(avi.body));
+// ffprobe 现在真跑得到 avi（music-metadata 对 avi 抛错 ⇒ 探测必须在它的 try 之外）：
+// mpeg4 画面被认出来 ⇒ 必须重编码；只换壳的话画面照旧是黑的。
+check('avi (mpeg4 video) plans to transcode — ffprobe sees the codec where music-metadata throws',
+  avi.status === 200 && avi.body.mode === 'transcode',
+  JSON.stringify({ mode: avi.body.mode, codec: byName('clip.avi')?.videoCodec, audio: byName('clip.avi')?.audioCodec }));
+const ts = await mv('clip.ts');
+check('ts (h264+aac in a container Chromium cannot open) plans to remux',
+  ts.status === 200 && ts.body.mode === 'remux',
+  JSON.stringify({ mode: ts.body.mode, codec: byName('clip.ts')?.videoCodec, audio: byName('clip.ts')?.audioCodec }));
 check('non-video tracks are rejected', (await mv('song.wav')).status === 400);
 const missing = await json(base + '/api/mv?id=nope.mp4');
 check('unknown track → 404', missing.status === 404, 'status=' + missing.status);

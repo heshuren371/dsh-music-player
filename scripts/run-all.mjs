@@ -36,6 +36,9 @@ const suites = [
   { name: 'waveform progress bar', file: 'scripts/test-waveform.mjs', node: [] },
   { name: 'static audit (dead code / css shadowing / i18n)', file: 'scripts/test-audit.mjs', node: [] },
   { name: 'MV / music video (scan / plan / ffmpeg remux)', file: 'scripts/test-mv.mjs', node: [] },
+  { name: 'MV job lifecycle (audio verdict / attempt ladder / retry)', file: 'scripts/test-mv-jobs.mjs', node: [] },
+  { name: 'MV client decisions (direct URL / audio watchdog / escalation)', file: 'scripts/test-mv-client.mjs', node: [] },
+  { name: 'client activation ownership (no silent generation hand-off)', file: 'scripts/test-client-activation.mjs', node: [] },
   { name: 'host hot reload', file: 'scripts/test-hot-reload.mjs', node: [] },
 ];
 let failed = 0;

@@ -19,10 +19,13 @@ process.env.DSH_HOME = home;
 await fs.mkdir(path.join(home, 'storages'), { recursive: true });
 await fs.writeFile(path.join(home, 'storages', 'dsh-music-player.json'), JSON.stringify({ dir: music }), 'utf8');
 
-// 假 ffmpeg：把自己的 PID 写进文件，然后长睡（被 kill 时才退出）。
-const pidFile = path.join(home, 'fake-ffmpeg.pid');
+// 假 ffmpeg：把自己的 PID 追加进日志，然后 `exec` 成长睡进程。
+// ⚠️ 必须 `exec`：写成 `sh` 再 `sleep 300` 的话，`sh` 被杀掉之后**子进程还握着 stdout/stderr 管道**，
+// Node 永远等不到 `close`（实测：exit 305ms 就到、close 5s 后仍不来）—— 于是
+// 「SIGKILL 之后档位循环还会不会再起一个」这条路径在夹具里根本走不到，那样断言就是恒绿。
+const pidLog = path.join(home, 'fake-ffmpeg.log');
 const fakeFfmpeg = path.join(home, 'fake-ffmpeg.sh');
-await fs.writeFile(fakeFfmpeg, '#!/bin/sh\necho $$ > "' + pidFile + '"\nsleep 300\n', 'utf8');
+await fs.writeFile(fakeFfmpeg, '#!/bin/sh\necho $$ >> "' + pidLog + '"\nexec sleep 300\n', 'utf8');
 await fs.chmod(fakeFfmpeg, 0o755);
 process.env.DSH_MUSIC_FFMPEG = fakeFfmpeg;
 
@@ -65,7 +68,7 @@ check('MV plan started a job', mv !== null && mv.state !== 'direct', 'state=' + 
 // 等假 ffmpeg 自报 PID
 let pid = 0;
 for (let i = 0; i < 100 && pid === 0; i += 1) {
-  try { pid = Number((await fs.readFile(pidFile, 'utf8')).trim()); } catch { /* 还没写 */ }
+  try { pid = Number((await fs.readFile(pidLog, 'utf8')).split('\n')[0]); } catch { /* 还没写 */ }
   if (pid === 0) await sleep(50);
 }
 check('a real ffmpeg child process is running', pid > 0 && alive(pid), 'pid=' + pid);
@@ -74,9 +77,17 @@ check('a real ffmpeg child process is running', pid > 0 && alive(pid), 'pid=' + 
 const teardownEntry = disposers.find((e) => String(e.label).includes('host teardown'));
 check('host teardown effect captured', teardownEntry !== undefined, 'effects=' + disposers.map((e) => e.label).join(','));
 if (teardownEntry !== undefined) teardownEntry.d();
-await sleep(600);
+await sleep(900);
 
 check('A1-03 dispose terminates the in-flight ffmpeg child', pid > 0 && !alive(pid), 'pid=' + pid + ' alive=' + (pid > 0 && alive(pid)));
+
+// A1-03 的另一半：SIGKILL 只让 `close` 带着非零码回来，档位循环若没有「已放弃」标记
+// 就会接着起下一档 —— 新 module 不认识那个子进程，于是卸载后**还有 ffmpeg 在写临时目录**。
+// 判据是「一共只起过一个子进程」（3 档意味着最多 3 次），而不是「第一个 PID 死了」。
+let spawned = [];
+try { spawned = (await fs.readFile(pidLog, 'utf8')).trim().split('\n').filter((line) => line.length > 0); } catch { /* 没起过 */ }
+check('A1-03 dispose leaves no respawned ffmpeg behind (attempt loop stopped, not just the first child killed)',
+  spawned.length === 1, 'spawns=' + spawned.length + ' pids=' + spawned.join(','));
 
 server.close();
 await fs.rm(home, { recursive: true, force: true });

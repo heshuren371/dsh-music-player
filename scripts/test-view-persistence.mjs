@@ -184,7 +184,9 @@ if (teardown !== undefined) {
   check('the exit animation still finishes after teardown (disposed must not pin closing)', phase() === 'closed', 'phase=' + phase());
 }
 
-// ── 真实第二次 activation：插件重载后复用同一个 player 单例 ─────────────────
+// ── 真实第二次 activation：上一代 halt() 已释放，这一代必须拿到**新**实例 ───────
+// 上一代 halt() 会摘掉 window 键，所以「复用同一个单例」不是契约：契约是「新一代拿到
+// 能干活的实例」（接管上一份终态实例就是「刷新才好」的那条静音路径）。
 {
   let SecondView = null;
   const ctx2 = {
@@ -193,18 +195,25 @@ if (teardown !== undefined) {
     slots: { inject: (_name, fn) => fn(), register: (_meta, component) => { SecondView = component; return () => {}; } },
   };
   pluginFactory((name) => { if (name === 'react') return React; throw new Error('require: ' + name); }).apply(ctx2);
+  const secondPlayer = window.__dshMusicPlayer;
   const container2 = document.createElement('div');
   document.body.appendChild(container2);
   const root2 = createRoot(container2);
   await act(async () => { root2.render(React.createElement(SecondView)); });
   await settle(250);
+  // 「已释放」的可观测判据：halt() 已经把 body 上的停靠位移除并置空（释放面的记账）。
+  check('a second activation gets a fresh live player (the released one is not handed over)',
+    secondPlayer !== undefined && secondPlayer !== player && player.mediaPark() === null,
+    'same=' + String(secondPlayer === player) + ' oldPark=' + String(player.mediaPark()));
   await click(container2.querySelector('.dshm-nowCoverBtn'));
   await settle(80);
-  check('a second activation reusing the player opens the full player', container2.querySelector('.dshm-player') !== null);
+  check('a second activation can open the full player', container2.querySelector('.dshm-player') !== null);
   const close2 = container2.querySelector('.dshm-playerTop .dshm-playerRound');
   if (close2 !== null) await click(close2);
   await settle(300);
-  check('a second activation can still collapse it (no stuck closing overlay)', container2.querySelector('.dshm-player') === null && phase() === 'closed', 'phase=' + phase() + ' overlay=' + String(container2.querySelector('.dshm-player') !== null));
+  check('a second activation can still collapse it (no stuck closing overlay)',
+    container2.querySelector('.dshm-player') === null && secondPlayer.getState().playerPhase === 'closed',
+    'phase=' + secondPlayer.getState().playerPhase + ' overlay=' + String(container2.querySelector('.dshm-player') !== null));
   await act(async () => { root2.unmount(); });
 }
 

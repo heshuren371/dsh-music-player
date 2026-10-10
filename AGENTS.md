@@ -9,7 +9,7 @@ DSH 的本地音乐播放器插件，Web + Desktop 同一份包。改代码前�
 ```sh
 pnpm run build          # src/*.ts → lib/*.js（产物提交进仓库，改了 src 必须重建）
 pnpm run typecheck      # 类型棘轮：错误数只许变少（基线 0）
-npm test                # 产物新鲜度 + 逐文件严格 + 31 套回归（= check-build-fresh && check-strict && run-all）
+npm test                # 产物新鲜度 + 逐文件严格 + 35 套回归（= check-build-fresh && check-strict && run-all）
 pnpm run check:manifest # 只有动了 dsh-plugin.json 时才必跑；基线缺失时它 SKIP，SKIP ≠ 通过
 node scripts/check-whitespace.mjs  # 空白/冲突标记（npm test 已含；排除 lib/，理由见 docs/rules-detail.md）
 pnpm run dev            # tsc --watch：保存即重编，宿主按 lib/host.js 的 mtime 热重载
@@ -32,7 +32,7 @@ pnpm run dev            # tsc --watch：保存即重编，宿主按 lib/host.js 
 
 1. 改了 `src/` → 跑过 `pnpm run build`。
 2. `pnpm run typecheck` 0 错误（`noUnusedLocals`/`noUnusedParameters` 已开：死代码直接红）。
-3. `npm test` 31 套全绿。
+3. `npm test` 35 套全绿。
 4. 新增功能/修复 → 在 `run-all.mjs` 注册了回归套件。
 5. 新增断言 → 做过对照：把缺陷改回去，断言必须变红（见「审计与迭代协议」第 7 条）。
 6. 改了文档 → README ≤ 220 行，深度材料进 `docs/`。
@@ -77,7 +77,9 @@ endpoints ←→ `Track`→`PayloadTrack` 白名单投影 ←→ 客户端 `Musi
 错误面与降级。404 在本插件是正常语义，**不得**用它当「宿主是不是新入口」的唯一判据（平台
 栅栏在路由前答 401/403）；探测必须可重入（禁止一次性标志）；降级信任边界必须显式报告；错误响应
 必须脱敏（不得回显路径/文件名）。媒体元素 `error` 按 `MediaError.code` 分派：源不可用(4) 直接
-放弃 + 下一首（不做徒劳重试/跳区）；解码(3) 跳坏区；网络(2) 有界重试（借鉴 feishin）。
+放弃 + 下一首（不做徒劳重试/跳区）；解码(3) 跳坏区；网络(2) 有界重试（借鉴 feishin）。MV 音轨不在
+直出名单里不得判 direct、也不得走 WASM 画面旁路；音轨看门狗（解码字节 3.5s 仍为 0）升级转码，
+档位从 `audio` 起；失败任务只有 `retry=1` 才重跑。
 
 诊断与日志。禁止把凭据写进任何日志或落盘（`req.url` 的 query 就带 token，落盘前必须剥
 `t=`/`token`/`authorization`/`cookie`）；诊断代码不得进 HEAD；写盘路径必须在已声明 scope 内；
@@ -85,7 +87,8 @@ endpoints ←→ `Track`→`PayloadTrack` 白名单投影 ←→ 客户端 `Musi
 
 客户端 activation 归属。禁止用 `window.*` 把上一代 player/timer/handler 交给下一代；
 `await` 挂起后恢复必须检查 `disposed`；「清 timer」≠「阻止再武装」，teardown 要显式复位守卫
-依赖的状态；自建 DOM 与全局键必须释放；不得读取未在 manifest 声明的 context API。
+依赖的状态；自建 DOM 与全局键必须释放；页级设备是唯一例外且要写明归属；
+不得读取未在 manifest 声明的 context API。
 → [细则](docs/rules-detail.md#210)
 
 **契约坐标必须真实可解析**。禁止发明 `apiVersion + kind`，写进 manifest 前必须实测；`fallback`
@@ -129,8 +132,9 @@ pause 120/120 · stop 120/300 ms），**禁止**调到 200ms 以下；拖动进�
 修法是常驻 `AudioContext`（一条流、固定采样率）；跨源接 Web Audio 必须先确认 CORS（否则静音）；
 建图失败永久退回元素音量；**建图后元素音量必须置中性**；`halt()` 只 suspend 不 close；
 `sampleRate` 创建即固定所以 ctx 必须首播时才建；`location` 一律写 `window.location`。
-**系统挂起 ctx 必须自愈**：`onstatechange` 里按媒体元素判断（元素仍在放 + ctx 非 running）才
-`resume()`，否则症状是「界面在放、耳机没声」且无从判断。
+设备归页面（`Symbol.for`）、元素与监听归本代：`halt()` 释放本代、摘 `window` 键、只 suspend 设备，
+下一代新建实例接管同一设备（租约比较并释放）；**每个播放起点都要 `resumeGraph()`**
+（`onstatechange` 只在状态变化时触发，暂停期间挂起就没人管）；瞬时音量一律 `readVolume()`。
 
 ReplayGain。只读标准标签、不改文件；未测量 ≠ 0dB（缺标签必须不做增益）；增益走**独立
 节点**；回退路径把 RG 折进元素音量且 `readVolume()` 要除回去；防削波恒开（按 `peak` 收窄）；
@@ -165,11 +169,11 @@ ReplayGain。只读标准标签、不改文件；未测量 ≠ 0dB（缺标签�
 | # | 不变量 | 违反症状 | 门禁 |
 | --- | --- | --- | --- |
 | I-01 | 声明面五副本逐字一致 | 端点在某个宿主形态不可达 | `test-route-consistency` |
-| I-02 | 媒体源是 token 直连的绝对地址 | 进度条一拖就回 0 秒 | `test-mv-seek` |
+| I-02 | 媒体源是 token 直连的绝对地址 | 进度条一拖就回 0 秒 | `test-mv-seek`、`test-mv-client` |
 | I-03 | 能力 token 进程级 + 按用途分签 | 音乐全不能播 / 交叉越权 | `test-token-lifetime`、`test-security` |
 | I-04 | 栅栏豁免只到 Origin/Sec-Fetch，Host 必须回环 | 局域网可读库内任意文件 | `test-security` |
 | I-05 | 每个副作用位置过 `authorize(action, scope)` | 越界读写 | `test-audit` |
-| I-06 | teardown 后不得再启动（timer / 在飞 await / 子进程 / 全局键 / DOM） | 卸载后请求风暴、孤儿进程 | `test-poll-teardown`、`test-teardown-race`、`test-mv-teardown`、`test-teardown` |
+| I-06 | teardown 后不得再启动（timer / 在飞 await / 子进程 / 全局键 / DOM） | 卸载后请求风暴、孤儿进程 | `test-poll-teardown`、`test-teardown-race`、`test-mv-teardown`、`test-client-activation` |
 | I-07 | 凭据不进日志 / 落盘 / 持久通道 | 同机可读库内文件 | `test-audit` 凭据扫描 |
 | I-08 | 偏离 plan、降级信任边界必须显式报告 | 静默降级 | `test-audit` |
 | I-09 | 失败不得被报告为成功 | 以为保存了其实没写 | 无门禁覆盖（缺口登记在台账） |
@@ -179,7 +183,7 @@ ReplayGain。只读标准标签、不改文件；未测量 ≠ 0dB（缺标签�
 | I-13 | 每个断言都必须能变红 | 门禁形同虚设 | 人工对照 + §陷阱 |
 | I-14 | 跨视图保留的状态只在 player store；视图定时器归资源所有者 | 切回音乐页看到列表页 / 卡在 closing | `test-view-persistence` |
 | I-15 | 每次过渡都淡入淡出，时长取 fooyin 默认；无声音可淡时必须同步 | 电流声 / 起播时序后移 | `test-audio-fade`、`test-audio-graph` |
-| I-16 | 音频必须有常驻固定采样率输出流；跨源先确认 CORS；建图后元素音量置中性 | 切歌电流声 / 静音 / 首播无声 | `test-audio-graph` |
+| I-16 | 音频必须有常驻固定采样率输出流；跨源先确认 CORS；建图后元素音量置中性；设备页级、元素按代 | 切歌电流声 / 静音 / 首播无声 / 换 activation 后失声 | `test-audio-graph`、`test-client-activation` |
 | I-17 | ReplayGain 走独立节点；未测量不做增益；按峰值收窄；标签先收窄再夹范围 | 响度跳变 / 互相覆盖 / 削波 / NaN | `test-replaygain` |
 | I-18 | 交叉淡化：同一常驻 AudioContext；电平每元素独立；teardown 停两个 | 切歌有缝 / 音量被压 / 卸载后仍出声 | `test-audio-graph`（D 段） |
 | I-19 | 均衡器：0dB 即直通；自动前级；曲线夹 ±12dB（两处）；非法输入不动；缺 API 只跳过 EQ | 削波 / 脏数据刺耳 / 丢常驻流 | `test-audio-graph`（E 段） |

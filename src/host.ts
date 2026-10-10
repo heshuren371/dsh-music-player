@@ -118,6 +118,11 @@ interface PayloadTrack {
   tagged: boolean;
   kind: 'audio' | 'video';
   videoCodec: string | null;
+  /**
+   * 音轨编码。客户端只用它判断一件事：**WASM 画面旁路**能不能用 —— 那条路元素仍要自己
+   * 解音轨，音轨解不了就是「有画面、没声音」，而且会跳过本来能修好音轨的转码。
+   */
+  audioCodec: string | null;
   /** ReplayGain：Track → PayloadTrack 是**白名单投影**，漏加就永远下发不出去。 */
   rgTrackGainDb: number | null;
   rgTrackPeak: number | null;
@@ -143,6 +148,13 @@ interface MvJob {
   attempt: string | null;
   log: string;
   finishedAt: number | null;
+  /**
+   * 停用/热重载已经放弃这个任务。档位循环每起一档前都要看它：SIGKILL 掉子进程只会让
+   * `close` 带着非零码回来，循环若继续就会**再起一个没人管的 ffmpeg**（A1-03 的孤儿进程）。
+   */
+  cancelled: boolean;
+  /** 这一档撞上了超时（已经 SIGKILL）：后续档位直接跳过，把任务判失败。 */
+  timedOut: boolean;
 }
 
 /** 写标签的结果；tagged=false 时 reason 说明原因（worker 不可用 / 超时 / 格式不支持）。 */
@@ -295,7 +307,10 @@ function mvPlan(track, caps) {
     const capable = (video === 'hevc' && caps.hevc === true) || (video === 'av1' && caps.av1 !== false);
     if (!capable) return 'transcode';
   }
-  if (typeof track.audioCodec === 'string' && !MV_DIRECT_AUDIO.has(track.audioCodec) && ext !== 'mkv') return 'transcode';
+  // 音轨解不了就得让 ffmpeg 转一遍音轨（视频原样保留，见 mvPrepare 的档位）。
+  // **不按容器豁免**：mkv 里的 DTS/TrueHD 一样解不了，直出就是「有画面、没声音」，
+  // 而且不报 error，客户端的画面看门狗也看不见。
+  if (typeof track.audioCodec === 'string' && !MV_DIRECT_AUDIO.has(track.audioCodec)) return 'remux';
   return MV_DIRECT_CONTAINERS.has(ext) ? 'direct' : 'remux';
 }
 
@@ -311,6 +326,24 @@ function findFfprobe() {
  * 用 ffprobe 读首个视频/音频流的编码名（只在扫描视频文件时同步调一次，带超时）。
  * 失败一律返回 null，让上层退回启发式判定 —— 没装 ffmpeg 的机器也照常工作。
  */
+/**
+ * 归一化探测到的编码名：认得出就换成表里的规范名，认不出就**原样保留**。
+ *
+ * 原样保留是必要的：`null` 在 `mvPlan` 里的含义是「没有这条轨」，而「有轨但名字不认识」
+ * 是一个**已知不可播**的信号。把 truehd / wmav2 / prores 这类名字吞成 null，等于让它们
+ * 走直出 —— 症状就是有画面、没声音（F2）。
+ */
+function recognizeCodec(patterns, name) {
+  const text = String(name ?? '').trim();
+  if (text.length === 0) return null;
+  return detectCodec(patterns, text) ?? text.toLowerCase();
+}
+
+/**
+ * /api/mv 的 mp4/mkv/webm 之外的容器（avi/ts）在 music-metadata 那里会直接抛错，
+ * 于是 ffprobe 是这些文件**唯一**的编码来源 —— 调用点必须放在 music-metadata 的
+ * try 之外，否则它永远跑不到（那正是它被引进来的理由）。
+ */
 function videoCodecByFfprobe(filePath) {
   const probe = findFfprobe();
   if (probe === null) return { video: null, audio: null };
@@ -321,8 +354,8 @@ function videoCodecByFfprobe(filePath) {
     const video = streams.find((entry) => entry.codec_type === 'video');
     const audio = streams.find((entry) => entry.codec_type === 'audio');
     return {
-      video: video ? detectCodec(VIDEO_CODEC_PATTERNS, String(video.codec_name ?? '')) : null,
-      audio: audio ? detectCodec(AUDIO_CODEC_PATTERNS, String(audio.codec_name ?? '')) : null,
+      video: video ? recognizeCodec(VIDEO_CODEC_PATTERNS, video.codec_name) : null,
+      audio: audio ? recognizeCodec(AUDIO_CODEC_PATTERNS, audio.codec_name) : null,
     };
   } catch {
     return { video: null, audio: null };
@@ -398,6 +431,9 @@ function pruneMvJobs(now = Date.now()) {
  */
 function killAllMvJobs(reason) {
   for (const job of mvJobs.values()) {
+    // 先立「已放弃」标记再杀进程：否则档位循环会把这次 SIGKILL 当成一档失败，接着起下一档
+    // —— 新 module 已经不认识那个子进程，于是卸载后还有 ffmpeg 在写临时目录。
+    job.cancelled = true;
     if (job.child !== null) {
       try {
         job.child.kill('SIGKILL');
@@ -452,12 +488,30 @@ function mvFfmpegArgs(track, attempt, output) {
   return args;
 }
 
+/**
+ * 单档 ffmpeg 的超时。没有它，卡住的转码会让任务永远停在 `preparing`：客户端只会一直
+ * 转圈（重试按钮只在 `failed` 下渲染），重启宿主进程之前没有任何出口。
+ */
+const MV_ATTEMPT_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** 音轨编码已知解不了：ffmpeg 必须转一遍音轨（`copy` 档只换壳，音轨照旧没声音）。 */
+function audioNeedsTranscode(track) {
+  return typeof track.audioCodec === 'string' && !MV_DIRECT_AUDIO.has(track.audioCodec);
+}
+
 /** 跑一档 ffmpeg，边跑边把进度写回 job（-progress pipe:1 是机器可读的）。 */
 function mvRunAttempt(ffmpeg, track, attempt, output, job, lengthSeconds) {
   return new Promise((resolve) => {
     const child = spawn(ffmpeg, mvFfmpegArgs(track, attempt, output), { stdio: ['ignore', 'pipe', 'pipe'] });
     job.child = child;
     job.attempt = attempt;
+    const timer = setTimeout(() => {
+      job.timedOut = true;
+      try {
+        child.kill('SIGKILL');
+      } catch { /* 已经退了 */ }
+    }, MV_ATTEMPT_TIMEOUT_MS);
+    timer.unref?.();
     let buffer = '';
     child.stdout.on('data', (chunk) => {
       buffer += String(chunk);
@@ -476,33 +530,55 @@ function mvRunAttempt(ffmpeg, track, attempt, output, job, lengthSeconds) {
       }
     });
     child.stderr.on('data', (chunk) => { job.log = (job.log + String(chunk)).slice(-4000); });
-    child.on('error', () => resolve(-1));
-    child.on('close', (code) => resolve(typeof code === 'number' ? code : -1));
+    child.on('error', () => { clearTimeout(timer); resolve(-1); });
+    child.on('close', (code) => { clearTimeout(timer); resolve(typeof code === 'number' ? code : -1); });
   });
 }
 
 /**
  * 取（必要时启动）这条视频的 MV 任务状态：缓存命中直接 ready，正在跑回报进度，
  * 否则起一个 ffmpeg 并按档位递进重试，成功后原子改名进缓存。
+ *
+ * `retry` 表示调用方要**重新开始**：被明确放弃过的失败任务不会因为一条 10 分钟的
+ * 缓存条目而让「重试」按钮变成空操作。
  */
-async function mvPrepare(track, mode, lengthSeconds) {
+async function mvPrepare(track, mode, lengthSeconds, retry = false) {
   const key = await mvCacheKey(track, mode);
   const output = mvOutputFor(key);
   const ffmpeg = findFfmpeg();
   const url = '/api/dsh-music/mvfile?k=' + key;
   if (existsSync(output)) return { key, state: 'ready', progress: 1, error: null, url, ffmpeg: ffmpeg !== null };
   const running = mvJobs.get(key);
-  if (running !== undefined) return { key, state: running.state, progress: running.progress, error: running.error, url: null, ffmpeg: ffmpeg !== null };
+  if (running !== undefined) {
+    // 上一轮已经失败（且不是刚被停用打断）：`retry` 时必须丢掉它重来，否则客户端点了
+    // 「重试」也只能拿回同一条失败记录，直到 10 分钟的 TTL 过期为止。
+    if (!(retry && running.state === 'failed')) {
+      return { key, state: running.state, progress: running.progress, error: running.error, url: null, ffmpeg: ffmpeg !== null };
+    }
+    mvJobs.delete(key);
+  }
   if (ffmpeg === null) return { key, state: 'failed', progress: 0, error: 'ffmpeg-not-found', url: null, ffmpeg: false };
   await fs.mkdir(MV_CACHE_DIR, { recursive: true });
   const partial = output + '.part';
   pruneMvJobs();
-  const job: MvJob = { state: 'preparing', progress: 0, error: null, child: null, log: '', attempt: null, finishedAt: null };
+  const job: MvJob = { state: 'preparing', progress: 0, error: null, child: null, log: '', attempt: null, finishedAt: null, cancelled: false, timedOut: false };
   mvJobs.set(key, job);
-  const attempts = mode === 'remux' ? ['copy', 'audio', 'full'] : ['full'];
+  // 档位：音轨已知解不了时**从 `audio` 起**——`copy` 档把原音轨原样搬进 MP4，Chromium
+  // 照样解不了，等于白跑一遍（而且产物会被当成 ready 缓存下来）。
+  const attempts = mode === 'remux'
+    ? (audioNeedsTranscode(track) ? ['audio', 'full'] : ['copy', 'audio', 'full'])
+    : ['full'];
   void (async () => {
     for (const attempt of attempts) {
+      if (job.cancelled) return;
       const code = await mvRunAttempt(ffmpeg, track, attempt, partial, job, lengthSeconds);
+      if (job.cancelled) return;
+      if (job.timedOut) {
+        job.state = 'failed';
+        job.error = 'ffmpeg timeout (' + Math.round(MV_ATTEMPT_TIMEOUT_MS / 60000) + 'min, ' + attempt + ')';
+        job.finishedAt = Date.now();
+        return;
+      }
       if (code === 0) {
         try {
           // 副作用位置授权：MV 产物只能落在缓存目录（A5-04）。
@@ -1528,17 +1604,20 @@ async function readMetadata(file: ScannedFile): Promise<Track> {
       const names = info.map((entry) => String(entry?.codecName ?? '')).join(' ');
       track.videoCodec = detectCodec(VIDEO_CODEC_PATTERNS, names);
       track.audioCodec = detectCodec(AUDIO_CODEC_PATTERNS, names) ?? readFormatAudioCodec(metadata.format);
-      // ffprobe 是权威来源：music-metadata 对某些 MP4 只给编码箱名、对 avi/ts 直接抛错。
-      // 实测踩过：MPEG-4 Part 2 的 MP4 被误判成"可直出"，结果黑屏只有声音。
-      const probed = videoCodecByFfprobe(file.path);
-      if (probed.video !== null) track.videoCodec = probed.video;
-      if (probed.audio !== null) track.audioCodec = probed.audio;
       const videoTrack = info.find((entry) => entry?.video !== undefined);
       if (typeof videoTrack?.video?.pixelWidth === 'number') track.width = videoTrack.video.pixelWidth;
       if (typeof videoTrack?.video?.pixelHeight === 'number') track.height = videoTrack.video.pixelHeight;
     }
   } catch {
     // Unparseable/corrupt tags still list and stream; fall back to filename info.
+  }
+  if (track.kind === 'video') {
+    // ffprobe 是权威来源：music-metadata 对某些 MP4 只给编码箱名、对 avi/ts 直接抛错。
+    // **放在这个 try 之外**是必须的 —— 否则 avi/ts 恰好在抛错那一步丢掉探测，
+    // 只能退回按容器猜（实测踩过：MPEG-4 Part 2 的 MP4 被误判成「可直出」，黑屏只有声音）。
+    const probed = videoCodecByFfprobe(file.path);
+    if (probed.video !== null) track.videoCodec = probed.video;
+    if (probed.audio !== null) track.audioCodec = probed.audio;
   }
   return track;
 }
@@ -2463,6 +2542,7 @@ function createHost(ctx) {
       // MV 相关：客户端据此显示 MV 标识，并在播放前问 /mv 该怎么出画面。
       kind: track.kind === 'video' ? 'video' : 'audio',
       videoCodec: track.videoCodec ?? null,
+      audioCodec: track.audioCodec ?? null,
       rgTrackGainDb: track.rgTrackGainDb,
       rgTrackPeak: track.rgTrackPeak,
       rgAlbumGainDb: track.rgAlbumGainDb,
@@ -2805,6 +2885,8 @@ function createHost(ctx) {
       // 强制走转码，而不是又拿到同一个不能播的直出地址。
       const forced = url.searchParams.get('mode');
       const mode = forced === 'remux' || forced === 'transcode' ? forced : mvPlan(track, mvClientCaps);
+      // retry=1：客户端点了「重试」，要丢掉上一次的失败记录重跑（见 mvPrepare）。
+      const retry = url.searchParams.get('retry') === '1';
       if (mode === 'direct') {
         sendJson(res, 200, {
           mode,
@@ -2815,7 +2897,7 @@ function createHost(ctx) {
         });
         return;
       }
-      sendJson(res, 200, { mode, ...(await mvPrepare(track, mode, track.duration)) });
+      sendJson(res, 200, { mode, ...(await mvPrepare(track, mode, track.duration, retry)) });
       return;
     }
 
@@ -2841,7 +2923,10 @@ function createHost(ctx) {
       const dir = path.dirname(target0.path);
       const base = path.basename(target0.path, path.extname(target0.path));
       const output = await uniqueTargetPath(dir, base + ' (MV).mp4');
-      const attempts = mode === 'remux' ? ['copy', 'audio', 'full'] : ['full'];
+      // 与 mvPrepare 同一套档位纪律：音轨已知解不了时从 `audio` 起。
+      const attempts = mode === 'remux'
+        ? (audioNeedsTranscode(target0) ? ['audio', 'full'] : ['copy', 'audio', 'full'])
+        : ['full'];
       let converted = false;
       let lastLog = '';
       for (const attempt of attempts) {
@@ -2849,8 +2934,9 @@ function createHost(ctx) {
         if (result.status === 0) { converted = true; break; }
         lastLog = String(result.stderr ?? '').trim().split('\n').slice(-1)[0] ?? '';
         try {
-          // 副作用位置授权：只允许删缓存目录内的临时产物（fs.write scope 的缓存面）。
-          await fs.rm(authorize('fs.write', output, [MV_CACHE_DIR]), { force: true });
+          // 失败档留下的半成品**在用户的音乐目录里**（不是缓存目录）：授权面就必须是它
+          // （拿缓存目录去授权只会 403，然后被这个 catch 吞掉 —— 半成品会留在库里被扫成曲目）。
+          await fs.rm(authorize('fs.write', output, [dir]), { force: true });
         } catch { /* 下一档重来 */ }
       }
       if (!converted) throw statusError(500, 'ffmpeg 转换失败：' + lastLog.slice(0, 200));

@@ -2117,3 +2117,98 @@ worker 据此决定是否覆盖 `tag.pictures`），但客户端从来没有发�
 输出用 `cut` 截断后**只看了前半行**就当通过。修复：按标准先压缩（新增的封面替换行从 ~250 词压到
 ~110 词，保留全部判别性事实），`npm test` 全绿后再推一次。
 纪律补强：**门禁输出不得截断着读**；每条门禁的结论以退出码为准（`npm test` 的退出码），不以肉眼前缀为准。
+
+---
+
+## 5.44 第 32 轮 —— MV 偶尔没声音（刷新才好）+ 借用独立审计补 MV 缺口
+
+### 5.44.1 用户反馈
+
+「有时候播放 MV 歌曲时会无声音，刷新之后就有声音了」。这条症状给了两个方向：**刷新能修好**
+说明是页面内可变状态（不是文件/编码本身不能播）；而 `mvPlan` 的静态判定又能让「本就不能播的
+音轨」走直出。两者各查一遍，不互相替代。
+
+### 5.44.2 客户端根因（三条，都能在夹具里复现）
+
+1. **跨代复用已立闸门的实例**：player 挂在 `window.__dshMusicPlayer` 上跨 activation 复用，
+   而 `halt()` 把 `disposed` 置成终态且不复位。下一代拿到同一份实例后，起播回调里的
+   `if (!disposed) rampVolume(state.volume, …)` 被跳过 ⇒ 增益停在 `stopAudio()` 留下的 0。
+   对照实测的失败细节就是静音签名：音量节点被写两次 0、**从未** ramp 到用户音量。
+2. **只在 `startNow` 里 resume 设备**：`toggle()`（暂停→播放）与交叉淡化进入都不 resume；
+   而 `onstatechange` 只在状态**变化**时触发 —— 系统在暂停期间挂起 ctx 之后，按播放就是
+   「界面在放、耳机没声」，且没有任何自愈路径。
+3. **瞬时音量从元素音量读**：建图之后元素音量恒为中性 1，于是每一首起播都先跳到满幅再淡到
+   用户值（用户音量 40% 时是实打实的爆音）。对照实测：`value:1` + `setValue:1`。
+
+### 5.44.3 修法（架构层）
+
+设备与代际分离：`AudioContext` + 增益/均衡链 + CORS 探测结果搬进**页级设备**（`Symbol.for` 挂
+`window`，跨 bundle 重求值存活）；媒体元素、每元素电平节点与监听仍归本代。`halt()` 变成一次真正
+的释放：停两个元素、disconnect 本代节点、移除自建 DOM（`.dshm-mvPark` 与 `<video>`）、撤
+`device.watcher`、只 suspend 设备、**摘掉 window 键**；`takePlayer()` 只接管未释放的实例，
+否则新建。`acquire()/lease()` 是比较并释放的租约：热重载的旧 disposer 晚于新 bundle 求值时
+不得停掉新一代。播放起点统一 `resumeGraph()`；瞬时音量统一 `readVolume()`。
+
+### 5.44.4 MV 侧：独立审计取证 + 修法
+
+独立子代理只读取证（真实 ffmpeg + ffprobe 夹具，`/tmp` 内）报了 11 条，与本轮相关的 5 条：
+
+| 审计条 | 证据 | 修法 |
+| --- | --- | --- |
+| `file:line` `mvPlan` 对 `.mkv` 豁免音轨判定 | 实测 `h264+dts` 的 mkv → `mode:"direct"`，同编码 `.mov` → `transcode` | 去掉容器豁免；音轨编码不在直出名单里一律 `remux` |
+| 未识别编码被吞成 `null` | 实测 `truehd`/`wmav2`/`prores` 都映射不到 → 判定被整段跳过 | `recognizeCodec()`：认不出就**原样保留**小写名（`null` 只表示「没有这条轨」） |
+| 无音轨看门狗 | 客户端零命中 `webkitAudioDecodedByteCount` | 新增 `guardAudioTrack()`：已知有音轨却 3.5s 零解码字节 → 升级转码 |
+| 档位只换壳 | `copy` 档把原音轨原样搬进 MP4，Chromium 照旧解不了 | 音轨已知解不了时档位从 `audio` 起 |
+| 停用后仍会再起 ffmpeg | 旧夹具用 `sh` + `sleep`，`close` 永不到达 ⇒ 该路径恒绿 | `job.cancelled` + 档位循环前后双闸门；夹具改 `exec sleep` |
+
+另修：MV 单档超时（30min，原来卡住就永久 `preparing`，UI 没有出口）；`/api/mvconvert` 失败清理
+的授权面写成缓存目录（403 被吞 ⇒ 半成品留在音乐目录被扫成曲目）；ffprobe 探测从
+music-metadata 的 `try` 里搬出来（avi/ts 恰恰在那一步抛错，探测永远跑不到）。
+
+### 5.44.5 门禁（新增 2 套，31 → 33）与负向对照
+
+- `scripts/test-client-activation.mjs`（21 条）：释放面（window 键、自建 DOM）、设备页级 +
+  租约、**停用→再 activation 与热重载之后起播必须出声**、`toggle()` 唤醒被挂起的设备、
+  换歌不跳到满幅。
+- `scripts/test-mv-jobs.mjs`（8 条；无 ffmpeg 时后半段显式 skipped）：payload 下发 `audioCodec`、mkv 不豁免音轨判定（真实
+  `h264+mp2` 夹具）、真实音轨转码成功、失败缓存与 `retry=1` 的语义。
+- `scripts/test-mv-client.mjs`（7 条）：direct 档必须挂 token 绝对地址、音轨看门狗（正/反向）、
+  升级预算每次播放各一份、WASM 旁路的音轨前提（静态，jsdom 跑不了动态 `import()`）。
+- 扩写 `scripts/test-mv-teardown.mjs`：**一共只许起过一个 ffmpeg**（原断言只查第一个 PID）。
+
+| 对照（逐条回退） | 实测变红 |
+| --- | --- |
+| 复用已释放实例 + 不摘 window 键（旧行为） | B1/C1/C3/D1/D2/E3；C3/D2 的细节正是静音签名（音量节点两次写 0、从未 ramp） |
+| 设备不跨代（`Symbol()`） | D3（`ctxs=2`） |
+| `toggle()` 不 resume | F1 |
+| 瞬时音量读元素音量 | G1（`value:1` + `setValue:1`） |
+| 音轨看门狗失效 | B1/B2/D1 |
+| 换歌不复位升级预算 | D1（`asks=1`） |
+| `mvPlan` 恢复 mkv 豁免 + 档位恢复 `copy` | A3（实测 `{"mode":"direct","audioCodec":"mp2"}`）/A4/B1 |
+| 只撤 `retry=1` | B3（`state=failed`，spawn 不变 = 空操作） |
+| 去掉 `job.cancelled` | 「只起过一个 ffmpeg」红（`spawns=2`） |
+| direct 用宿主相对地址 | A1/A2（`/api/dsh-music/stream?...`） |
+| WASM 不检查音轨 | E1（`gated=false`） |
+
+### 5.44.6 验证与未修登记
+
+`typecheck` 0 · `check-strict` · `check-build-fresh` · `check-whitespace` · `check-prose` ·
+`doc-budgets` 全绿；`npm test` 33 套全绿；听感仍需用户确认（jsdom 没有音频设备）。
+
+未修（本轮已取证，按风险排序）：① `/api/mvconvert` 用 `spawnSync` 阻塞宿主最长 30 分钟
+（客户端当前不调用该端点）；② MV 缓存目录无清理，`os.tmpdir()` 里的转码产物只增不减；
+③ 自动升级（画面看门狗 / error 升级）不带 `retry=1`（有意保留：不在用户没要求时反复跑重活），
+失败缓存已存在时它们会立刻拿到那条记录并报失败；④ `retry=1` 清不掉**已存在的缓存文件**
+（`existsSync` 在 map 检查之前短路），需要改源文件 mtime 或手删；⑤ WASM 旁路的 libav 版本路径
+在客户端硬编码，依赖升级后只会静默降级到转码；⑥ `/api/mvlib` 与 WASM 旁路仍无行为门禁。
+
+### 5.44.7 预算调整（按「先搬家 → 再压缩 → 才上调」的顺序）
+
+两条新规则正文只能进 `docs/rules-detail.md`（`AGENTS.md` 只留结论 + 指针），两条门禁行只能进
+`docs/gates.md`（逐条门禁表），都不存在可搬去的层级。压缩三轮后仍差 117 与 17 词，故上调：
+`docs/rules-detail.md` 9064 → 9400（实测 9181，余量 ≥2%），`docs/gates.md` 1944 → 2230
+（实测 2037）。明细证据不进这两份文档，留在本轮台账 §5.44.5 与套件头注释里。
+
+本轮命令按 `AGENTS.md` 的写法执行时，`pnpm run typecheck` 触发了 pnpm 的依赖自检安装并在
+`ERR_PNPM_IGNORED_BUILDS` 处失败（与本次改动无关的环境问题）；改用等价命令
+`node scripts/typecheck-ratchet.mjs` 与 `./node_modules/.bin/tsc -p tsconfig.json`。
