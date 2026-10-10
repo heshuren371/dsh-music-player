@@ -197,6 +197,8 @@ interface PlayerState {
   match: MatchState | null;
   /** 一键补全：确认条 + 批处理进度。 */
   pendingComplete: boolean;
+  /** 一键补全是否替换已有内嵌封面（默认 false：只补缺失）。逐首手动应用不走这里。 */
+  completeOverwriteCover: boolean;
   completing: boolean;
   completeTotal: number;
   completeDone: number;
@@ -327,7 +329,8 @@ interface MusicPlayerApi {
   toggleSort(key: string): void;
   match(id: string, query?: string): Promise<void>;
   closeMatch(): void;
-  applyMatch(candidate: MatchCandidate, writeFile: boolean): Promise<void>;
+  applyMatch(candidate: MatchCandidate, writeFile: boolean, replaceCover: boolean): Promise<void>;
+  setCompleteOverwriteCover(on: boolean): void;
   completeRequest(): void;
   cancelComplete(): void;
   stopComplete(): void;
@@ -554,9 +557,11 @@ window.__ModuleLoader__.load({
       "complete.progress": (done, total, failed, skipped) => `补全中… ${done}/${total}`
         + (failed > 0 ? `（失败 ${failed}）` : "")
         + (skipped > 0 ? `（${skipped} 首已正确或置信不足，跳过）` : ""),
-      "confirm.complete": (count) => `将逐首检查 ${count} 首歌曲（多源搜索：QQ 音乐 / iTunes / 网易云 / MusicBrainz）：标签已正确的自动跳过，只把高置信度且有差异的结果写入并重命名，置信不足的一律不动；**已有封面不会被覆盖，只补缺失封面**。是否继续？`,
+      "confirm.complete": (count) => `将逐首检查 ${count} 首歌曲（多源搜索：QQ 音乐 / iTunes / 网易云 / MusicBrainz）：标签与文件名都已正确的自动跳过，只写入高置信度的结果，置信不足的一律不动。封面默认只补缺失；勾选「覆盖已有封面」才会替换已有封面。是否继续？`,
       "complete.none": "没有需要补全的歌曲",
       "match.writeFile": "写入标签并重命名文件",
+      "match.replaceCover": "替换已有封面",
+      "complete.replaceCover": "覆盖已有封面",
       "match.applying": "正在写入文件…",
       "action.picking": "正在选择…",
       "action.loading": "正在扫描…",
@@ -637,9 +642,11 @@ window.__ModuleLoader__.load({
       "complete.progress": (done, total, failed, skipped) => `Completing… ${done}/${total}`
         + (failed > 0 ? ` (${failed} failed)` : "")
         + (skipped > 0 ? ` (${skipped} already correct or low confidence)` : ""),
-      "confirm.complete": (count) => `Check all ${count} song(s) against multiple sources (QQ / iTunes / NetEase / MusicBrainz): already-correct tags are skipped, only high-confidence differences are written and renamed, low-confidence ones stay untouched; existing covers are never overwritten, only missing ones are filled. Continue?`,
+      "confirm.complete": (count) => `Check all ${count} song(s) against multiple sources (QQ / iTunes / NetEase / MusicBrainz): songs whose tags and filename are already correct are skipped, only high-confidence results are written, low-confidence ones stay untouched. Covers fill missing art only; check "Replace existing covers" to overwrite. Continue?`,
       "complete.none": "Nothing to complete",
       "match.writeFile": "Write tags & rename file",
+      "match.replaceCover": "Replace existing cover",
+      "complete.replaceCover": "Replace existing covers",
       "match.applying": "Writing file…",
       "action.picking": "Picking…",
       "action.loading": "Scanning…",
@@ -729,6 +736,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-error{border-bottom:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-tertiary);flex:none;padding:6px 14px;font-size:12px}
 .dshm-notice{border-bottom:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-text-secondary);background:var(--dsw-alias-bg-secondary);flex:none;padding:6px 14px;font-size:12px}
 .dshm-confirmBar{border-bottom:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-state-error-tertiary);flex:none;align-items:center;gap:10px;padding:8px 14px;display:flex}
+.dshm-coverToggle{display:flex;align-items:center;gap:6px;margin-left:auto;cursor:pointer;white-space:nowrap}
 .dshm-confirmText{min-width:0;flex:1;color:var(--dsw-alias-label-primary);font-size:12px;line-height:1.5}
 .dshm-btn--danger{color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}
 .dshm-dirEditor{border-bottom:1px solid var(--dsw-alias-border-l2);background:color-mix(in srgb, var(--dsw-alias-bg-base) 72%, transparent);-webkit-backdrop-filter:saturate(180%) blur(6px);backdrop-filter:saturate(180%) blur(6px);flex:none;align-items:center;gap:8px;padding:8px 14px;display:flex}
@@ -1327,6 +1335,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         match: null,
         /** 一键补全：确认条 + 批处理进度。 */
         pendingComplete: false,
+        completeOverwriteCover: false,
         completing: false,
         completeTotal: 0,
         completeDone: 0,
@@ -3492,7 +3501,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
          * 应用一条候选。writeFile=true 时调宿主写入标签并重命名本地文件；
          * 写文件失败或未勾选时退化为本地显示覆盖，功能不会因此不可用。
          */
-        applyMatch: async (candidate, writeFile) => {
+        applyMatch: async (candidate, writeFile, replaceCover) => {
           const picker = state.match;
           if (picker === null || candidate === null || typeof candidate !== "object") return;
           const seq = ++matchSeq;
@@ -3518,10 +3527,15 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           const wasPlaying = wasLoaded && !audio.paused;
           set({ match: { id, loading: true, applying: true, error: null, candidates: [], term: picker.term } });
           try {
+            // 宿主只在调用方**显式**要求时才替换已有内嵌封面（缺省只补缺失，见 /api/apply）。
+            // 手动应用是用户逐首选定的动作：候选带封面且「替换已有封面」勾选时才要求替换。
+            // 缺了这一项，已有封面的歌怎么应用都不会变。
+            const replaceExisting = replaceCover === true
+              && typeof candidate.cover === "string" && candidate.cover.length > 0;
             const payload = await api("/api/apply", {
               method: "POST",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ id, ...entry, rename: true }),
+              body: JSON.stringify({ id, ...entry, rename: true, replaceCover: replaceExisting }),
             });
             // 弹层已被关闭 / 插件已停用：这次结果作废，不得再改状态。
             if (seq !== matchSeq) return;
@@ -3586,6 +3600,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           set({ pendingComplete: true, error: null });
         },
         cancelComplete: () => set({ pendingComplete: false }),
+        setCompleteOverwriteCover: (on) => set({ completeOverwriteCover: on === true }),
 
         stopComplete: () => set({ completing: false }),
         /**
@@ -3636,8 +3651,11 @@ body:has(.dshm-root) [data-width-handle]{display:none}
               } else if (track.tagged === true
                 && sameKey(candidate.title) === sameKey(track.title)
                 && sameKey(candidate.artist ?? "") === sameKey(track.artist ?? "")
-                && track.name === expectedFileName(candidate.title, candidate.artist, track.name)) {
-                // 标签与文件名都已规范：不重写、不重命名，算“已正确”
+                && track.name === expectedFileName(candidate.title, candidate.artist, track.name)
+                && !(state.completeOverwriteCover && typeof candidate.cover === "string" && candidate.cover.length > 0)) {
+                // 标签与文件名都已规范 ⇒ 通常无事可做，算「已正确」直接跳过。例外：用户勾选了
+                // 「覆盖已有封面」而候选带封面时，封面正是要写的东西，不能算已完成 —— 否则
+                // 已有封面的歌在批量里永远轮不到。
                 skipped += 1;
               } else {
                 const entry: MetaEntry = {};
@@ -3648,7 +3666,12 @@ body:has(.dshm-root) [data-width-handle]{display:none}
                 await api("/api/apply", {
                   method: "POST",
                   headers: { "content-type": "application/json" },
-                  body: JSON.stringify({ id: track.id, ...entry, rename: true }),
+                  body: JSON.stringify({
+                    id: track.id,
+                    ...entry,
+                    rename: true,
+                    replaceCover: state.completeOverwriteCover === true,
+                  }),
                 });
                 // 注意：这里**不再**顺手转格式。一键补全只做它本来的事（写标签 + 重命名）。
                 // 之前把「转码 + 丢原件」挂在补全里是设计错误：批量、不可逆、还看不出发生了什么。
@@ -4150,6 +4173,8 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 
       // 是否把补全结果写回文件（写标签 + 重命名），默认开启
       const [writeFile, setWriteFile] = useState(true);
+      // 手动应用默认替换封面：用户已经看到了候选的封面并主动点选它。
+      const [replaceCover, setReplaceCover] = useState(true);
 
       // 可见列表 = 播放队列：筛选 + 排序统一在 player.visibleRows() 里计算，
       // 这里渲染的顺序就是 next/prev/自动下一首将走的顺序。
@@ -4705,7 +4730,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
                     key: (candidate.id ?? "c") + ":" + index,
                     type: "button",
                     className: "dshm-cand",
-                    onClick: () => player.applyMatch(candidate, writeFile),
+                    onClick: () => player.applyMatch(candidate, writeFile, replaceCover),
                   },
                     candidate.cover
                       ? h("img", {
@@ -4739,6 +4764,15 @@ body:has(.dshm-root) [data-width-handle]{display:none}
               }),
               t("match.writeFile"),
             ), t("match.source")),
+            withTip(h("label", { className: "dshm-check" },
+              h("input", {
+                type: "checkbox",
+                checked: replaceCover,
+                disabled: picker.applying || writeFile !== true,
+                onChange: (event) => setReplaceCover(event.target.checked),
+              }),
+              t("match.replaceCover"),
+            ), t("match.replaceCover")),
             h("span", { style: { display: "flex", gap: "8px" } },
               state.meta[picker.id] !== undefined && h("button", {
                 type: "button",
@@ -4762,6 +4796,14 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 
       const completeBar = state.pendingComplete && h("div", { className: "dshm-confirmBar" },
         h("span", { className: "dshm-confirmText" }, t("confirm.complete")(completeCount)),
+        h("label", { className: "dshm-coverToggle" },
+          h("input", {
+            type: "checkbox",
+            checked: state.completeOverwriteCover,
+            onChange: (event) => player.setCompleteOverwriteCover(event.target.checked),
+          }),
+          t("complete.replaceCover"),
+        ),
         h("button", { type: "button", className: "dshm-btn dshm-completeGo", onClick: () => player.completeAll() }, t("action.confirm")),
         h("button", { type: "button", className: "dshm-btn dshm-completeCancel", onClick: () => player.cancelComplete() }, t("action.cancel")),
       );

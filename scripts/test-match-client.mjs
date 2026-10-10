@@ -124,6 +124,9 @@ check('manual search sends q=', matchCalls.length === 2 && matchCalls[1].include
 await act(async () => { container.querySelector('.dshm-cand').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
 await settle(120);
 check('apply posts the candidate + rename to the host', applyCalls.length === 1 && applyCalls[0].id === 'a.mp3' && applyCalls[0].rename === true && applyCalls[0].title === 'Alpha Real', JSON.stringify(applyCalls[0]));
+// 宿主只在 replaceCover:true 时才替换已有内嵌封面，所以手动应用必须把默认勾选的意图带上。
+// 两个方向的完整覆盖（含取消勾选、无封面候选、批量开关）在 test-cover-replace.mjs。
+check('apply asks the host to replace an existing embedded cover', applyCalls[0].replaceCover === true, JSON.stringify(applyCalls[0]));
 check('dialog closes after applying', container.querySelector('.dshm-modal') === null);
 check('row now shows the renamed/host-tagged entry', titleOf(rows()[0]) === 'Alpha Real' && rows()[0].title === 'Real X - Alpha Real.mp3', titleOf(rows()[0]) + ' / ' + rows()[0].title);
 check('no local override is kept once tags were written', meta()['a.mp3'] === undefined);

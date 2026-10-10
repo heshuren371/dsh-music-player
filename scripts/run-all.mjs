@@ -27,6 +27,7 @@ const suites = [
   { name: 'online metadata match (host)', file: 'scripts/test-match.mjs', node: [] },
   { name: 'apply tags + rename (host)', file: 'scripts/test-apply.mjs', node: [] },
   { name: 'online metadata match (client)', file: 'scripts/test-match-client.mjs', node: [] },
+  { name: 'cover replace on completion', file: 'scripts/test-cover-replace.mjs', node: [] },
   { name: 'client shell: icons / tooltips / OS media', file: 'scripts/test-client-shell.mjs', node: [] },
   { name: 'view persistence (full player survives view remount)', file: 'scripts/test-view-persistence.mjs', node: [] },
   { name: 'click-free audio transitions (fade in/out)', file: 'scripts/test-audio-fade.mjs', node: [] },
