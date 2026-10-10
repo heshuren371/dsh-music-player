@@ -2212,3 +2212,13 @@ music-metadata 的 `try` 里搬出来（avi/ts 恰恰在那一步抛错，探测
 本轮命令按 `AGENTS.md` 的写法执行时，`pnpm run typecheck` 触发了 pnpm 的依赖自检安装并在
 `ERR_PNPM_IGNORED_BUILDS` 处失败（与本次改动无关的环境问题）；改用等价命令
 `node scripts/typecheck-ratchet.mjs` 与 `./node_modules/.bin/tsc -p tsconfig.json`。
+
+### 5.44.8 第一次推送 CI 红：新断言依赖了本机才有的 ffmpeg 夹具
+
+`ed6d1ac` 推送后 CI 在 `test-mv.mjs` 红：新增的「avi（mpeg4）应判 transcode」只在「生成了真实夹具」时成立；CI 没有 ffmpeg，夹具是占位文件、编码全是 `null`，于是 avi 按容器保守判 `remux`。
+
+修法：把判据拆成两层 —— 与夹具无关的那条（avi/ts 绝不允许 direct，容器 Chromium 解不开）
+两种环境都断言；编码级判定放进 `if (generated)`，否则显式 `skipped`（跳过必须能与通过区分）。
+本地用一份临时把 `FFMPEG` 置 null 的拷贝复现了 CI 分支并通过，临时文件已删。
+
+教训：新断言依赖「本机装了某个工具」时，必须同时跑一遍「没有那个工具」的分支；CI 就是那个分支。

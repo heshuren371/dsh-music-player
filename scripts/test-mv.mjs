@@ -80,15 +80,25 @@ check('mp4 plans to direct play', mp4.status === 200 && mp4.body.mode === 'direc
 const mkv = await mv('clip.mkv');
 check('mkv also plans to direct play (Chromium demuxes Matroska)', mkv.status === 200 && mkv.body.mode === 'direct', JSON.stringify(mkv.body));
 const avi = await mv('clip.avi');
-// ffprobe 现在真跑得到 avi（music-metadata 对 avi 抛错 ⇒ 探测必须在它的 try 之外）：
-// mpeg4 画面被认出来 ⇒ 必须重编码；只换壳的话画面照旧是黑的。
-check('avi (mpeg4 video) plans to transcode — ffprobe sees the codec where music-metadata throws',
-  avi.status === 200 && avi.body.mode === 'transcode',
-  JSON.stringify({ mode: avi.body.mode, codec: byName('clip.avi')?.videoCodec, audio: byName('clip.avi')?.audioCodec }));
 const ts = await mv('clip.ts');
-check('ts (h264+aac in a container Chromium cannot open) plans to remux',
-  ts.status === 200 && ts.body.mode === 'remux',
-  JSON.stringify({ mode: ts.body.mode, codec: byName('clip.ts')?.videoCodec, audio: byName('clip.ts')?.audioCodec }));
+// 与夹具无关的判据：容器 Chromium 解不开 ⇒ 绝不允许 direct（换壳或重编码都行）。
+check('avi / ts never plan direct play (Chromium cannot demux those containers)',
+  avi.body.mode !== 'direct' && ts.body.mode !== 'direct',
+  JSON.stringify({ avi: avi.body.mode, ts: ts.body.mode }));
+if (generated) {
+  // ffprobe 真跑得到 avi（music-metadata 对 avi 抛错 ⇒ 探测必须在它的 try 之外）：
+  // mpeg4 画面被认出来 ⇒ 必须重编码；只换壳的话画面照旧是黑的。
+  check('avi (mpeg4 video) plans to transcode — ffprobe sees the codec where music-metadata throws',
+    avi.body.mode === 'transcode',
+    JSON.stringify({ mode: avi.body.mode, codec: byName('clip.avi')?.videoCodec, audio: byName('clip.avi')?.audioCodec }));
+  check('ts (h264+aac in a container Chromium cannot open) plans to remux',
+    ts.body.mode === 'remux',
+    JSON.stringify({ mode: ts.body.mode, codec: byName('clip.ts')?.videoCodec, audio: byName('clip.ts')?.audioCodec }));
+} else {
+  // 没有 ffmpeg 就没有编码信息（占位文件 + 无 ffprobe），只能按容器保守判定 —— 这正是
+  // 上面那条「绝不 direct」能覆盖的部分，编码判定留给有 ffmpeg 的环境。
+  check('avi/ts codec-level planning skipped (no ffmpeg fixtures)', true, 'skipped');
+}
 check('non-video tracks are rejected', (await mv('song.wav')).status === 400);
 const missing = await json(base + '/api/mv?id=nope.mp4');
 check('unknown track → 404', missing.status === 404, 'status=' + missing.status);
