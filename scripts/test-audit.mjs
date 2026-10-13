@@ -164,7 +164,15 @@ check('no filesystem mutation uses an inline path literal', literalPaths.length 
 
 // 凭据 / 请求元数据不得作为写盘内容。窗口取写调用起始处 400 字符，覆盖整条语句。
 const SECRET_BEARING = /\breq\.(?:url|headers)\b|headers\[['"]|\.cookie\b|authorization|\btoken\b/i;
-const credentialWrites = mutationSites.filter((s) => SECRET_BEARING.test(host.slice(s.at, s.at + 400)));
+// 窗口里的**注释**不参与判定：注释不是运行时数据。固定 400 字符窗口会扫到相邻函数的注释，
+// 造成误报（实测：MV 缓存淘汰那段的窗口落到了「进程级的 token 仓库」这句注释上）。
+// 注意必须**同长度遮蔽**而不是「先替换再切片」：块注释的结尾可能在窗口之外，替换式剥注释
+// 对半截注释无效（替换式剥注释的写法误报仍在）。
+const BLANK = (text) => text.replace(/[^\n]/g, ' ');
+const maskedHost = host
+  .replace(/\/\*[\s\S]*?\*\//g, BLANK)
+  .replace(/(^|[^:\n])(\/\/[^\n]*)/g, (_m, keep) => keep + BLANK(_m.slice(keep.length)));
+const credentialWrites = mutationSites.filter((s) => SECRET_BEARING.test(maskedHost.slice(s.at, s.at + 400)));
 check('no request credentials/metadata reach a filesystem write', credentialWrites.length === 0,
   credentialWrites.map((s) => s.verb).join(', '));
 

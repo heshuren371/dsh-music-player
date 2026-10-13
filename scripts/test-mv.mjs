@@ -2,6 +2,7 @@
 // 没有 ffmpeg 的机器上，前半段（扫描 + 判定 + 参数）仍然全跑，转封装部分改用占位文件验证失败路径。
 import { createServer } from 'node:http';
 import { promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
@@ -141,6 +142,67 @@ if (FFMPEG === null || !generated) {
     check('mv cache supports Range (seeking works)', ranged.status === 206 && (await ranged.arrayBuffer()).byteLength === 100, 'status=' + ranged.status);
     const cached = await mv('clip.avi');
     check('second request hits the cache (no re-encode)', cached.body.state === 'ready' && cached.body.progress === 1, JSON.stringify({ state: cached.body.state, progress: cached.body.progress }));
+  }
+}
+
+// ── 持久化转码缓存（全部靠预置产物，不依赖 ffmpeg）──────────────────────────
+// 契约：/api/mv 的产物落在 $DSH_HOME/storages/dsh-music-mv（临时目录会被系统清理 ⇒ 以前转过的
+// 要重转一遍）；命中直接把 mtime 推新当 LRU；条目数有上限；过期的 .part 半成品会被清掉，
+// 正在写的那个不能删（删除与写入竞态会让 ffmpeg 失败）。
+{
+  // 取一个**确实存在**的视频夹具：前面的小节可能已经把它转格式或移走了。
+  // 注意：payload 里的 track 是**白名单投影**，没有 `path` 字段 —— 路径要用 dir + id 组装。
+  const fileOf = (t) => path.join(library.dir, t.id);
+  const candidates = library.tracks.filter((t) => t.kind === 'video' && existsSync(fileOf(t)));
+  const track = candidates.find((t) => t.name === 'clip.mkv') ?? candidates[0];
+  const trackPath = track === undefined ? null : fileOf(track);
+  check('cache probe found a real video fixture', trackPath !== null,
+    JSON.stringify(library.tracks.map((t) => t.name + (existsSync(fileOf(t)) ? '' : '(gone)'))));
+  const stat = trackPath === null ? null : await fs.stat(trackPath);
+  const key = createHash('sha1').update('remux|' + trackPath + '|' + stat.size + '-' + Math.round(stat.mtimeMs)).digest('hex').slice(0, 32);
+  const cacheDir = path.join(home, 'storages', 'dsh-music-mv');
+  const cachedFile = path.join(cacheDir, key + '.mp4');
+  const askMv = () => json(base + '/api/mv?id=' + encodeURIComponent('clip.mkv') + '&mode=remux');
+  await fs.mkdir(cacheDir, { recursive: true });
+  const payload = Buffer.from('FAKE-MP4-PAYLOAD');
+  await fs.writeFile(cachedFile, payload);
+
+  if (track !== undefined) {
+  // 契约是「落在插件数据区 $DSH_HOME/storages」（生产环境里 DSH_HOME 持久），而不是
+  // `os.tmpdir()/dsh-music-mv` 这个裸临时目录 —— 测试里 DSH_HOME 自己也在临时目录下，
+  // 所以只断言「不在裸临时目录」是不够的，必须钉住数据区路径。
+  check('cache lives in the plugin data area (survives restarts), not a bare temp dir',
+    cacheDir === path.join(home, 'storages', 'dsh-music-mv')
+      && cacheDir !== path.join(os.tmpdir(), 'dsh-music-mv')
+      && existsSync(cachedFile), cacheDir);
+  const hit = await askMv();
+  check('a previously transcoded MV is served from the cache (no re-encode)',
+    hit.body.state === 'ready' && String(hit.body.url).includes(key), JSON.stringify(hit.body));
+  const served = await fetch(base + '/api/mvfile?k=' + key);
+  const bytes = Buffer.from(await served.arrayBuffer());
+  check('the cached bytes are what /mvfile serves', served.status === 200 && bytes.equals(payload), 'status=' + served.status);
+
+  const old = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+  for (let i = 0; i < 30; i += 1) {
+    const dummy = path.join(cacheDir, 'deadbeef' + String(i).padStart(2, '0') + '.mp4');
+    await fs.writeFile(dummy, Buffer.alloc(8));
+    await fs.utimes(dummy, old, old);
+  }
+  await askMv();
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  const left = (await fs.readdir(cacheDir)).filter((name) => name.endsWith('.mp4'));
+  check('cache stays bounded (oldest evicted, the just-used one kept)',
+    left.length <= 24 && left.includes(key + '.mp4'), 'left=' + left.length + ' kept=' + left.includes(key + '.mp4'));
+
+  const stalePart = path.join(cacheDir, 'stale.part');
+  const freshPart = path.join(cacheDir, 'fresh.part');
+  await fs.writeFile(stalePart, Buffer.alloc(4));
+  await fs.utimes(stalePart, new Date(Date.now() - 3600 * 1000), new Date(Date.now() - 3600 * 1000));
+  await fs.writeFile(freshPart, Buffer.alloc(4));
+  await askMv();
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  check('stale .part leftovers are cleaned while a fresh .part is left alone',
+    !existsSync(stalePart) && existsSync(freshPart), 'stale=' + existsSync(stalePart) + ' fresh=' + existsSync(freshPart));
   }
 }
 

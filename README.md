@@ -69,7 +69,7 @@ cd .. && dsh plugin --profile web add link:./dsh-music-player
 - 交叉淡化（默认开启）：切歌时新旧两首重叠淡入淡出，`300ms/700ms`（手动/曲末，与 fooyin 同值）；显式关闭用 `?crossfade=0` 或 `window.__dshMusicCrossfade = false`
 - 单曲循环与列表循环。播放顺序等于可见列表顺序，排序或搜索后「下一首」就是你看到的下一行
 - 列表显示歌曲名 / 歌手 / 时长；标签与封面来自音频文件内嵌数据，缺省回退「歌手 - 歌名」文件名约定
-- MV 三档判定 `direct` / `remux` / `transcode`（参考 Jellyfin），后两档调用 ffmpeg 并把产物缓存在临时目录。没有 ffmpeg 也能用：直出格式照常播，其余给出安装提示
+- MV 三档判定 `direct` / `remux` / `transcode`（参考 Jellyfin），后两档调用 ffmpeg 并把产物缓存在插件数据区（转过一次后直接命中缓存；缓存按 LRU 有上限）。没有 ffmpeg 也能用：直出格式照常播，其余给出安装提示
 - 在线补全元数据：宿主并行查询 QQ 音乐 / iTunes / 网易云，置信不足时用 MusicBrainz 兜底；勾选后写回标签并按「歌手 - 原名」重命名文件
 - 一键补全全部：逐首限速、进度可见、可随时停止
 - 写标签是原子的：复制副本 → 写入 → 回读校验 → rename 替换；中途中断不损坏原文件，失败明确报错；封面默认只补缺失，勾选「覆盖已有封面」后才替换已有封面
