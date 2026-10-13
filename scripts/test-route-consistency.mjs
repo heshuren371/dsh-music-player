@@ -12,13 +12,14 @@
 //
 // 新增端点时必须同时改 host.js + index.js 的 FETCH_ROUTES + dsh-plugin.json，
 // 否则本套件变红。（AGENTS.md §2.7）
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { FETCH_ROUTES, LEGACY_ONLY_ROUTES } from '../lib/index.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const host = readFileSync(root + 'lib/host.js', 'utf8');
 const manifest = JSON.parse(readFileSync(root + 'dsh-plugin.json', 'utf8'));
+const patchSource = readFileSync(root + 'cordis.patch.yml', 'utf8');
 
 let failures = 0;
 const check = (label, ok, detail) => {
@@ -142,6 +143,38 @@ const pkg = JSON.parse(readFileSync(root + 'package.json', 'utf8'));
 check('the documented client module is the one package.json exports',
   pkg.exports?.['./client'] === './lib/client.js' && pkg.dsh?.client?.platform === 'web',
   'exports["./client"]=' + pkg.exports?.['./client']);
+
+// ── 8. 插件身份三向一致：package.json name == cordis patch insert name == 客户端注册 id ──
+// 曾经的线上故障（2026-10-13，web boot 一条 entry 未激活）：包名从 @local/* 改成
+// @heshuren/* 时同步了 package.json 与 cordis.patch.yml，**漏了 lib/client.js 的
+// `__ModuleLoader__.load({ id })`**。宿主按包名建 boot 图行（id=@heshuren/...），
+// 而客户端 bundle 只注册了 @local/...，于是 client-modules 报
+// 「loaded without registering "@heshuren/dsh-music-player"」。
+// 三者必须逐字相等 —— 少改一处就是整页插件加载失败，所以设为不可回归。
+const PKG_NAME = pkg.name;
+const patchName = /name:\s*'([^']+)'/.exec(patchSource)?.[1];
+const registrationId = /__ModuleLoader__\.load\(\{\s*id:\s*"([^"]+)"/.exec(clientSource)?.[1];
+check('package.json declares a name', typeof PKG_NAME === 'string' && PKG_NAME.length > 0, PKG_NAME);
+check('cordis.patch.yml inserts the same package name as package.json',
+  patchName === PKG_NAME, 'package.json=' + PKG_NAME + ' cordis.patch.yml=' + patchName);
+check('lib/client.js registers the same id as the package name (host keys factories by package name)',
+  registrationId === PKG_NAME, 'package.json=' + PKG_NAME + ' __ModuleLoader__=' + registrationId);
+
+// ── 9. 旧 id 字面量不得残留（改名必须全站收敛）────────────────────────────────
+// 本轮实测的第二种漏改：改了注册 id，但 `dataset.plugin` 与套件里的样式表选择器仍写旧名，
+// 于是 CSS 断言静默取到空字符串（14 条红）。这里把「旧名不得出现在交付面/脚本面」设为门禁；
+// 门禁自身要用旧名做判定，所以显式排除自己。
+const OLD_ID = '@local/' + 'dsh-music-player';
+const staleFiles = [];
+for (const dir of ['src', 'lib', 'scripts']) {
+  for (const name of readdirSync(root + dir)) {
+    if (!/\.(ts|js|mjs)$/.test(name)) continue;
+    const rel = dir + '/' + name;
+    if (rel === 'scripts/test-route-consistency.mjs') continue;
+    if (readFileSync(root + rel, 'utf8').includes(OLD_ID)) staleFiles.push(rel);
+  }
+}
+check('no stale old plugin id remains in src/, lib/ or scripts/', staleFiles.length === 0, staleFiles.join(', '));
 
 console.log(failures === 0 ? 'ALL PASS' : failures + ' CHECK(S) FAILED');
 process.exit(failures === 0 ? 0 : 1);

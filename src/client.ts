@@ -357,7 +357,7 @@ interface MusicPlayerExports {
 }
 
 window.__ModuleLoader__.load({
-  id: "@local/dsh-music-player",
+  id: "@heshuren/dsh-music-player",
   factory: (require) => {
     var module: { exports: MusicPlayerExports } = { exports: {} };
     var exports = module.exports;
@@ -5099,7 +5099,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       void player.warmSession();
       ctx.effect(() => {
         const tag = document.createElement("style");
-        tag.dataset.plugin = "@local/dsh-music-player";
+        tag.dataset.plugin = "@heshuren/dsh-music-player";
         tag.dataset.pluginCss = NS;
         tag.textContent = CSS;
         document.head.appendChild(tag);

@@ -39,7 +39,7 @@
   },
   "dsh": {
     "compatibility": {
-      "dsh": ">=0.1.6-alpha.1 <0.2.0",
+      "dsh": ">=0.1.6-alpha.1 <0.2.0 || >=0.2.0-0 <0.3.0-0",
       "dshReleases": {
         "0.1.7-alpha.2": "unknown",
         "0.1.7-rc.1": "unknown",

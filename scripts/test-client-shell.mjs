@@ -9,8 +9,13 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { act } from 'react';
 import { promises as fs } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+// 插件 id 以 package.json 为单一真源：宿主按**包名**建 boot 图行，注入的样式表也带这个 id。
+// 硬编码字面量会在改名时静默失配（本轮实测：改名后本套件的 14 条 CSS 断言全红）。
+const PLUGIN_ID = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')).name;
 const dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', { url: 'http://127.0.0.1:3080/', pretendToBeVisual: true });
 globalThis.window = dom.window;
 globalThis.document = dom.window.document;
@@ -339,8 +344,8 @@ check('stacked time row really spans the track (elapsed left / -remaining right)
   const row = wrap?.querySelector('.dshm-timeRow');
   return wrap !== null && row !== null
     && wrap.classList.contains('dshm-progress')
-    && (container.ownerDocument.querySelector('style[data-plugin="@local/dsh-music-player"]')?.textContent ?? '').includes('.dshm-progress.dshm-progress--stacked{flex-direction:column;gap:6px;align-items:stretch}')
-    && (container.ownerDocument.querySelector('style[data-plugin="@local/dsh-music-player"]')?.textContent ?? '').includes('.dshm-progress--stacked .dshm-timeRow{width:100%}');
+    && (container.ownerDocument.querySelector('style[data-plugin=\"' + PLUGIN_ID + '\"]')?.textContent ?? '').includes('.dshm-progress.dshm-progress--stacked{flex-direction:column;gap:6px;align-items:stretch}')
+    && (container.ownerDocument.querySelector('style[data-plugin=\"' + PLUGIN_ID + '\"]')?.textContent ?? '').includes('.dshm-progress--stacked .dshm-timeRow{width:100%}');
 })(), 'align-items must outrank .dshm-progress{align-items:center}');
 check('the seek bar is driven by its own pointer hit area', (() => {
   const track = overlay?.querySelector('.dshm-progress--stacked .dshm-progressTrack');
@@ -348,7 +353,7 @@ check('the seek bar is driven by its own pointer hit area', (() => {
 })(), 'progressTrack present');
 
 // 圆钮：macOS 原生白色圆钮（进度条悬停才现、音量条常显）
-const pluginCss = document.querySelector('style[data-plugin="@local/dsh-music-player"]')?.textContent ?? '';
+const pluginCss = document.querySelector('style[data-plugin=\"' + PLUGIN_ID + '\"]')?.textContent ?? '';
 check('slider knob is the macOS white capsule (ellipse, not a circle)', pluginCss.includes('width:20px;height:14px;border-radius:999px;background:#ffffff') && pluginCss.includes('box-shadow:0 .5px 2px rgba(0,0,0,.28)'), 'knob rule');
 // 拖动已退回原生交互：滑杆必须自己吃指针事件（自绘命中区在真实环境里不可靠，已移除）
 check('the seek slider keeps native pointer interaction', !pluginCss.includes('.dshm-progress .dshm-slider{pointer-events:none') && pluginCss.includes('.dshm-progress .dshm-slider{width:100%}'), 'native seek');

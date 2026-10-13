@@ -2333,3 +2333,43 @@ B 之外连真实 ffmpeg 转码那条也红（竞态复现）。
    该写法实测误报仍在）。正向对照：故意把 `req.url` 写进 `fs.rm` ⇒ 审计立刻报红（没被削弱）。
 2. `.part` 清除的竞态（见 §5.46.2）：无条件删半成品会把正在写入的那个删掉，ffmpeg 随即失败；
    改为只清超过一次尝试超时的。既有 `test-mv` 抓到了它，对照把它复现成「真实转码失败」。
+
+## 5.48 包名改名引发的启动失败（DSH 重启后插件未激活）
+
+### 5.48.1 现象与根因
+
+DSH 重启后 web 端插件未激活（boot 图里那条 entry 注册不上）。根因：第 32 轮把包名从
+`@local/dsh-music-player` 改成 `@heshuren/dsh-music-player` 时，`package.json` 与
+`cordis.patch.yml` 都同步了，漏了客户端 bundle 的注册 id（`window.__ModuleLoader__.load({ id })`）。
+
+宿主契约（在 DSH 检出里核实，不是推断）：`packages/client/modules/lib/index.js:884` 用
+包名建 boot 图行（`graphRow(packageName, rev, source.meta)`），而
+`packages/client/modules/lib/client.js:744` 按 `__ModuleLoader__.load` 传进来的 id 查
+`factories`；查不到就抛 `bundle ... loaded without registering "<id>"`。两处必须逐字相等。
+
+### 5.48.2 改了什么
+
+| 面 | 改动 |
+| --- | --- |
+| 注册 id | `src/client.ts` 的 `id` 与 `lib/client.js` 产物改为新包名（本目录已改） |
+| 门禁（身份三向一致） | `test-route-consistency` 新增：`package.json name == cordis.patch.yml name == __ModuleLoader__ id` |
+| 门禁（旧 id 不得残留） | 同一套件新增：`src/`、`lib/`、`scripts/` 里不得出现旧名字面量（本轮实测的第二种漏改就是它） |
+| 样式表 id 与套件选择器 | `dataset.plugin` 改名；`test-client-shell` 的三处 `style[data-plugin=…]` 改为从 package.json 读（硬编码字面量正是漏改的来源） |
+| 兼容范围 | `dsh.compatibility.dsh` 原来写 `>=0.1.6-alpha.1 <0.2.0`，当前 DSH 0.2.x 被排除在外 ⇒ 补 `\|\| >=0.2.0-0 <0.3.0-0` |
+| 本机 profile | `~/.dsh/profiles/{web,desktop}/package.json` 的依赖键与 `dsh.profile.bundles` 由旧名改为新名；`pnpm install` 重建链接与锁文件；清掉 pnpm 留下的旧名陈旧软链（删除前确认软链目标就是本仓库） |
+
+### 5.48.3 验证链
+
+1. 宿主契约：`index.js:884`（行 id = 包名）与 `client.js:744`（按 id 查 factories）—— 读源码核实。
+2. 身份一致：新门禁 PASS；负向对照把注册 id 改回旧名 → 立刻红。
+3. 旧名残留：新门禁 PASS；负向对照把 `dataset.plugin` 改回旧名 → 红灯并列出 `src/client.ts, lib/client.js`。
+4. 宿主侧真实解析：`dsh --profile web --dump-config` 输出
+   `- id: music-player / name: '@heshuren/dsh-music-player' / disabled: false` —— 与注册 id 一致。
+5. `dsh plugin --profile web ls` 显示 `@heshuren/dsh-music-player@link:…`。
+6. 未验证：浏览器里真正挂载完成（boot 端点 401 需要会话 token，无法从命令行取；这一步要用户重启 DSH 后确认）。
+
+### 5.48.4 教训
+
+改身份（包名/id）时要一次收敛：注册 id、cordis patch、样式表 id、测试选择器、profile 依赖与
+bundles、兼容声明。本轮把其中三处做成了机械门禁（身份三向一致、旧 id 不得残留、套件从
+package.json 读 id），其余靠清单核对。另外：改名后**必须**跑一次 `--dump-config` 看宿主的真实解析结果。
