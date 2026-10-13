@@ -135,6 +135,8 @@ Desktop 上改了插件看不到效果、`Cmd+R` 没反应：Desktop 主窗口�
 | [AGENTS.md](AGENTS.md) | 面向改代码的人与 agent 的强制约定：规范基线、不可协商的规则、可跑门禁、不变量索引、已知陷阱 |
 | [docs/audit-ledger.md](docs/audit-ledger.md) | 16 轮审计台账，只追加不删：每条发现的证据、复现、门禁与状态 |
 
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
 ## 许可证
 
 [MIT](LICENSE)
