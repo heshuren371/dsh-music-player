@@ -2,23 +2,23 @@
   "_comment": "常设文档的字数上限（CJK 字符 + 拉丁词，围栏代码块不计）：上限 = 实测 / 0.95，即留 ≥5% 余量。超限的顺序是先搬家（内容属于别的层级就移过去，留一行链接）、再压缩，最后才允许上调并在提交说明里论证。台账是只追加的历史层，其上限随证据增长而上调；要降回来只能把旧轮次压成摘要（结论与编号不得删）。",
   "files": {
     "AGENTS.md": {
-      "words": 4433,
+      "words": 4377,
       "bold": 25
     },
     "README.md": {
-      "words": 2011,
+      "words": 2109,
       "bold": 5
     },
     "docs/rules-detail.md": {
-      "words": 9400,
+      "words": 10105,
       "bold": 102
     },
     "docs/gates.md": {
-      "words": 2230,
+      "words": 2170,
       "bold": 5
     },
     "docs/audit-ledger.md": {
-      "words": 27018,
+      "words": 27305,
       "bold": 53
     },
     "docs/defensive-audit.md": {

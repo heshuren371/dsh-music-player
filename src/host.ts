@@ -1794,6 +1794,99 @@ function writeTagsInWorker(filePath, meta, cover, replaceCover): Promise<TagWrit
   });
 }
 
+/** 原子写入的副本前缀：同目录（同文件系统 ⇒ rename 原子）、点开头（扫描器跳过）。 */
+const TAG_TMP_PREFIX = '.dshm-tagwrite-';
+/** 崩溃残留的副本超过这个年龄就清理，避免长期占盘。 */
+const TAG_TMP_MAX_AGE_MS = 60 * 60 * 1000;
+
+function reasonOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * 回读校验：写进去的必须读得回来。任何一项不符就报失败 —— 此时**原件还没被动过**
+ * （见 writeTagsAtomic），所以宁可报失败也不能把「写坏了」当成成功。
+ */
+async function verifyTagsWritten(filePath, meta, expectCover: boolean): Promise<string | null> {
+  try {
+    const parsed = await parseFile(filePath, { duration: false });
+    const common = parsed.common;
+    const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '');
+    if (meta.title.length > 0 && text(common.title) !== meta.title) return '回读校验失败：标题不一致';
+    if (meta.artist.length > 0) {
+      const artist = text(common.artist).length > 0
+        ? text(common.artist)
+        : (Array.isArray(common.artists) ? text(common.artists[0]) : '');
+      if (artist !== meta.artist) return '回读校验失败：歌手不一致';
+    }
+    if (meta.album.length > 0 && text(common.album) !== meta.album) return '回读校验失败：专辑不一致';
+    if (expectCover && !(Array.isArray(common.picture) && common.picture.length > 0)) return '回读校验失败：封面未写入';
+    return null;
+  } catch (error) {
+    return '回读校验失败：' + reasonOf(error);
+  }
+}
+
+/** 清理崩溃残留的写入副本（只碰自己前缀的、超过 1 小时的老文件）。 */
+async function sweepTagTemps(dir, scope: string[]): Promise<void> {
+  const cutoff = Date.now() - TAG_TMP_MAX_AGE_MS;
+  let rows;
+  try {
+    rows = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const row of rows) {
+    if (!row.isFile() || !row.name.startsWith(TAG_TMP_PREFIX)) continue;
+    const full = path.join(dir, row.name);
+    try {
+      const stat = await fs.stat(full);
+      if (stat.mtimeMs < cutoff) await fs.rm(authorize('fs.write', full, scope), { force: true });
+    } catch {
+      // 与其他清理者竞态：文件已经不在，忽略。
+    }
+  }
+}
+
+/**
+ * 原子写标签：**先把原文件复制到同目录的隐藏副本，在副本上写，回读校验通过后再 rename 替换**。
+ *
+ * node-taglib-sharp 是**就地改写**（`openSync(path, 'r+')` + `writeSync`），写入过程中被杀、
+ * 断电、磁盘满都会在原文件上留下半个标签甚至损坏的音频流 —— 而这是本插件唯一会碰用户原始
+ * 文件的动作。副本替换把这段风险窗口变成「原件全程不变」：任何一步失败都只丢副本。
+ * 失败一律 `tagged:false`（**不得**报告成功），并清掉副本。
+ */
+async function writeTagsAtomic(filePath, meta, cover, replaceCover, scope: string[]): Promise<TagWriteResult> {
+  const dir = path.dirname(filePath);
+  await sweepTagTemps(dir, scope);
+  const tmpPath = path.join(dir, TAG_TMP_PREFIX + process.pid + '-' + (++tagJobSeq) + path.extname(filePath));
+  try {
+    await fs.copyFile(authorize('fs.write', filePath, scope), authorize('fs.write', tmpPath, scope));
+  } catch (error) {
+    return { tagged: false, reason: '无法创建写入副本：' + reasonOf(error) };
+  }
+  let replaced = false;
+  try {
+    const written = await writeTags(tmpPath, meta, cover, replaceCover);
+    if (!written.tagged) return written;
+    const mismatch = await verifyTagsWritten(tmpPath, meta, cover !== null && cover !== undefined);
+    if (mismatch !== null) return { tagged: false, reason: mismatch };
+    await fs.rename(authorize('fs.write', tmpPath, scope), authorize('fs.write', filePath, scope));
+    replaced = true;
+    return { tagged: true };
+  } catch (error) {
+    return { tagged: false, reason: reasonOf(error) };
+  } finally {
+    if (!replaced) {
+      try {
+        await fs.rm(authorize('fs.write', tmpPath, scope), { force: true });
+      } catch {
+        // 副本清理失败不影响判定：原件未动，下一次写入前还会再扫一遍残留。
+      }
+    }
+  }
+}
+
 /**
  * 把匹配到的元数据写回音频文件；封面尽力而为，失败只报告、不中断流程。
  * replaceCover 默认 false：已有内嵌封面不会被曲库封面覆盖。
@@ -2806,7 +2899,7 @@ function createHost(ctx) {
         // webp/avif/bmp/gif 只用于界面显示，绝不写进文件（写坏等于丢封面）。
         if (cover !== null && cover.mime !== 'image/jpeg' && cover.mime !== 'image/png') cover = null;
         // 默认只补缺失封面；覆盖已有封面必须由调用方显式要求。
-        const tagResult = await writeTags(track.path, meta, cover, body.replaceCover === true);
+        const tagResult = await writeTagsAtomic(track.path, meta, cover, body.replaceCover === true, [lib.dir]);
 
         const oldId = track.id;
         let renamed = false;

@@ -2231,3 +2231,51 @@ music-metadata 的 `try` 里搬出来（avi/ts 恰恰在那一步抛错，探测
 仍属未验证：MV「偶尔没声音」的原始症状要靠时间积累才能证伪（触发条件是宿主热重载或系统在暂停期间
 挂起 ctx）。套件覆盖的是它的机制面；若再次遇到，控制台会留下 `AudioContext state=suspended → 恢复输出`
 或 `常驻音频图已启用：sampleRate=… state=…` 这两行只含状态的诊断。
+
+---
+
+## 5.44 第 32 轮 —— 标签写入原子化（面向「给所有人用」的第一道加固）
+
+### 5.44.1 起因与取证
+
+准备把插件投给插件市场（awesome-dsh-plugin）时，先按「别人装上会不会被弄坏数据」自查。
+实测结论：`node-taglib-sharp@6.0.3` 的 `File.save()` 是**就地改写** —— `dist/stream.js:41` 用
+`fs.openSync(path, "r+")` 打开**原文件**、`:110` 用 `fs.writeSync` 往里写；整个库里没有临时文件、
+没有 `rename`、没有备份，我们也没有写后回读。写入过程中被杀 / 断电 / 磁盘满都会在原文件上留下
+半个标签甚至损坏的音频流 —— 而这是本插件**唯一**会碰用户原始文件的动作。
+
+### 5.44.2 修法：副本替换（原件全程不变）
+
+`writeTagsAtomic`：① `copyFile` 出同目录隐藏副本（同文件系统 ⇒ rename 原子，点开头 ⇒ 扫描器跳过）；
+② 在副本上写（仍走 worker，失败退回进程内）；③ **回读校验**（标题/歌手/专辑 + 写入封面时图片存在）；
+④ 校验通过才 `fs.rename` 替换原件。任何一步失败都 `tagged:false`（失败不得报成成功）、清掉副本、原件不动。
+每一步 fs 操作都过 `authorize('fs.write', …, [lib.dir])`。另加崩溃残留清理：超过 1 小时的同前缀副本在
+下次写入前清掉。
+
+### 5.44.3 门禁与对照（`test-apply.mjs` 新增 4 条）
+
+| 断言 | 内容 |
+| --- | --- |
+| A | 成功写入后目录里不留 `.dshm-tagwrite-*` 副本 |
+| B | 目录改为不可写（建不出副本）时**报失败**：`tagged:false` + warning |
+| C | 同场景下**原件字节不变**（sha256 比对）且标签仍是旧值 |
+| D | 失败后同样不留副本 |
+
+**负向对照（退回就地写入）**：B 变成 `tagged:true`、C 变成 `hash=CHANGED title=Nope Title`
+—— 同一场景下旧实现**默默改写了用户文件并报成功**。这正是这条加固要消除的风险。
+
+### 5.44.4 上线前的其余准备（本轮一并做掉）
+
+- 收录硬门槛：给仓库加 `dsh-plugin` topic（原先 `topics: []`，不加会被 CI 直接打回）。
+- 包名从 `@local/dsh-music-player` 改为 `@heshuren/dsh-music-player` —— npm 上 `dsh-music-player`
+  已被 `kendu76/dsh-music-player`（另一作者）占用，用独立作用域避免混淆；`cordis.patch.yml`、README、
+  `repository`/`bugs`/`homepage` 同步更新。
+- 两个开发脚本里硬编码的作者绝对路径改为**必填** `DSH_MUSIC_DIR`（原先默认 `/Users/heshuren/…`）。
+- 新增 `screenshots.json`（市场详情页用，相对路径指向 `docs/images/` 内已有截图）。
+- 文档预算：AGENTS 被注入块与新增规则顶超上限 ⇒ 按标准**先搬家**——五份上游平台标准的正文移入
+  `docs/rules-detail.md`，GraphFlow 的 MCP 配置移到 `docs/graphflow.md`，AGENTS 只留摘要与链接。
+
+### 5.44.5 验证
+
+`typecheck` 0 · **`ALL 35 SUITES PASS`** · `check-build-fresh` 一致 · 严格/空白/会话视角痕迹/文档预算
+四道门禁退出码全 0。

@@ -11,9 +11,9 @@
   `window.*` 这类全局槽位把上一代的 player / timer / handler 交给下一代。确有必要时必须**显式声明
   为跨 activation 共享资源，且每代的 disposer 只作用于自己那一代**。→ `window.__dshMusicPlayer`
   是未声明的隐式转移（`A3-03`）。
-- **页级设备的归属例外**：`AudioContext` + 增益链 + CORS 结果归页面（`Symbol.for`），
+- 页级设备的归属例外：`AudioContext` + 增益链 + CORS 结果归页面（`Symbol.for`），
   媒体元素与监听归本代；`halt()` 释放本代并摘掉 `window` 键，下一代只接管未释放的实例。
-- **释放要比较并释放**：实例记 activation 租约号（`acquire()`/`lease()`），旧 disposer 晚于
+- 释放要比较并释放：实例记 activation 租约号（`acquire()`/`lease()`），旧 disposer 晚于
   新 bundle 求值时不得停掉新一代。
 - **disposer 必须作用于「自己的」实例**：对共享对象调 `dispose()`/`halt()` 会停掉新实例仍在使用的东西。
 - **`await` 挂起后恢复的路径必须检查 `disposed`**：只把引用置 `null` 不够 —— 挂起的异步分支会
@@ -204,7 +204,7 @@ lib/host.js 的分派表  ←→  lib/index.js 的 FETCH_ROUTES  ←→  dsh-plu
 - **一个 activation instance 的资源不得被下一个复用**：**禁止**用 `window.*` 把上一代的
   player / timer / handler 交给下一代（`A3-03`）；disposer 只能作用于自己那一代。
 - 页级设备是唯一例外且必须显式：`AudioContext` 与增益链归页面（`Symbol.for`），
-  媒体元素与监听仍归本代；`halt()` 释放本代并**摘掉** `window` 键，下一代新建实例接管设备。
+  媒体元素与监听仍归本代；`halt()` 释放本代并摘掉 `window` 键，下一代新建实例接管设备。
 - **释放必须比较并释放**：实例上记 activation 租约号（`acquire()`/`lease()`），热重载的旧
   disposer 晚于新 bundle 求值时不得停掉新一代（顺序不定是常态）。
 - **`await` 挂起后恢复的路径必须检查 `disposed`**（只置 `null` 不够，挂起分支会重新赋值，`A3-02`）。
@@ -498,3 +498,31 @@ seekbar 同源（GPL-3.0：只借鉴做法，不抄代码）。
 11. 「本地全绿」≠「已进仓库」：每轮收口看 `git status --short`。
 13. GC 时机敏感的断言测的不是保留量：改测量（排除自身噪声 + 取稳态最小值 + 缺能力时明说
     SKIP），不是放宽阈值。
+
+---
+
+## 平台基线（五份上游标准）
+
+Manifest（`manifest.zh.md`）。包根至多一个 `dsh-plugin.json`，必须是静态 JSON，不联网执行
+schema/validator；未知版本不得回退旧 schema。扩展字段不得暗含 required 行为；`optional` 必须写
+`fallback`；`compat`/`overrides` 不产生 live support；schema 通过 ≠ 能激活，digest ≠ 发布者身份。
+
+Lifecycle（`lifecycle.zh.md`）。`activate` 里注册的一切必须绑定当前 activation 的 cleanup
+scope；scope 关闭先 abort 再逆序执行 disposer，每个至多一次，单个失败不阻止其余；停止后要
+验证 support 与 owner record 已移除；超 deadline 必须留 timeout 诊断。**不得依赖 module 卸载完成
+清理**：热重载下旧 module 被 ESM 注册表永久持有，旧实例的 handler/timer/子进程/module 级容器
+必须自己撤销并设上限。
+
+Composition（`composition.zh.md`）。facet 名称与发现顺序不是选择条件；未被选中的 facet 不
+带入 requirements；preflight 成功 ≠ agreement，运行时不符必须失败/回滚/重组；同坐标冲突不得靠
+注册顺序解决；没有「最后注册者覆盖」；实际激活偏离 plan 必须报告 activation failure。
+
+Permission（`permission.zh.md`）。静态请求是 facet 的上限：缩小 scope 不必改 manifest，
+**扩大必须新增声明**。每个产生副作用的位置都要 `authorize(action, scope)`——validator、report、
+UI 上的「已允许」都不能替代运行时检查。审计记录前移除凭据/文件内容/工具输入；不得用字符串前缀
+判断路径或 scope。
+
+Storage（`storage.zh.md`）。`LocalStorage` 通过 protocol requirement 声明；读需
+`storage.local.read`，写/删需 `storage.local.write`；value 必须是 JSON value；同命名空间同 key
+串行化，**不得**假设 transaction/CAS/enumeration/watch；`deactivate` 不删数据；cleanup 可重复执行，
+**失败不得报告为已完成**；禁止把 value/凭据/secret 写进普通日志。

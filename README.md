@@ -41,7 +41,7 @@ dsh plugin --profile web add github:heshuren371/dsh-music-player
 卸载不会动你的音乐文件：
 
 ```sh
-dsh plugin --profile web remove @local/dsh-music-player
+dsh plugin --profile web remove @heshuren/dsh-music-player
 ```
 
 更新即先 `remove` 再 `add` 同一条命令。
@@ -64,14 +64,15 @@ cd .. && dsh plugin --profile web add link:./dsh-music-player
 ## 功能
 
 - 递归扫描本地目录，支持 flac / mp3 / m4a / aac / ogg / opus / wav / mp4 / mov / webm / mkv / avi；原生目录选择器覆盖 macOS / Windows / Linux，也可手动粘贴路径
-- 波形进度条：全屏播放器的进度条上叠真实包络（ffmpeg 只读解码取峰值，不改文件、内存与曲长无关），一眼看出副歌与静音；会预取下一首并缓存（切歌 3 次从 4 次请求降到 2 次，返回上一首不再请求）；取不到波形时静默退回原来的细轨
+- 波形进度条：全屏播放器的进度条上叠真实包络（ffmpeg 只读解码取峰值，不改文件、内存与曲长无关）；会预取下一首并缓存（切歌 3 次从 4 次请求降到 2 次，返回上一首不再请求）；取不到波形时静默退回原来的细轨
 - 均衡器：10 段（31Hz–16kHz）预设曲线，能量按入耳式真能重放的频段分布（低音落在 62–250Hz）（原声 / 流行 / 摇滚 / 古典 / 爵士 / 低音增强 / 人声 / 电子），自动前级按最大提升量补偿、不会因提升而削波；也可用 `player.setEqualizer([...])` 自定义曲线。默认原声（不动音色）
 - 交叉淡化（默认开启）：切歌时新旧两首重叠淡入淡出，`300ms/700ms`（手动/曲末，与 fooyin 同值）；显式关闭用 `?crossfade=0` 或 `window.__dshMusicCrossfade = false`
 - 单曲循环与列表循环。播放顺序等于可见列表顺序，排序或搜索后「下一首」就是你看到的下一行
 - 列表显示歌曲名 / 歌手 / 时长；标签与封面来自音频文件内嵌数据，缺省回退「歌手 - 歌名」文件名约定
 - MV 三档判定 `direct` / `remux` / `transcode`（参考 Jellyfin），后两档调用 ffmpeg 并把产物缓存在临时目录。没有 ffmpeg 也能用：直出格式照常播，其余给出安装提示
 - 在线补全元数据：宿主并行查询 QQ 音乐 / iTunes / 网易云，置信不足时用 MusicBrainz 兜底；勾选后写回标签并按「歌手 - 原名」重命名文件
-- 一键补全全部：逐首限速、进度可见、可随时停止；封面默认只补缺失，勾选「覆盖已有封面」后才替换已有封面
+- 一键补全全部：逐首限速、进度可见、可随时停止
+- 写标签是原子的：复制副本 → 写入 → 回读校验 → rename 替换；中途中断不损坏原文件，失败明确报错；封面默认只补缺失，勾选「覆盖已有封面」后才替换已有封面
 - 逐首补全默认替换封面（对话框里可取消勾选）：已有内嵌封面的歌也能改；候选没有封面时不动原封面
 - 响度归一化（ReplayGain）：优先读文件内嵌的 `REPLAYGAIN_*` 标准标签；没有标签的曲目可以用 ffmpeg 测量（`ebur128`，只读、不改你的文件，结果存在插件自己的缓存里）。提供单曲 / 专辑两种模式与前级增益，防削波默认开启；既无标签也未测量的曲目不做任何增益
 - 系统集成：MediaSession（媒体键与 macOS 控制中心 / 锁屏「正在播放」）以及换曲原生通知
@@ -119,7 +120,7 @@ CI（[.github/workflows/ci.yml](.github/workflows/ci.yml)）在每次 push 与 P
 
 Desktop 上改了插件看不到效果、`Cmd+R` 没反应：Desktop 主窗口没有绑定重新加载快捷键（应用菜单里只注册了 `toggleDevTools`，没有 `reload` 角色）。按 `F12` 打开 DevTools，在 Console 里执行 `location.reload()`；或直接重启应用。`src/host.ts` 会热重载自动生效，`src/client.ts` 必须重载渲染进程 —— 否则会出现「Web 上修好了、Desktop 上还是坏的」。
 
-看不到「音乐」标签：依次确认页面已刷新、`dsh plugin --profile web ls` 里有 `@local/dsh-music-player`、profile 的 `dsh.profile.bundles` 里有包名、link 方式下克隆目录存在 `node_modules/`；Desktop 需确认装好后重启过应用。
+看不到「音乐」标签：依次确认页面已刷新、`dsh plugin --profile web ls` 里有 `@heshuren/dsh-music-player`、profile 的 `dsh.profile.bundles` 里有包名、link 方式下克隆目录存在 `node_modules/`；Desktop 需确认装好后重启过应用。
 
 换歌不出声：先确认 token 通路，`curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:<端口>/dsh-music/api/session"` 应返回 200。
 

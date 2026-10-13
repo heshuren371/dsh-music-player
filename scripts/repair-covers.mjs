@@ -10,7 +10,11 @@ import { spawnSync } from 'node:child_process';
 import { File as TagFile, Picture as TagPicture } from 'node-taglib-sharp';
 import { parseFile } from 'music-metadata';
 
-const MUSIC = process.env.DSH_MUSIC_DIR || '/Users/heshuren/Documents/本地音乐';
+const MUSIC = process.env.DSH_MUSIC_DIR;
+if (!MUSIC) {
+  console.error('请用 DSH_MUSIC_DIR=<音乐目录> 指定曲库（脚本不设默认路径）。');
+  process.exit(1);
+}
 const EXECUTE = process.argv.includes('--execute');
 const MIN_WIDTH = 500;
 

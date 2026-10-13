@@ -1,5 +1,5 @@
 {
-  "name": "@local/dsh-music-player",
+  "name": "@heshuren/dsh-music-player",
   "version": "0.8.5",
   "description": "DSH 本地音乐播放器（Web + Desktop 双端，TypeScript）：会话视图「音乐」标签页，选择本地目录、扫描常见音频格式，列表播放 + 在线补全元数据 + MV 三档转码。",
   "license": "MIT",
@@ -14,7 +14,8 @@
     "plugin",
     "music-player",
     "flac",
-    "mp3"
+    "mp3",
+    "dsh-plugin"
   ],
   "type": "module",
   "main": "lib/index.js",
@@ -83,5 +84,9 @@
     "react-dom": "^18.3.1",
     "typescript": "^7.0.2"
   },
-  "packageManager": "pnpm@11.7.0"
+  "packageManager": "pnpm@11.7.0",
+  "bugs": {
+    "url": "https://github.com/heshuren371/dsh-music-player/issues"
+  },
+  "homepage": "https://github.com/heshuren371/dsh-music-player#readme"
 }

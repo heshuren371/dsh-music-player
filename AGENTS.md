@@ -43,36 +43,18 @@ pnpm run dev            # tsc --watch：保存即重编，宿主按 lib/host.js 
 
 > 每条给出能机械抓住的门禁或审计条目；完整论证见 [docs/rules-detail.md](docs/rules-detail.md)。
 
-Manifest（`manifest.zh.md`）。包根至多一个 `dsh-plugin.json`，必须是静态 JSON，不联网执行
-schema/validator；未知版本不得回退旧 schema。扩展字段不得暗含 required 行为；`optional` 必须写
-`fallback`；`compat`/`overrides` 不产生 live support；schema 通过 ≠ 能激活，digest ≠ 发布者身份。
-
-Lifecycle（`lifecycle.zh.md`）。`activate` 里注册的一切必须绑定当前 activation 的 cleanup
-scope；scope 关闭先 abort 再逆序执行 disposer，每个至多一次，单个失败不阻止其余；停止后要
-验证 support 与 owner record 已移除；超 deadline 必须留 timeout 诊断。**不得依赖 module 卸载完成
-清理**：热重载下旧 module 被 ESM 注册表永久持有，旧实例的 handler/timer/子进程/module 级容器
-必须自己撤销并设上限。
-
-Composition（`composition.zh.md`）。facet 名称与发现顺序不是选择条件；未被选中的 facet 不
-带入 requirements；preflight 成功 ≠ agreement，运行时不符必须失败/回滚/重组；同坐标冲突不得靠
-注册顺序解决；没有「最后注册者覆盖」；实际激活偏离 plan 必须报告 activation failure。
-
-Permission（`permission.zh.md`）。静态请求是 facet 的上限：缩小 scope 不必改 manifest，
-**扩大必须新增声明**。每个产生副作用的位置都要 `authorize(action, scope)`——validator、report、
-UI 上的「已允许」都不能替代运行时检查。审计记录前移除凭据/文件内容/工具输入；不得用字符串前缀
-判断路径或 scope。
-
-Storage（`storage.zh.md`）。`LocalStorage` 通过 protocol requirement 声明；读需
-`storage.local.read`，写/删需 `storage.local.write`；value 必须是 JSON value；同命名空间同 key
-串行化，**不得**假设 transaction/CAS/enumeration/watch；`deactivate` 不删数据；cleanup 可重复执行，
-**失败不得报告为已完成**；禁止把 value/凭据/secret 写进普通日志。
+**平台基线**（manifest / lifecycle / composition / permission / storage 五份上游标准）。包根至多一个静态
+`dsh-plugin.json`；激活期注册的一切绑定 cleanup scope，停止时先 abort 再逆序执行、结束后必须验证已摘除；
+facet 名称与发现顺序不是选择依据，偏离 plan 必须报告；静态请求是权限上限，每个副作用位置都要
+`authorize(action, scope)`；`storage.local.*` 必须声明、值必须是 JSON、`deactivate` 不删数据、失败不得
+报告为已完成。完整条文见 [docs/rules-detail.md](docs/rules-detail.md#平台基线五份上游标准)。
 
 声明面五副本。`host.ts` 分派表 ←→ `index.ts` 的 `FETCH_ROUTES` ←→ `dsh-plugin.json` 的
 endpoints ←→ `Track`→`PayloadTrack` 白名单投影 ←→ 客户端 `MusicTrack`——**给 `Track` 加字段必须
 同时改后两处**，否则下发永远是 undefined。`connection.fetch.register` 是**精确匹配**，新端点必须
 同步加进 `FETCH_ROUTES` 才可达。
 
-封面写入。宿主只在请求显式带 `replaceCover: true` 时才替换已有内嵌封面（缺省只补缺失）；客户端必须如实传达意图：逐首应用默认替换（可取消勾选），一键补全默认不替换、勾选后才替换，且勾选后不得再把「标签与文件名都已正确」当作无需处理。
+封面写入。宿主只在请求显式带 `replaceCover: true` 时才替换已有内嵌封面（缺省只补缺失）；客户端必须如实传达意图：逐首应用默认替换（可取消勾选），一键补全默认不替换、勾选后才替换，且勾选后不得再把「标签与文件名都已正确」当作无需处理。**写入必须原子**：复制副本 → 写入 → 回读校验 → rename 替换；任何一步失败（含校验不符）都报 `tagged:false` 且原件不动。
 
 错误面与降级。404 在本插件是正常语义，**不得**用它当「宿主是不是新入口」的唯一判据（平台
 栅栏在路由前答 401/403）；探测必须可重入（禁止一次性标志）；降级信任边界必须显式报告；错误响应
@@ -206,7 +188,7 @@ ReplayGain。只读标准标签、不改文件；未测量 ≠ 0dB（缺标签�
 ## 明确接受的取舍（不要「顺手修好」）
 
 `system-art`/`system-stream` 不在 `connection.fetch` 上；保留 `/dsh-music` 旧前缀；`lib/*.js` 提交
-进仓库；`/library` payload 的 `mime` 为 `null`；不做随机播放/歌词页；封面只补缺失不覆盖已有；
+进仓库；`/library` payload 的 `mime` 为 `null`；不做随机播放/歌词页；封面默认只补缺失，逐首应用默认替换；
 `noImplicitAny` 暂关；客户端套件跑 jsdom（没有布局测量能力，相关结论一律标「未验证」）；
 token 在进程生命周期内不过期。
 
@@ -250,3 +232,5 @@ token 在进程生命周期内不过期。
   接近上限就把细节移进 `docs/rules-detail.md`，这里只留结论 + 指针。
 - 一条规则 = 一个失败类别；一条一句，理由压进括号或链接（对齐 DeepSeek Harness 的 AGENTS.md 写法）。
 - 新增不变量必须同时加进「不变量」表并给出门禁名；没有门禁的写「无门禁覆盖」。推翻判定要新写条目。
+
+> GraphFlow 的 MCP 配置见 [docs/graphflow.md](docs/graphflow.md)。

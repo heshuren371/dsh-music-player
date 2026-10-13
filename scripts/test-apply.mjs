@@ -3,6 +3,7 @@
 // collision handling, update the library in place, and keep the traversal guard.
 import { createServer } from 'node:http';
 import { promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -147,6 +148,33 @@ const bmpEmbedded = await pictureBytes(path.join(music, 'cover-bmp.flac'));
 const bmpTags = await parseFile(path.join(music, 'cover-bmp.flac'), { duration: false });
 check('non-jpeg/png cover is never embedded (only tags written)', bmp.body.tagged === true && bmpEmbedded === null && bmpTags.common.title === 'Bmp Title',
   JSON.stringify({ embedded: bmpEmbedded?.length ?? null, title: bmpTags.common.title }));
+
+// ── 原子写入：成功不留副本；失败不动原件、不报成功 ────────────────────────────
+// 背景：node-taglib-sharp 是就地改写（openSync 'r+' + writeSync）。写入过程中被杀/断电/
+// 磁盘满会在原文件上留下半个标签。改成「复制 → 写副本 → 回读校验 → rename」后，原件在
+// 整段过程中不变；任何一步失败都只丢副本，且必须报 tagged:false。
+const tempsIn = async (dir) => (await fs.readdir(dir)).filter((name) => name.startsWith('.dshm-tagwrite-'));
+check('successful write leaves no temp copy behind', (await tempsIn(music)).length === 0, JSON.stringify(await tempsIn(music)));
+
+const guardPath = path.join(music, 'cover-keep.flac');
+const digest = async () => createHash('sha256').update(await fs.readFile(guardPath)).digest('hex');
+const beforeHash = await digest();
+await fs.chmod(music, 0o555);   // 目录不可写 ⇒ 建不出副本
+let denied;
+try {
+  denied = await post('/api/apply', { id: 'cover-keep.flac', title: 'Nope Title', artist: 'Nope Artist', rename: false });
+} finally {
+  await fs.chmod(music, 0o755);
+}
+const afterHash = await digest();
+const deniedTags = await parseFile(guardPath, { duration: false });
+check('unwritable directory reports failure instead of success',
+  denied.status === 200 && denied.body.tagged === false && typeof denied.body.warning === 'string',
+  JSON.stringify({ status: denied.status, tagged: denied.body.tagged, warning: denied.body.warning }));
+check('failed write leaves the original byte-identical',
+  beforeHash === afterHash && deniedTags.common.title === 'Keep Title',
+  'hash=' + (beforeHash === afterHash ? 'same' : 'CHANGED') + ' title=' + deniedTags.common.title);
+check('failed write leaves no temp copy behind', (await tempsIn(music)).length === 0, JSON.stringify(await tempsIn(music)));
 
 server.close();
 await fs.rm(home, { recursive: true, force: true });
