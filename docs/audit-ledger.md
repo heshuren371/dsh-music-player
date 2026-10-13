@@ -2114,7 +2114,7 @@ worker 据此决定是否覆盖 `tag.pictures`），但客户端从来没有发�
 ## 5.43 收口失误：把「预算门禁红」的状态推上去了
 
 第 31 轮提交 `6019070` 推送时 `doc-budgets` 已红（`docs/gates.md` 1952 > 1944 词），成因是我把门禁
-输出用 `cut` 截断后**只看了前半行**就当通过。修复：按标准先压缩（新增的封面替换行从 ~250 词压到
+输出用 `cut` 截断后只看了前半行就当通过。修复：按标准先压缩（新增的封面替换行从 ~250 词压到
 ~110 词，保留全部判别性事实），`npm test` 全绿后再推一次。
 纪律补强：**门禁输出不得截断着读**；每条门禁的结论以退出码为准（`npm test` 的退出码），不以肉眼前缀为准。
 
@@ -2124,28 +2124,28 @@ worker 据此决定是否覆盖 `tag.pictures`），但客户端从来没有发�
 
 ### 5.44.1 用户反馈
 
-「有时候播放 MV 歌曲时会无声音，刷新之后就有声音了」。这条症状给了两个方向：**刷新能修好**
+「有时候播放 MV 歌曲时会无声音，刷新之后就有声音了」。这条症状给了两个方向：刷新能修好
 说明是页面内可变状态（不是文件/编码本身不能播）；而 `mvPlan` 的静态判定又能让「本就不能播的
 音轨」走直出。两者各查一遍，不互相替代。
 
 ### 5.44.2 客户端根因（三条，都能在夹具里复现）
 
-1. **跨代复用已立闸门的实例**：player 挂在 `window.__dshMusicPlayer` 上跨 activation 复用，
+1. 跨代复用已立闸门的实例：player 挂在 `window.__dshMusicPlayer` 上跨 activation 复用，
    而 `halt()` 把 `disposed` 置成终态且不复位。下一代拿到同一份实例后，起播回调里的
    `if (!disposed) rampVolume(state.volume, …)` 被跳过 ⇒ 增益停在 `stopAudio()` 留下的 0。
-   对照实测的失败细节就是静音签名：音量节点被写两次 0、**从未** ramp 到用户音量。
-2. **只在 `startNow` 里 resume 设备**：`toggle()`（暂停→播放）与交叉淡化进入都不 resume；
-   而 `onstatechange` 只在状态**变化**时触发 —— 系统在暂停期间挂起 ctx 之后，按播放就是
+   对照实测的失败细节就是静音签名：音量节点被写两次 0、从未 ramp 到用户音量。
+2. 只在 `startNow` 里 resume 设备：`toggle()`（暂停→播放）与交叉淡化进入都不 resume；
+   而 `onstatechange` 只在状态变化时触发 —— 系统在暂停期间挂起 ctx 之后，按播放就是
    「界面在放、耳机没声」，且没有任何自愈路径。
-3. **瞬时音量从元素音量读**：建图之后元素音量恒为中性 1，于是每一首起播都先跳到满幅再淡到
+3. 瞬时音量从元素音量读：建图之后元素音量恒为中性 1，于是每一首起播都先跳到满幅再淡到
    用户值（用户音量 40% 时是实打实的爆音）。对照实测：`value:1` + `setValue:1`。
 
 ### 5.44.3 修法（架构层）
 
-设备与代际分离：`AudioContext` + 增益/均衡链 + CORS 探测结果搬进**页级设备**（`Symbol.for` 挂
+设备与代际分离：`AudioContext` + 增益/均衡链 + CORS 探测结果搬进页级设备（`Symbol.for` 挂
 `window`，跨 bundle 重求值存活）；媒体元素、每元素电平节点与监听仍归本代。`halt()` 变成一次真正
 的释放：停两个元素、disconnect 本代节点、移除自建 DOM（`.dshm-mvPark` 与 `<video>`）、撤
-`device.watcher`、只 suspend 设备、**摘掉 window 键**；`takePlayer()` 只接管未释放的实例，
+`device.watcher`、只 suspend 设备、摘掉 window 键；`takePlayer()` 只接管未释放的实例，
 否则新建。`acquire()/lease()` 是比较并释放的租约：热重载的旧 disposer 晚于新 bundle 求值时
 不得停掉新一代。播放起点统一 `resumeGraph()`；瞬时音量统一 `readVolume()`。
 
@@ -2156,7 +2156,7 @@ worker 据此决定是否覆盖 `tag.pictures`），但客户端从来没有发�
 | 审计条 | 证据 | 修法 |
 | --- | --- | --- |
 | `file:line` `mvPlan` 对 `.mkv` 豁免音轨判定 | 实测 `h264+dts` 的 mkv → `mode:"direct"`，同编码 `.mov` → `transcode` | 去掉容器豁免；音轨编码不在直出名单里一律 `remux` |
-| 未识别编码被吞成 `null` | 实测 `truehd`/`wmav2`/`prores` 都映射不到 → 判定被整段跳过 | `recognizeCodec()`：认不出就**原样保留**小写名（`null` 只表示「没有这条轨」） |
+| 未识别编码被吞成 `null` | 实测 `truehd`/`wmav2`/`prores` 都映射不到 → 判定被整段跳过 | `recognizeCodec()`：认不出就原样保留小写名（`null` 只表示「没有这条轨」） |
 | 无音轨看门狗 | 客户端零命中 `webkitAudioDecodedByteCount` | 新增 `guardAudioTrack()`：已知有音轨却 3.5s 零解码字节 → 升级转码 |
 | 档位只换壳 | `copy` 档把原音轨原样搬进 MP4，Chromium 照旧解不了 | 音轨已知解不了时档位从 `audio` 起 |
 | 停用后仍会再起 ffmpeg | 旧夹具用 `sh` + `sleep`，`close` 永不到达 ⇒ 该路径恒绿 | `job.cancelled` + 档位循环前后双闸门；夹具改 `exec sleep` |
@@ -2174,7 +2174,7 @@ music-metadata 的 `try` 里搬出来（avi/ts 恰恰在那一步抛错，探测
   `h264+mp2` 夹具）、真实音轨转码成功、失败缓存与 `retry=1` 的语义。
 - `scripts/test-mv-client.mjs`（7 条）：direct 档必须挂 token 绝对地址、音轨看门狗（正/反向）、
   升级预算每次播放各一份、WASM 旁路的音轨前提（静态，jsdom 跑不了动态 `import()`）。
-- 扩写 `scripts/test-mv-teardown.mjs`：**一共只许起过一个 ffmpeg**（原断言只查第一个 PID）。
+- 扩写 `scripts/test-mv-teardown.mjs`：一共只许起过一个 ffmpeg（原断言只查第一个 PID）。
 
 | 对照（逐条回退） | 实测变红 |
 | --- | --- |
@@ -2198,7 +2198,7 @@ music-metadata 的 `try` 里搬出来（avi/ts 恰恰在那一步抛错，探测
 未修（本轮已取证，按风险排序）：① `/api/mvconvert` 用 `spawnSync` 阻塞宿主最长 30 分钟
 （客户端当前不调用该端点）；② MV 缓存目录无清理，`os.tmpdir()` 里的转码产物只增不减；
 ③ 自动升级（画面看门狗 / error 升级）不带 `retry=1`（有意保留：不在用户没要求时反复跑重活），
-失败缓存已存在时它们会立刻拿到那条记录并报失败；④ `retry=1` 清不掉**已存在的缓存文件**
+失败缓存已存在时它们会立刻拿到那条记录并报失败；④ `retry=1` 清不掉已存在的缓存文件
 （`existsSync` 在 map 检查之前短路），需要改源文件 mtime 或手删；⑤ WASM 旁路的 libav 版本路径
 在客户端硬编码，依赖升级后只会静默降级到转码；⑥ `/api/mvlib` 与 WASM 旁路仍无行为门禁。
 
@@ -2239,15 +2239,15 @@ music-metadata 的 `try` 里搬出来（avi/ts 恰恰在那一步抛错，探测
 ### 5.44.1 起因与取证
 
 准备把插件投给插件市场（awesome-dsh-plugin）时，先按「别人装上会不会被弄坏数据」自查。
-实测结论：`node-taglib-sharp@6.0.3` 的 `File.save()` 是**就地改写** —— `dist/stream.js:41` 用
-`fs.openSync(path, "r+")` 打开**原文件**、`:110` 用 `fs.writeSync` 往里写；整个库里没有临时文件、
+实测结论：`node-taglib-sharp@6.0.3` 的 `File.save()` 是就地改写 —— `dist/stream.js:41` 用
+`fs.openSync(path, "r+")` 打开原文件、`:110` 用 `fs.writeSync` 往里写；整个库里没有临时文件、
 没有 `rename`、没有备份，我们也没有写后回读。写入过程中被杀 / 断电 / 磁盘满都会在原文件上留下
 半个标签甚至损坏的音频流 —— 而这是本插件**唯一**会碰用户原始文件的动作。
 
 ### 5.44.2 修法：副本替换（原件全程不变）
 
 `writeTagsAtomic`：① `copyFile` 出同目录隐藏副本（同文件系统 ⇒ rename 原子，点开头 ⇒ 扫描器跳过）；
-② 在副本上写（仍走 worker，失败退回进程内）；③ **回读校验**（标题/歌手/专辑 + 写入封面时图片存在）；
+② 在副本上写（仍走 worker，失败退回进程内）；③ 回读校验（标题/歌手/专辑 + 写入封面时图片存在）；
 ④ 校验通过才 `fs.rename` 替换原件。任何一步失败都 `tagged:false`（失败不得报成成功）、清掉副本、原件不动。
 每一步 fs 操作都过 `authorize('fs.write', …, [lib.dir])`。另加崩溃残留清理：超过 1 小时的同前缀副本在
 下次写入前清掉。
@@ -2257,12 +2257,12 @@ music-metadata 的 `try` 里搬出来（avi/ts 恰恰在那一步抛错，探测
 | 断言 | 内容 |
 | --- | --- |
 | A | 成功写入后目录里不留 `.dshm-tagwrite-*` 副本 |
-| B | 目录改为不可写（建不出副本）时**报失败**：`tagged:false` + warning |
-| C | 同场景下**原件字节不变**（sha256 比对）且标签仍是旧值 |
+| B | 目录改为不可写（建不出副本）时报失败：`tagged:false` + warning |
+| C | 同场景下原件字节不变（sha256 比对）且标签仍是旧值 |
 | D | 失败后同样不留副本 |
 
-**负向对照（退回就地写入）**：B 变成 `tagged:true`、C 变成 `hash=CHANGED title=Nope Title`
-—— 同一场景下旧实现**默默改写了用户文件并报成功**。这正是这条加固要消除的风险。
+负向对照（退回就地写入）：B 变成 `tagged:true`、C 变成 `hash=CHANGED title=Nope Title`
+—— 同一场景下旧实现默默改写了用户文件并报成功。这正是这条加固要消除的风险。
 
 ### 5.44.4 上线前的其余准备（本轮一并做掉）
 
@@ -2270,12 +2270,21 @@ music-metadata 的 `try` 里搬出来（avi/ts 恰恰在那一步抛错，探测
 - 包名从 `@local/dsh-music-player` 改为 `@heshuren/dsh-music-player` —— npm 上 `dsh-music-player`
   已被 `kendu76/dsh-music-player`（另一作者）占用，用独立作用域避免混淆；`cordis.patch.yml`、README、
   `repository`/`bugs`/`homepage` 同步更新。
-- 两个开发脚本里硬编码的作者绝对路径改为**必填** `DSH_MUSIC_DIR`（原先默认 `/Users/heshuren/…`）。
+- 两个开发脚本里硬编码的作者绝对路径改为必填 `DSH_MUSIC_DIR`（原先默认 `/Users/heshuren/…`）。
 - 新增 `screenshots.json`（市场详情页用，相对路径指向 `docs/images/` 内已有截图）。
-- 文档预算：AGENTS 被注入块与新增规则顶超上限 ⇒ 按标准**先搬家**——五份上游平台标准的正文移入
+- 文档预算：AGENTS 被注入块与新增规则顶超上限 ⇒ 按标准先搬家——五份上游平台标准的正文移入
   `docs/rules-detail.md`，GraphFlow 的 MCP 配置移到 `docs/graphflow.md`，AGENTS 只留摘要与链接。
 
 ### 5.44.5 验证
 
-`typecheck` 0 · **`ALL 35 SUITES PASS`** · `check-build-fresh` 一致 · 严格/空白/会话视角痕迹/文档预算
+`typecheck` 0 · `ALL 35 SUITES PASS` · `check-build-fresh` 一致 · 严格/空白/会话视角痕迹/文档预算
 四道门禁退出码全 0。
+
+## 5.45 又一次把红门禁推上去了（第 32 轮内）
+
+提交 `093ec33` 推送时 `doc-budgets` 已经红了（台账粗体 63 > 53）—— 与 §5.43 同一类失误：我在
+同一条命令里先跑门禁、再提交推送，但**只看了 `check-prose` 的退出码**（0），把紧随其后的
+`doc-budgets` 的 1 当成噪声放过了。修复：台账强调按「只给改变行为的措辞加粗」收敛（63 → 43），
+并按其 0.95 留出余量；`npm test` 退出码 0 后重推。
+纪律补强（写进检查清单）：**每条门禁的退出码都要单独确认**；在一次命令里串多个门禁时，
+任一非零就必须停下来，不得凭「前一条绿了」继续。
