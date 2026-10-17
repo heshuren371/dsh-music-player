@@ -1545,6 +1545,632 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       return { mediaArtworkFallback, coverKnown, probeCover, updatePositionState, updateMediaSession };
     }
 
+    function createPlayerApi(core) {
+      const api0 = {
+        getState: () => core.state,
+        subscribe: (listener) => {
+          core.listeners.add(listener);
+          return () => core.listeners.delete(listener);
+        },
+        load: core.load,
+        refresh: async () => {
+          core.set({ loading: true, error: null });
+          try {
+            core.applyLibrary(await api("/api/refresh", { method: "POST" }));
+          } catch (error) {
+            core.set({ error: error instanceof Error ? error.message : String(error) });
+          } finally {
+            core.set({ loading: false });
+          }
+        },
+        pick: async () => {
+          core.set({ picking: true, error: null });
+          try {
+            const payload = await api("/api/pick", { method: "POST" });
+            if (payload.cancelled !== true) {
+              core.stopAudio();
+              core.applyLibrary(payload);
+              core.set({ current: -1, playing: false, time: 0, duration: 0, query: "" });
+            }
+          } catch (error) {
+            core.set({ error: error instanceof Error ? error.message : String(error) });
+          } finally {
+            core.set({ picking: false });
+          }
+        },
+        setDir: async (dir) => {
+          if (typeof dir !== "string" || dir.trim().length === 0) return;
+          core.set({ loading: true, error: null });
+          try {
+            const payload = await api("/api/dir", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ dir: dir.trim() }),
+            });
+            core.stopAudio();
+            core.applyLibrary(payload);
+            core.set({ current: -1, playing: false, time: 0, duration: 0, query: "" });
+          } catch (error) {
+            core.set({ error: error instanceof Error ? error.message : String(error) });
+            throw error;
+          } finally {
+            core.set({ loading: false });
+          }
+        },
+        play: core.playIndex,
+        /** 删除曲目（含本地文件）：先在应用内弹确认条，用户同意才删。 */
+        remove: (index) => {
+          if (core.state.tracks[index] === undefined) return;
+          core.set({ pendingDelete: index });
+        },
+        cancelRemove: () => core.set({ pendingDelete: -1 }),
+        confirmRemove: async () => {
+          const index = core.state.pendingDelete;
+          const track = core.state.tracks[index];
+          if (track === undefined) {
+            core.set({ pendingDelete: -1 });
+            return;
+          }
+          core.set({ error: null, pendingDelete: -1 });
+          try {
+            const payload = await api("/api/delete", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ id: track.id }),
+            });
+            // 记住的「最后播放」若指向被删曲目，一并清掉
+            const last = loadPrefs().last;
+            if (last !== undefined && last.id === track.id) savePrefs({ last: undefined });
+            core.applyLibrary(payload);
+          } catch (error) {
+            core.set({ error: error instanceof Error ? error.message : String(error) });
+          }
+        },
+        toggle: () => {
+          if (core.state.current < 0) {
+            const rows = core.visibleRows();
+            if (rows.length > 0) core.playIndex(rows[0].index);
+            return;
+          }
+          if (core.audio.paused) {
+            // cued / 暂停中的元素：设备可能已被 suspend（上一代 halt、系统挂起发生在暂停期间）。
+            // 这条路径**不经过** attachSource，所以必须自己把输出流叫醒 —— 不叫醒就是
+            // 「界面在放、耳机没声」，而且 onstatechange 不会触发（状态没变）。
+            core.resumeGraph();
+            // 从当前瞬时音量（cue 之后是 0）淡入到用户音量。
+            const promise = core.audio.play();
+            if (promise === undefined) {
+              core.applyVolume(core.targetVolume());
+              return;
+            }
+            promise.then(() => {
+              if (!core.disposed) void core.rampVolume(core.targetVolume(), core.FADE_PAUSE_MS);
+            }).catch((error) => {
+              // 同 attachSource：AbortError 是被打断，不是格式不支持。
+              if (error?.name === "NotAllowedError" || error?.name === "AbortError") return;
+              core.set({ playing: false, error: translate("error.unsupported") });
+            });
+          } else {
+            // 暂停也要淡出：直接 pause() 是满幅瞬间归零，同样是一声「啪」。
+            // 被后续动作取消时（rapid toggle）`ok` 为 false，就不要再暂停了。
+            // 过渡窗口内先结算交接：否则 pause 打在淡出中的旧元素上，新元素继续出声。
+            core.pauseEpoch += 1;
+            core.commitPendingCrossfade();
+            void (async () => {
+              const ok = await core.rampVolume(0, core.FADE_PAUSE_MS);
+              if (ok && !core.disposed) core.audio.pause();
+            })();
+          }
+        },
+        /**
+         * 打开全屏播放器。若正处在 closing（用户刚点了收起就再点封面），
+         * 先撤销那个还在飞的关闭定时器，否则 200ms 后会被它强制关掉。
+         *
+         * ⚠️ 这里**不能**加 `disposed` 守卫：player 是 window 级单例，插件热重载后的
+         * 下一次 activation 复用它，而 `disposed` 置位后永不复位 —— 加了守卫会让
+         * 重载之后的全屏播放器**再也打不开**（比死锁更坏）。teardown 的清理语义
+         * 由 halt() 自己完成（停播、清句柄、复位状态），不靠拦 UI 操作。
+         */
+        openPlayer: () => {
+          if (core.playerCloseTimer !== null) {
+            clearTimeout(core.playerCloseTimer);
+            core.playerCloseTimer = null;
+          }
+          core.set({ playerPhase: "open" });
+        },
+        /** 收起全屏播放器：closing 播完退出动画再置 closed（定时器归 player）。 */
+        closePlayer: () => {
+          if (core.state.playerPhase !== "open" || core.playerCloseTimer !== null) return;
+          core.set({ playerPhase: "closing" });
+          core.playerCloseTimer = setTimeout(() => {
+            core.playerCloseTimer = null;
+            // ⚠️ 这里**禁止**用 `disposed` 早退（第 16 轮回归）：halt() 已经把句柄
+            // 清掉了，所以回调能跑到这里，唯一原因就是「teardown 之后又被显式打开过」
+            // —— 而 player 是 window 级单例、下一次 activation 继续用它（A3-03），
+            // `disposed` 一旦置位**永不复位**；早退会把 phase 永久钉死在 `closing`
+            // （覆盖层关不掉、`closePlayer` 又拒绝从 closing 出发 ⇒ 死锁）。
+            // 只认「还在 closing」这一步：openPlayer 撤销定时器后这里自然不触发。
+            if (core.state.playerPhase !== "closing") return;
+            core.set({ playerPhase: "closed" });
+          }, 200);
+        },
+        toggleMvBig: () => core.set({ mvBig: !core.state.mvBig }),
+        setZoomOpen: (open) => core.set({ zoomOpen: open === true }),
+        /**
+         * activation 租约：**取号**。设备与 player 实例都是页级的，而「哪一代还有权操作
+         * 它」必须显式记账 —— 热重载的旧 disposer 可能在新 bundle 求值之后才跑到（顺序
+         * 不定），只按实例调 halt() 会把新一代正在用的实例一起停掉。
+         */
+        acquire: () => (core.activationGen += 1),
+        /** 当前租约号：activation 的 disposer 据此判断自己是否还是当前一代。 */
+        lease: () => core.activationGen,
+        /** 插件停用/卸载时停止播放并断开流（lifecycle 清理语义）。 */
+        halt: () => {
+          // 先立闸门：清句柄只能清掉「当前」那个定时器，清不掉在飞回调的再武装
+          // （见 schedulePoll 的注释）。disposed 置位后 schedulePoll 永不排期。
+          core.disposed = true;
+          window.removeEventListener("pagehide", core.onPageHide);
+          if (core.pollTimer !== null) {
+            clearTimeout(core.pollTimer);
+            core.pollTimer = null;
+          }
+          // 测量轮询同理：清句柄 + 复位状态位（否则守卫 `!state.rgMeasuring` 永不成立）。
+          if (core.rgPollTimer !== null) {
+            clearTimeout(core.rgPollTimer);
+            core.rgPollTimer = null;
+          }
+          // 同一个道理：清句柄 + 阻止再武装。scheduleUnseekableHeal 在 disposed 后
+          // 直接返回，不会重新排期（见 §2.10「清 timer 与阻止再武装是两件事」）。
+          if (core.unseekableTimer !== null) {
+            clearTimeout(core.unseekableTimer);
+            core.unseekableTimer = null;
+          }
+          // 音量渐变也是定时器：不清掉它会在 teardown 之后继续写音量。
+          // cancelFade 会同时把在飞的那个 promise 结算掉（不会挂住 await 它的调用方）。
+          core.cancelFade();
+          // 画面旁路（WASM 解码循环 / canvas）也是本代资源：停掉它，别在卸载后继续解码。
+          core.stopWasmVideo();
+          // 常驻音频图刻意不销毁（它的存在意义就是让设备流别重建），但 teardown 必须释放
+          // 设备流：suspend 而不是 close —— 设备是**页级**的，下一代 activation 还要接管它，
+          // close 之后就再也接不回来（ctx.close() 不可逆）。
+          if (core.audioCtx !== null && core.audioCtx.state === "running") void core.audioCtx.suspend();
+          // 本代的监听回调必须撤销：设备跨代存活，留着它等于把上一代的 handler 交给下一代
+          // （客户端 activation 归属：上一代不得把 handler 交给下一代）。
+          if (core.device.watcher === core.watchSuspended) core.device.watcher = null;
+          // 交叉淡化模式下有两个元素：只用 `stopAudio()` 停当前那个会留下一个还在出声的。
+          if (core.idleEl !== null) {
+            try { core.idleEl.pause(); } catch { /* 假元素 */ }
+          }
+          // 释放本代接进设备的节点与自建 DOM：停用后 body 上不该留插件自建的 `<video>`/
+          // 停靠位。设备本身的节点与 ctx 不动（它们归属页面）。
+          core.releaseElement(core.activeSource);
+          core.releaseElement(core.idleSource);
+          core.releaseElement(core.activeLevelNode);
+          core.releaseElement(core.idleLevelNode);
+          core.activeSource = null;
+          core.idleSource = null;
+          core.activeLevelNode = null;
+          core.idleLevelNode = null;
+          core.mediaPark?.remove();
+          core.mediaPark = null;
+          // 收起动画的定时器同理：清句柄 + 复位 phase，下一代会话/下一次挂载
+          // 不会继承「全屏播放器还开着」的旧状态。
+          if (core.playerCloseTimer !== null) {
+            clearTimeout(core.playerCloseTimer);
+            core.playerCloseTimer = null;
+          }
+          // 作废在途的 match/apply，并停掉批量循环：否则卸载后它还会继续
+          // 逐首打接口、写文件（实测每 600ms 一次，停不下来的后台任务）。
+          core.matchSeq += 1;
+          core.stopAudio();
+          // 把 window 上的引用摘掉（只摘自己那一份）：下一次 activation 于是**新建**一份
+          // player/媒体元素，而不是接管这一份已经立了闸门的旧状态。
+          const holder = window as unknown as { __dshMusicPlayer?: MusicPlayerApi };
+          if (holder.__dshMusicPlayer === api0) delete holder.__dshMusicPlayer;
+          core.device.released.add(api0);
+          // Reset current/error too: the deferred auto-skip and resume timers
+          // test those fields, and must not restart audio after teardown.
+          // `scanning` 也必须显式复位：它是轮询守卫读的字段，留着 true 会让
+          // 「阻止再武装」失守（A3-01）。
+          core.set({
+            playing: false,
+            scanning: false,
+            pendingDelete: -1,
+            current: -1,
+            error: null,
+            completing: false,
+            buffering: false,
+            pendingComplete: false,
+            match: null,
+            playerPhase: "closed",
+            mvBig: false,
+            zoomOpen: false,
+          });
+          if ("mediaSession" in navigator) {
+            try {
+              navigator.mediaSession.metadata = null;
+              navigator.mediaSession.playbackState = "none";
+            } catch {
+              // MediaSession is cosmetic; teardown must not fail on it.
+            }
+          }
+        },
+        next: core.next,
+        prev: core.prev,
+        seek: (value) => {
+          if (core.state.current < 0 || !Number.isFinite(value)) return;
+          // 过渡窗口内 `audio` 还是淡出中的旧元素：先结算交接，seek 才会落在真正在响的那个上。
+          core.commitPendingCrossfade();
+          core.resumeAttempts = 0;
+          core.skipAttempts = 0;
+          core.lastFailureAt = 0;
+          core.logSeek(value);
+          // 拖动进度同样是波形上的硬跳变 —— fooyin 对 seek 也做 120ms 淡入淡出
+          // （fadingdefs.h::CrossfadingValues::seek）。
+          // **只在常驻音频图接管增益时**才这么做：图未启用时保持「立即 seek」，因为用元素
+          // 音量做延迟会让拖动明显发粘，而且没有采样级保证（也会改掉既有测试依赖的同步语义）。
+          if (core.gainNode === null) {
+            core.set({ time: core.seekAudio(value) });
+            return;
+          }
+          void (async () => {
+            const ok = await core.rampVolume(0, core.FADE_SEEK_MS);
+            if (!ok || core.disposed) return;   // 被更新的拖动接管：这一次不 seek（最后一次赢）
+            core.set({ time: core.seekAudio(value) });
+            if (!core.disposed) void core.rampVolume(core.targetVolume(), core.FADE_SEEK_MS);
+          })();
+        },
+        /** 预热 /session（媒体直连基址）；页面挂载时调一次即可。 */
+        warmSession: () => { void loadSystemArtBase(); },
+        /** MV 画面：React 侧把这个媒体元素搬进全屏播放器的舞台（移动父节点不会中断播放）。 */
+        media: () => core.audio,
+        /** body 上的停靠位：视图卸载时把媒体元素搬回这里，避免被移出文档而暂停。 */
+        mediaPark: () => core.mediaPark,
+        /**
+         * MV 失败后手动重试（重置升级标记 → 进入 preparing → 重走转码并挂源）。
+         *
+         * ⚠️ 这三步**必须**留在这里，不能写在 MusicView 的 onClick 里：
+         * `mvEscalated` 与 `set` 都是 createPlayer() 的局部量，而 MusicView 在它外面，
+         * 从视图里引用会在**运行时抛 ReferenceError**，而且抛在 prepareVideo 之前 ——
+         * 表现就是「转码失败后点『重试』什么都没发生，只有控制台报错」。
+         * 这个缺陷在 TS 迁移前就存在（032e333 及更早），是第 12 轮类型检查顺手抓出来的。
+         */
+        retryVideo: (track) => {
+          core.mvEscalated.delete(track.id);
+          core.set({ mv: { id: track.id, state: "preparing", progress: 0, mode: "transcode", error: null } });
+          // retry=true：宿主把失败的转码任务缓存 10 分钟，不带这个标记这一下只会立刻
+          // 拿回同一条失败记录（按钮形同空操作，只能刷新页面）。
+          void core.prepareVideo(track, "transcode", true).then((url) => {
+            if (url === null || core.playingId !== track.id) return;
+            core.attachSource(url);
+          });
+        },
+        setVolume: (value) => {
+          // 用户拖动优先：取消在飞的渐变，否则下一帧就把现值覆盖回去。
+          core.cancelFade();
+          core.applyVolume(value);
+          // 拖音量条 = 明确要声音：静音状态一并解除。
+          core.set({ volume: value, muted: false });
+          savePrefs({ volume: value });
+        },
+        /**
+         * 均衡器：预设 id 或自定义曲线。预设来自内置表；自定义曲线长度必须等于段数，
+         * 超出 ±12dB 会被夹住（脏数据不该变成刺耳的声音）。两种都会持久化。
+         */
+        setEqualizer: (presetOrBands) => {
+          let nextPreset = "custom";
+          let nextBands: number[];
+          if (typeof presetOrBands === "string") {
+            const preset = EQ_PRESETS[presetOrBands];
+            if (preset === undefined) return;                       // 未知预设：不动（不猜）
+            nextPreset = presetOrBands;
+            nextBands = preset.slice();
+          } else if (Array.isArray(presetOrBands) && presetOrBands.length === EQ_BANDS.length) {
+            nextBands = presetOrBands.map((v) => (typeof v === "number" && Number.isFinite(v)
+              ? Math.max(EQ_GAIN_MIN_DB, Math.min(EQ_GAIN_MAX_DB, v)) : 0));
+          } else {
+            return;                                                  // 长度不对：不动（不猜）
+          }
+          core.set({ eqPreset: nextPreset, eqBands: nextBands });
+          savePrefs({ eqPreset: nextPreset, eqBands: nextBands });
+          core.applyEqualizer();
+        },
+        /**
+         * ReplayGain：模式（'off' | 'track' | 'album'）与可选前级增益（dB，省略则不变）。
+         * 未测量的曲目**不做增益** —— 想统一推高请用前级，而不是把它当 0dB。
+         */
+        setReplayGain: (mode, preampDb) => {
+          const nextMode = mode === "track" || mode === "album" ? mode : "off";
+          const nextPreamp = typeof preampDb === "number" && Number.isFinite(preampDb)
+            ? Math.max(core.RG_PREAMP_MIN_DB, Math.min(core.RG_PREAMP_MAX_DB, preampDb))
+            : core.state.rgPreampDb;
+          core.set({ rgMode: nextMode, rgPreampDb: nextPreamp });
+          savePrefs({ rgMode: nextMode, rgPreampDb: nextPreamp });
+          core.applyReplayGain();
+          // 开了归一化但当前曲目既没标签也没测量值 → 直接开始测量。
+          // 否则（实测用户曲库 0/40 首带标签）用户打开开关会发现「什么都没发生」。
+          if (nextMode !== "off" && !core.hasRgData(core.state.tracks[core.state.current])) core.startRgMeasure();
+        },
+        toggleMode: () => {
+          const mode = core.state.mode === "loop" ? "one" : "loop";
+          core.set({ mode });
+          savePrefs({ mode });
+        },
+        setQuery: (query) => core.set({ query }),
+        toggleSort: (key) => {
+          const sortDir = core.state.sortKey === key ? (core.state.sortDir === "asc" ? "desc" : "asc") : "asc";
+          core.set({ sortKey: key, sortDir });
+          savePrefs({ sortKey: key, sortDir });
+        },
+        /** 打开在线补全弹层：按曲目原名/歌手查 iTunes；query 为手动搜索词。 */
+        match: async (id, query) => {
+          const track = core.state.tracks.find((item) => item.id === id);
+          if (track === undefined) return;
+          const override = typeof query === "string" && query.trim().length > 0 ? query.trim() : "";
+          const seq = ++core.matchSeq;
+          core.set({ match: { id, loading: true, error: null, candidates: [], term: override } });
+          try {
+            const suffix = override.length > 0 ? "&q=" + encodeURIComponent(override) : "";
+            const payload = await api("/api/match?p=" + encodeURIComponent(id) + suffix);
+            if (seq !== core.matchSeq) return;
+            // 旧宿主只有 iTunes 单源，响应里没有 terms/best：与其显示
+            // “没有匹配结果”，不如直接说明宿主需要重载。
+            if (payload.terms === undefined && payload.best === undefined) {
+              const message = translate("error.staleHost");
+              core.set({ match: { id, loading: false, error: message, candidates: [], term: override }, error: message });
+              return;
+            }
+            const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+            const sourceErrors = Array.isArray(payload.errors) && payload.errors.length > 0
+              ? payload.errors.join("；")
+              : null;
+            core.set({
+              match: {
+                id,
+                loading: false,
+                // 真的没候选时，把各源的具体报错带出来（而不是只给一句“没找到”）。
+                error: candidates.length === 0 && sourceErrors !== null ? sourceErrors : null,
+                candidates,
+                term: typeof payload.term === "string" ? payload.term : override,
+              },
+            });
+          } catch (error) {
+            if (seq !== core.matchSeq) return;
+            core.set({
+              match: {
+                id,
+                loading: false,
+                error: error instanceof Error ? error.message : String(error),
+                candidates: [],
+                term: override,
+              },
+            });
+          }
+        },
+        closeMatch: () => {
+          core.matchSeq += 1;
+          core.set({ match: null });
+        },
+        /**
+         * 应用一条候选。writeFile=true 时调宿主写入标签并重命名本地文件；
+         * 写文件失败或未勾选时退化为本地显示覆盖，功能不会因此不可用。
+         */
+        applyMatch: async (candidate, writeFile, replaceCover) => {
+          const picker = core.state.match;
+          if (picker === null || candidate === null || typeof candidate !== "object") return;
+          const seq = ++core.matchSeq;
+          const id = picker.id;
+          const entry: MetaEntry = {};
+          if (typeof candidate.title === "string" && candidate.title.length > 0) entry.title = candidate.title;
+          if (typeof candidate.artist === "string" && candidate.artist.length > 0) entry.artist = candidate.artist;
+          if (typeof candidate.album === "string" && candidate.album.length > 0) entry.album = candidate.album;
+          if (typeof candidate.cover === "string" && candidate.cover.length > 0) entry.cover = candidate.cover;
+
+          // 仅改显示：不碰音频文件。
+          if (writeFile !== true) {
+            const meta = { ...core.state.meta, [id]: entry };
+            persistMeta(meta);
+            core.set({ meta, match: null });
+            core.updateMediaSession();
+            return;
+          }
+
+          const position = core.audio.currentTime;
+          const wasLoaded = (core.playingId !== null && core.playingId === id)
+            || (core.state.current >= 0 && core.state.tracks[core.state.current]?.id === id);
+          const wasPlaying = wasLoaded && !core.audio.paused;
+          core.set({ match: { id, loading: true, applying: true, error: null, candidates: [], term: picker.term } });
+          try {
+            // 宿主只在调用方**显式**要求时才替换已有内嵌封面（缺省只补缺失，见 /api/apply）。
+            // 手动应用是用户逐首选定的动作：候选带封面且「替换已有封面」勾选时才要求替换。
+            // 缺了这一项，已有封面的歌怎么应用都不会变。
+            const replaceExisting = replaceCover === true
+              && typeof candidate.cover === "string" && candidate.cover.length > 0;
+            const payload = await api("/api/apply", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ id, ...entry, rename: true, replaceCover: replaceExisting }),
+            });
+            // 弹层已被关闭 / 插件已停用：这次结果作废，不得再改状态。
+            if (seq !== core.matchSeq) return;
+            const oldId = typeof payload.oldId === "string" ? payload.oldId : id;
+            const newId = typeof payload.newId === "string" ? payload.newId : oldId;
+            if (oldId !== newId) {
+              const last = loadPrefs().last;
+              if (last !== undefined && last.id === oldId) savePrefs({ last: { ...last, id: newId } });
+              if (core.playingId === oldId) core.playingId = newId;
+            }
+            if (payload.library !== undefined) core.applyLibrary(payload.library);
+            // 被重命名的文件旧流地址已失效：重新指向新 id 并恢复播放位置。
+            if (wasLoaded) {
+              const index = core.state.tracks.findIndex((track) => track.id === newId);
+              if (index >= 0) {
+                const track = core.state.tracks[index];
+                core.set({ current: index, time: position, duration: typeof track.duration === "number" ? track.duration : 0 });
+                // 先等基址再挂源（同 recoverAt：相对地址在 Desktop 上不可 seek）。
+                void (async () => {
+                  await core.ensureStreamBase();
+                  if (core.disposed || core.playingId !== newId) return;
+                  core.audio.src = core.streamUrl(track);
+                  core.audio.addEventListener("loadedmetadata", () => {
+                    if (core.playingId !== newId) return;
+                    if (Number.isFinite(core.audio.duration)) core.audio.currentTime = Math.min(position, Math.max(0, core.audio.duration - 1));
+                  }, { once: true });
+                  if (wasPlaying) {
+                    const promise = core.audio.play();
+                    if (promise !== undefined) promise.catch(() => {});
+                  }
+                })();
+                core.updateMediaSession();
+              }
+            }
+            const nextMeta = { ...core.state.meta };
+            delete nextMeta[oldId];
+            delete nextMeta[newId];
+            // 标签写入失败时保留显示覆盖，至少列表里的原名是对的。
+            if (payload.tagged !== true) nextMeta[newId] = entry;
+            persistMeta(nextMeta);
+            core.set({
+              meta: nextMeta,
+              match: null,
+              error: payload.tagged === true
+                ? null
+                : (typeof payload.warning === "string" ? payload.warning : null),
+            });
+          } catch (error) {
+            // 写文件失败不能让“显示修正”一起失败：退回本地覆盖。
+            const meta = { ...core.state.meta, [id]: entry };
+            persistMeta(meta);
+            core.set({ meta, match: null, error: error instanceof Error ? error.message : String(error) });
+          }
+        },
+        /** 一键补全：弹出确认条（会改本地文件，必须先确认）。 */
+        completeRequest: () => {
+          const count = core.state.tracks.filter((track) => core.state.meta[track.id] === undefined).length;
+          if (count === 0) {
+            core.set({ error: translate("complete.none") });
+            return;
+          }
+          core.set({ pendingComplete: true, error: null });
+        },
+        cancelComplete: () => core.set({ pendingComplete: false }),
+        clearError: () => core.set({ error: null }),
+        toggleMute: () => {
+          const next = !core.state.muted;
+          core.set({ muted: next });
+          // 走短渐变：直接归零/跳回都会有一声「啪」。
+          void core.rampVolume(next ? 0 : core.state.volume, core.FADE_PAUSE_MS);
+        },
+        setCompleteOverwriteCover: (on) => core.set({ completeOverwriteCover: on === true }),
+
+        stopComplete: () => core.set({ completing: false }),
+        /**
+         * 逐首检查全部曲目：多源搜索 → 标签已正确的直接跳过，有差异且高置信度
+         * 才写标签 + 重命名（置信不足的一律不动）。逐首留间隔，用户可随时停止。
+         */
+        completeAll: async () => {
+          if (core.state.completing) return;
+          const targets = core.state.tracks.filter((track) => core.state.meta[track.id] === undefined);
+          core.set({
+            pendingComplete: false,
+            error: null,
+            completing: true,
+            completeTotal: targets.length,
+            completeDone: 0,
+            completeFailed: 0,
+            completeSkipped: 0,
+          });
+          if (targets.length === 0) {
+            core.set({ completing: false, error: translate("complete.none") });
+            return;
+          }
+          // 正在播放的文件即将被重命名，旧流地址会失效：先停下再改。
+          if (core.playingId !== null && targets.some((track) => track.id === core.playingId)) {
+            core.stopAudio();
+            core.set({ current: -1, playing: false, time: 0, duration: 0 });
+          }
+          let done = 0;
+          let failed = 0;
+          let skipped = 0;
+          for (const track of targets) {
+            if (!core.state.completing) break;
+            try {
+              const payload = await api("/api/match?p=" + encodeURIComponent(track.id));
+              // 旧宿主：不要假装“跳过”，直接停下并说明原因。
+              if (payload.terms === undefined && payload.best === undefined) {
+                core.set({ error: translate("error.staleHost") });
+                break;
+              }
+              const candidate = payload.best !== undefined && payload.best !== null
+                ? payload.best
+                : (Array.isArray(payload.candidates) ? payload.candidates[0] : undefined);
+              if (candidate === undefined) {
+                failed += 1;
+              } else if (payload.auto !== true) {
+                // 置信不足：只统计、跳过，绝不把错误信息写进文件
+                skipped += 1;
+              } else if (track.tagged === true
+                && sameKey(candidate.title) === sameKey(track.title)
+                && sameKey(candidate.artist ?? "") === sameKey(track.artist ?? "")
+                && track.name === expectedFileName(candidate.title, candidate.artist, track.name)
+                && !(core.state.completeOverwriteCover && typeof candidate.cover === "string" && candidate.cover.length > 0)) {
+                // 标签与文件名都已规范 ⇒ 通常无事可做，算「已正确」直接跳过。例外：用户勾选了
+                // 「覆盖已有封面」而候选带封面时，封面正是要写的东西，不能算已完成 —— 否则
+                // 已有封面的歌在批量里永远轮不到。
+                skipped += 1;
+              } else {
+                const entry: MetaEntry = {};
+                if (typeof candidate.title === "string" && candidate.title.length > 0) entry.title = candidate.title;
+                if (typeof candidate.artist === "string" && candidate.artist.length > 0) entry.artist = candidate.artist;
+                if (typeof candidate.album === "string" && candidate.album.length > 0) entry.album = candidate.album;
+                if (typeof candidate.cover === "string" && candidate.cover.length > 0) entry.cover = candidate.cover;
+                await api("/api/apply", {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({
+                    id: track.id,
+                    ...entry,
+                    rename: true,
+                    replaceCover: core.state.completeOverwriteCover === true,
+                  }),
+                });
+                // 注意：这里**不再**顺手转格式。一键补全只做它本来的事（写标签 + 重命名）。
+                // 之前把「转码 + 丢原件」挂在补全里是设计错误：批量、不可逆、还看不出发生了什么。
+              }
+            } catch {
+              failed += 1;
+            }
+            done += 1;
+            core.set({ completeDone: done, completeFailed: failed, completeSkipped: skipped });
+            await new Promise((resolve) => setTimeout(resolve, 600));
+          }
+          try {
+            core.applyLibrary(await api("/api/library"));
+          } catch {
+            // 列表刷新失败不影响已完成的补全。
+          }
+          core.set({ completing: false, completeTotal: targets.length, completeDone: done, completeFailed: failed, completeSkipped: skipped });
+        },
+        /** 清除某曲目的在线补全，恢复文件内嵌标签/文件名回退。 */
+        clearMeta: (id) => {
+          if (core.state.meta[id] === undefined) return;
+          core.matchSeq += 1;
+          const meta = { ...core.state.meta };
+          delete meta[id];
+          persistMeta(meta);
+          core.set({ meta, match: null });
+          core.updateMediaSession();
+        },
+        effective: core.effective,
+        coverFor: core.coverFor,
+        /** Live playback clock for the smooth progress fill (rAF consumers). */
+        now: () => core.audio.currentTime,
+        /** 可见列表：渲染与播放推进共用的同一顺序（所见即所播）。 */
+        visibleRows: core.visibleRows,
+      };
+      return api0;
+    }
+
     function createPlayer() {
       /**
        * 媒体元素用 <video>：音频文件本来就能播，MV 才有画面可显示（一个元素搞定两种媒体，
@@ -3407,628 +4033,91 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        */
       let playerCloseTimer: ReturnType<typeof setTimeout> | null = null;
 
-      const api0 = {
-        getState: () => state,
-        subscribe: (listener) => {
-          listeners.add(listener);
-          return () => listeners.delete(listener);
-        },
-        load,
-        refresh: async () => {
-          set({ loading: true, error: null });
-          try {
-            applyLibrary(await api("/api/refresh", { method: "POST" }));
-          } catch (error) {
-            set({ error: error instanceof Error ? error.message : String(error) });
-          } finally {
-            set({ loading: false });
-          }
-        },
-        pick: async () => {
-          set({ picking: true, error: null });
-          try {
-            const payload = await api("/api/pick", { method: "POST" });
-            if (payload.cancelled !== true) {
-              stopAudio();
-              applyLibrary(payload);
-              set({ current: -1, playing: false, time: 0, duration: 0, query: "" });
-            }
-          } catch (error) {
-            set({ error: error instanceof Error ? error.message : String(error) });
-          } finally {
-            set({ picking: false });
-          }
-        },
-        setDir: async (dir) => {
-          if (typeof dir !== "string" || dir.trim().length === 0) return;
-          set({ loading: true, error: null });
-          try {
-            const payload = await api("/api/dir", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ dir: dir.trim() }),
-            });
-            stopAudio();
-            applyLibrary(payload);
-            set({ current: -1, playing: false, time: 0, duration: 0, query: "" });
-          } catch (error) {
-            set({ error: error instanceof Error ? error.message : String(error) });
-            throw error;
-          } finally {
-            set({ loading: false });
-          }
-        },
-        play: playIndex,
-        /** 删除曲目（含本地文件）：先在应用内弹确认条，用户同意才删。 */
-        remove: (index) => {
-          if (state.tracks[index] === undefined) return;
-          set({ pendingDelete: index });
-        },
-        cancelRemove: () => set({ pendingDelete: -1 }),
-        confirmRemove: async () => {
-          const index = state.pendingDelete;
-          const track = state.tracks[index];
-          if (track === undefined) {
-            set({ pendingDelete: -1 });
-            return;
-          }
-          set({ error: null, pendingDelete: -1 });
-          try {
-            const payload = await api("/api/delete", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ id: track.id }),
-            });
-            // 记住的「最后播放」若指向被删曲目，一并清掉
-            const last = loadPrefs().last;
-            if (last !== undefined && last.id === track.id) savePrefs({ last: undefined });
-            applyLibrary(payload);
-          } catch (error) {
-            set({ error: error instanceof Error ? error.message : String(error) });
-          }
-        },
-        toggle: () => {
-          if (state.current < 0) {
-            const rows = visibleRows();
-            if (rows.length > 0) playIndex(rows[0].index);
-            return;
-          }
-          if (audio.paused) {
-            // cued / 暂停中的元素：设备可能已被 suspend（上一代 halt、系统挂起发生在暂停期间）。
-            // 这条路径**不经过** attachSource，所以必须自己把输出流叫醒 —— 不叫醒就是
-            // 「界面在放、耳机没声」，而且 onstatechange 不会触发（状态没变）。
-            resumeGraph();
-            // 从当前瞬时音量（cue 之后是 0）淡入到用户音量。
-            const promise = audio.play();
-            if (promise === undefined) {
-              applyVolume(targetVolume());
-              return;
-            }
-            promise.then(() => {
-              if (!disposed) void rampVolume(targetVolume(), FADE_PAUSE_MS);
-            }).catch((error) => {
-              // 同 attachSource：AbortError 是被打断，不是格式不支持。
-              if (error?.name === "NotAllowedError" || error?.name === "AbortError") return;
-              set({ playing: false, error: translate("error.unsupported") });
-            });
-          } else {
-            // 暂停也要淡出：直接 pause() 是满幅瞬间归零，同样是一声「啪」。
-            // 被后续动作取消时（rapid toggle）`ok` 为 false，就不要再暂停了。
-            // 过渡窗口内先结算交接：否则 pause 打在淡出中的旧元素上，新元素继续出声。
-            pauseEpoch += 1;
-            commitPendingCrossfade();
-            void (async () => {
-              const ok = await rampVolume(0, FADE_PAUSE_MS);
-              if (ok && !disposed) audio.pause();
-            })();
-          }
-        },
-        /**
-         * 打开全屏播放器。若正处在 closing（用户刚点了收起就再点封面），
-         * 先撤销那个还在飞的关闭定时器，否则 200ms 后会被它强制关掉。
-         *
-         * ⚠️ 这里**不能**加 `disposed` 守卫：player 是 window 级单例，插件热重载后的
-         * 下一次 activation 复用它，而 `disposed` 置位后永不复位 —— 加了守卫会让
-         * 重载之后的全屏播放器**再也打不开**（比死锁更坏）。teardown 的清理语义
-         * 由 halt() 自己完成（停播、清句柄、复位状态），不靠拦 UI 操作。
-         */
-        openPlayer: () => {
-          if (playerCloseTimer !== null) {
-            clearTimeout(playerCloseTimer);
-            playerCloseTimer = null;
-          }
-          set({ playerPhase: "open" });
-        },
-        /** 收起全屏播放器：closing 播完退出动画再置 closed（定时器归 player）。 */
-        closePlayer: () => {
-          if (state.playerPhase !== "open" || playerCloseTimer !== null) return;
-          set({ playerPhase: "closing" });
-          playerCloseTimer = setTimeout(() => {
-            playerCloseTimer = null;
-            // ⚠️ 这里**禁止**用 `disposed` 早退（第 16 轮回归）：halt() 已经把句柄
-            // 清掉了，所以回调能跑到这里，唯一原因就是「teardown 之后又被显式打开过」
-            // —— 而 player 是 window 级单例、下一次 activation 继续用它（A3-03），
-            // `disposed` 一旦置位**永不复位**；早退会把 phase 永久钉死在 `closing`
-            // （覆盖层关不掉、`closePlayer` 又拒绝从 closing 出发 ⇒ 死锁）。
-            // 只认「还在 closing」这一步：openPlayer 撤销定时器后这里自然不触发。
-            if (state.playerPhase !== "closing") return;
-            set({ playerPhase: "closed" });
-          }, 200);
-        },
-        toggleMvBig: () => set({ mvBig: !state.mvBig }),
-        setZoomOpen: (open) => set({ zoomOpen: open === true }),
-        /**
-         * activation 租约：**取号**。设备与 player 实例都是页级的，而「哪一代还有权操作
-         * 它」必须显式记账 —— 热重载的旧 disposer 可能在新 bundle 求值之后才跑到（顺序
-         * 不定），只按实例调 halt() 会把新一代正在用的实例一起停掉。
-         */
-        acquire: () => (activationGen += 1),
-        /** 当前租约号：activation 的 disposer 据此判断自己是否还是当前一代。 */
-        lease: () => activationGen,
-        /** 插件停用/卸载时停止播放并断开流（lifecycle 清理语义）。 */
-        halt: () => {
-          // 先立闸门：清句柄只能清掉「当前」那个定时器，清不掉在飞回调的再武装
-          // （见 schedulePoll 的注释）。disposed 置位后 schedulePoll 永不排期。
-          disposed = true;
-          window.removeEventListener("pagehide", onPageHide);
-          if (pollTimer !== null) {
-            clearTimeout(pollTimer);
-            pollTimer = null;
-          }
-          // 测量轮询同理：清句柄 + 复位状态位（否则守卫 `!state.rgMeasuring` 永不成立）。
-          if (rgPollTimer !== null) {
-            clearTimeout(rgPollTimer);
-            rgPollTimer = null;
-          }
-          // 同一个道理：清句柄 + 阻止再武装。scheduleUnseekableHeal 在 disposed 后
-          // 直接返回，不会重新排期（见 §2.10「清 timer 与阻止再武装是两件事」）。
-          if (unseekableTimer !== null) {
-            clearTimeout(unseekableTimer);
-            unseekableTimer = null;
-          }
-          // 音量渐变也是定时器：不清掉它会在 teardown 之后继续写音量。
-          // cancelFade 会同时把在飞的那个 promise 结算掉（不会挂住 await 它的调用方）。
-          cancelFade();
-          // 画面旁路（WASM 解码循环 / canvas）也是本代资源：停掉它，别在卸载后继续解码。
-          stopWasmVideo();
-          // 常驻音频图刻意不销毁（它的存在意义就是让设备流别重建），但 teardown 必须释放
-          // 设备流：suspend 而不是 close —— 设备是**页级**的，下一代 activation 还要接管它，
-          // close 之后就再也接不回来（ctx.close() 不可逆）。
-          if (audioCtx !== null && audioCtx.state === "running") void audioCtx.suspend();
-          // 本代的监听回调必须撤销：设备跨代存活，留着它等于把上一代的 handler 交给下一代
-          // （客户端 activation 归属：上一代不得把 handler 交给下一代）。
-          if (device.watcher === watchSuspended) device.watcher = null;
-          // 交叉淡化模式下有两个元素：只用 `stopAudio()` 停当前那个会留下一个还在出声的。
-          if (idleEl !== null) {
-            try { idleEl.pause(); } catch { /* 假元素 */ }
-          }
-          // 释放本代接进设备的节点与自建 DOM：停用后 body 上不该留插件自建的 `<video>`/
-          // 停靠位。设备本身的节点与 ctx 不动（它们归属页面）。
-          releaseElement(activeSource);
-          releaseElement(idleSource);
-          releaseElement(activeLevelNode);
-          releaseElement(idleLevelNode);
-          activeSource = null;
-          idleSource = null;
-          activeLevelNode = null;
-          idleLevelNode = null;
-          mediaPark?.remove();
-          mediaPark = null;
-          // 收起动画的定时器同理：清句柄 + 复位 phase，下一代会话/下一次挂载
-          // 不会继承「全屏播放器还开着」的旧状态。
-          if (playerCloseTimer !== null) {
-            clearTimeout(playerCloseTimer);
-            playerCloseTimer = null;
-          }
-          // 作废在途的 match/apply，并停掉批量循环：否则卸载后它还会继续
-          // 逐首打接口、写文件（实测每 600ms 一次，停不下来的后台任务）。
-          matchSeq += 1;
-          stopAudio();
-          // 把 window 上的引用摘掉（只摘自己那一份）：下一次 activation 于是**新建**一份
-          // player/媒体元素，而不是接管这一份已经立了闸门的旧状态。
-          const holder = window as unknown as { __dshMusicPlayer?: MusicPlayerApi };
-          if (holder.__dshMusicPlayer === api0) delete holder.__dshMusicPlayer;
-          device.released.add(api0);
-          // Reset current/error too: the deferred auto-skip and resume timers
-          // test those fields, and must not restart audio after teardown.
-          // `scanning` 也必须显式复位：它是轮询守卫读的字段，留着 true 会让
-          // 「阻止再武装」失守（A3-01）。
-          set({
-            playing: false,
-            scanning: false,
-            pendingDelete: -1,
-            current: -1,
-            error: null,
-            completing: false,
-            buffering: false,
-            pendingComplete: false,
-            match: null,
-            playerPhase: "closed",
-            mvBig: false,
-            zoomOpen: false,
-          });
-          if ("mediaSession" in navigator) {
-            try {
-              navigator.mediaSession.metadata = null;
-              navigator.mediaSession.playbackState = "none";
-            } catch {
-              // MediaSession is cosmetic; teardown must not fail on it.
-            }
-          }
-        },
-        next,
-        prev,
-        seek: (value) => {
-          if (state.current < 0 || !Number.isFinite(value)) return;
-          // 过渡窗口内 `audio` 还是淡出中的旧元素：先结算交接，seek 才会落在真正在响的那个上。
-          commitPendingCrossfade();
-          resumeAttempts = 0;
-          skipAttempts = 0;
-          lastFailureAt = 0;
-          logSeek(value);
-          // 拖动进度同样是波形上的硬跳变 —— fooyin 对 seek 也做 120ms 淡入淡出
-          // （fadingdefs.h::CrossfadingValues::seek）。
-          // **只在常驻音频图接管增益时**才这么做：图未启用时保持「立即 seek」，因为用元素
-          // 音量做延迟会让拖动明显发粘，而且没有采样级保证（也会改掉既有测试依赖的同步语义）。
-          if (gainNode === null) {
-            set({ time: seekAudio(value) });
-            return;
-          }
-          void (async () => {
-            const ok = await rampVolume(0, FADE_SEEK_MS);
-            if (!ok || disposed) return;   // 被更新的拖动接管：这一次不 seek（最后一次赢）
-            set({ time: seekAudio(value) });
-            if (!disposed) void rampVolume(targetVolume(), FADE_SEEK_MS);
-          })();
-        },
-        /** 预热 /session（媒体直连基址）；页面挂载时调一次即可。 */
-        warmSession: () => { void loadSystemArtBase(); },
-        /** MV 画面：React 侧把这个媒体元素搬进全屏播放器的舞台（移动父节点不会中断播放）。 */
-        media: () => audio,
-        /** body 上的停靠位：视图卸载时把媒体元素搬回这里，避免被移出文档而暂停。 */
-        mediaPark: () => mediaPark,
-        /**
-         * MV 失败后手动重试（重置升级标记 → 进入 preparing → 重走转码并挂源）。
-         *
-         * ⚠️ 这三步**必须**留在这里，不能写在 MusicView 的 onClick 里：
-         * `mvEscalated` 与 `set` 都是 createPlayer() 的局部量，而 MusicView 在它外面，
-         * 从视图里引用会在**运行时抛 ReferenceError**，而且抛在 prepareVideo 之前 ——
-         * 表现就是「转码失败后点『重试』什么都没发生，只有控制台报错」。
-         * 这个缺陷在 TS 迁移前就存在（032e333 及更早），是第 12 轮类型检查顺手抓出来的。
-         */
-        retryVideo: (track) => {
-          mvEscalated.delete(track.id);
-          set({ mv: { id: track.id, state: "preparing", progress: 0, mode: "transcode", error: null } });
-          // retry=true：宿主把失败的转码任务缓存 10 分钟，不带这个标记这一下只会立刻
-          // 拿回同一条失败记录（按钮形同空操作，只能刷新页面）。
-          void prepareVideo(track, "transcode", true).then((url) => {
-            if (url === null || playingId !== track.id) return;
-            attachSource(url);
-          });
-        },
-        setVolume: (value) => {
-          // 用户拖动优先：取消在飞的渐变，否则下一帧就把现值覆盖回去。
-          cancelFade();
-          applyVolume(value);
-          // 拖音量条 = 明确要声音：静音状态一并解除。
-          set({ volume: value, muted: false });
-          savePrefs({ volume: value });
-        },
-        /**
-         * 均衡器：预设 id 或自定义曲线。预设来自内置表；自定义曲线长度必须等于段数，
-         * 超出 ±12dB 会被夹住（脏数据不该变成刺耳的声音）。两种都会持久化。
-         */
-        setEqualizer: (presetOrBands) => {
-          let nextPreset = "custom";
-          let nextBands: number[];
-          if (typeof presetOrBands === "string") {
-            const preset = EQ_PRESETS[presetOrBands];
-            if (preset === undefined) return;                       // 未知预设：不动（不猜）
-            nextPreset = presetOrBands;
-            nextBands = preset.slice();
-          } else if (Array.isArray(presetOrBands) && presetOrBands.length === EQ_BANDS.length) {
-            nextBands = presetOrBands.map((v) => (typeof v === "number" && Number.isFinite(v)
-              ? Math.max(EQ_GAIN_MIN_DB, Math.min(EQ_GAIN_MAX_DB, v)) : 0));
-          } else {
-            return;                                                  // 长度不对：不动（不猜）
-          }
-          set({ eqPreset: nextPreset, eqBands: nextBands });
-          savePrefs({ eqPreset: nextPreset, eqBands: nextBands });
-          applyEqualizer();
-        },
-        /**
-         * ReplayGain：模式（'off' | 'track' | 'album'）与可选前级增益（dB，省略则不变）。
-         * 未测量的曲目**不做增益** —— 想统一推高请用前级，而不是把它当 0dB。
-         */
-        setReplayGain: (mode, preampDb) => {
-          const nextMode = mode === "track" || mode === "album" ? mode : "off";
-          const nextPreamp = typeof preampDb === "number" && Number.isFinite(preampDb)
-            ? Math.max(RG_PREAMP_MIN_DB, Math.min(RG_PREAMP_MAX_DB, preampDb))
-            : state.rgPreampDb;
-          set({ rgMode: nextMode, rgPreampDb: nextPreamp });
-          savePrefs({ rgMode: nextMode, rgPreampDb: nextPreamp });
-          applyReplayGain();
-          // 开了归一化但当前曲目既没标签也没测量值 → 直接开始测量。
-          // 否则（实测用户曲库 0/40 首带标签）用户打开开关会发现「什么都没发生」。
-          if (nextMode !== "off" && !hasRgData(state.tracks[state.current])) startRgMeasure();
-        },
-        toggleMode: () => {
-          const mode = state.mode === "loop" ? "one" : "loop";
-          set({ mode });
-          savePrefs({ mode });
-        },
-        setQuery: (query) => set({ query }),
-        toggleSort: (key) => {
-          const sortDir = state.sortKey === key ? (state.sortDir === "asc" ? "desc" : "asc") : "asc";
-          set({ sortKey: key, sortDir });
-          savePrefs({ sortKey: key, sortDir });
-        },
-        /** 打开在线补全弹层：按曲目原名/歌手查 iTunes；query 为手动搜索词。 */
-        match: async (id, query) => {
-          const track = state.tracks.find((item) => item.id === id);
-          if (track === undefined) return;
-          const override = typeof query === "string" && query.trim().length > 0 ? query.trim() : "";
-          const seq = ++matchSeq;
-          set({ match: { id, loading: true, error: null, candidates: [], term: override } });
-          try {
-            const suffix = override.length > 0 ? "&q=" + encodeURIComponent(override) : "";
-            const payload = await api("/api/match?p=" + encodeURIComponent(id) + suffix);
-            if (seq !== matchSeq) return;
-            // 旧宿主只有 iTunes 单源，响应里没有 terms/best：与其显示
-            // “没有匹配结果”，不如直接说明宿主需要重载。
-            if (payload.terms === undefined && payload.best === undefined) {
-              const message = translate("error.staleHost");
-              set({ match: { id, loading: false, error: message, candidates: [], term: override }, error: message });
-              return;
-            }
-            const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
-            const sourceErrors = Array.isArray(payload.errors) && payload.errors.length > 0
-              ? payload.errors.join("；")
-              : null;
-            set({
-              match: {
-                id,
-                loading: false,
-                // 真的没候选时，把各源的具体报错带出来（而不是只给一句“没找到”）。
-                error: candidates.length === 0 && sourceErrors !== null ? sourceErrors : null,
-                candidates,
-                term: typeof payload.term === "string" ? payload.term : override,
-              },
-            });
-          } catch (error) {
-            if (seq !== matchSeq) return;
-            set({
-              match: {
-                id,
-                loading: false,
-                error: error instanceof Error ? error.message : String(error),
-                candidates: [],
-                term: override,
-              },
-            });
-          }
-        },
-        closeMatch: () => {
-          matchSeq += 1;
-          set({ match: null });
-        },
-        /**
-         * 应用一条候选。writeFile=true 时调宿主写入标签并重命名本地文件；
-         * 写文件失败或未勾选时退化为本地显示覆盖，功能不会因此不可用。
-         */
-        applyMatch: async (candidate, writeFile, replaceCover) => {
-          const picker = state.match;
-          if (picker === null || candidate === null || typeof candidate !== "object") return;
-          const seq = ++matchSeq;
-          const id = picker.id;
-          const entry: MetaEntry = {};
-          if (typeof candidate.title === "string" && candidate.title.length > 0) entry.title = candidate.title;
-          if (typeof candidate.artist === "string" && candidate.artist.length > 0) entry.artist = candidate.artist;
-          if (typeof candidate.album === "string" && candidate.album.length > 0) entry.album = candidate.album;
-          if (typeof candidate.cover === "string" && candidate.cover.length > 0) entry.cover = candidate.cover;
-
-          // 仅改显示：不碰音频文件。
-          if (writeFile !== true) {
-            const meta = { ...state.meta, [id]: entry };
-            persistMeta(meta);
-            set({ meta, match: null });
-            updateMediaSession();
-            return;
-          }
-
-          const position = audio.currentTime;
-          const wasLoaded = (playingId !== null && playingId === id)
-            || (state.current >= 0 && state.tracks[state.current]?.id === id);
-          const wasPlaying = wasLoaded && !audio.paused;
-          set({ match: { id, loading: true, applying: true, error: null, candidates: [], term: picker.term } });
-          try {
-            // 宿主只在调用方**显式**要求时才替换已有内嵌封面（缺省只补缺失，见 /api/apply）。
-            // 手动应用是用户逐首选定的动作：候选带封面且「替换已有封面」勾选时才要求替换。
-            // 缺了这一项，已有封面的歌怎么应用都不会变。
-            const replaceExisting = replaceCover === true
-              && typeof candidate.cover === "string" && candidate.cover.length > 0;
-            const payload = await api("/api/apply", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ id, ...entry, rename: true, replaceCover: replaceExisting }),
-            });
-            // 弹层已被关闭 / 插件已停用：这次结果作废，不得再改状态。
-            if (seq !== matchSeq) return;
-            const oldId = typeof payload.oldId === "string" ? payload.oldId : id;
-            const newId = typeof payload.newId === "string" ? payload.newId : oldId;
-            if (oldId !== newId) {
-              const last = loadPrefs().last;
-              if (last !== undefined && last.id === oldId) savePrefs({ last: { ...last, id: newId } });
-              if (playingId === oldId) playingId = newId;
-            }
-            if (payload.library !== undefined) applyLibrary(payload.library);
-            // 被重命名的文件旧流地址已失效：重新指向新 id 并恢复播放位置。
-            if (wasLoaded) {
-              const index = state.tracks.findIndex((track) => track.id === newId);
-              if (index >= 0) {
-                const track = state.tracks[index];
-                set({ current: index, time: position, duration: typeof track.duration === "number" ? track.duration : 0 });
-                // 先等基址再挂源（同 recoverAt：相对地址在 Desktop 上不可 seek）。
-                void (async () => {
-                  await ensureStreamBase();
-                  if (disposed || playingId !== newId) return;
-                  audio.src = streamUrl(track);
-                  audio.addEventListener("loadedmetadata", () => {
-                    if (playingId !== newId) return;
-                    if (Number.isFinite(audio.duration)) audio.currentTime = Math.min(position, Math.max(0, audio.duration - 1));
-                  }, { once: true });
-                  if (wasPlaying) {
-                    const promise = audio.play();
-                    if (promise !== undefined) promise.catch(() => {});
-                  }
-                })();
-                updateMediaSession();
-              }
-            }
-            const nextMeta = { ...state.meta };
-            delete nextMeta[oldId];
-            delete nextMeta[newId];
-            // 标签写入失败时保留显示覆盖，至少列表里的原名是对的。
-            if (payload.tagged !== true) nextMeta[newId] = entry;
-            persistMeta(nextMeta);
-            set({
-              meta: nextMeta,
-              match: null,
-              error: payload.tagged === true
-                ? null
-                : (typeof payload.warning === "string" ? payload.warning : null),
-            });
-          } catch (error) {
-            // 写文件失败不能让“显示修正”一起失败：退回本地覆盖。
-            const meta = { ...state.meta, [id]: entry };
-            persistMeta(meta);
-            set({ meta, match: null, error: error instanceof Error ? error.message : String(error) });
-          }
-        },
-        /** 一键补全：弹出确认条（会改本地文件，必须先确认）。 */
-        completeRequest: () => {
-          const count = state.tracks.filter((track) => state.meta[track.id] === undefined).length;
-          if (count === 0) {
-            set({ error: translate("complete.none") });
-            return;
-          }
-          set({ pendingComplete: true, error: null });
-        },
-        cancelComplete: () => set({ pendingComplete: false }),
-        clearError: () => set({ error: null }),
-        toggleMute: () => {
-          const next = !state.muted;
-          set({ muted: next });
-          // 走短渐变：直接归零/跳回都会有一声「啪」。
-          void rampVolume(next ? 0 : state.volume, FADE_PAUSE_MS);
-        },
-        setCompleteOverwriteCover: (on) => set({ completeOverwriteCover: on === true }),
-
-        stopComplete: () => set({ completing: false }),
-        /**
-         * 逐首检查全部曲目：多源搜索 → 标签已正确的直接跳过，有差异且高置信度
-         * 才写标签 + 重命名（置信不足的一律不动）。逐首留间隔，用户可随时停止。
-         */
-        completeAll: async () => {
-          if (state.completing) return;
-          const targets = state.tracks.filter((track) => state.meta[track.id] === undefined);
-          set({
-            pendingComplete: false,
-            error: null,
-            completing: true,
-            completeTotal: targets.length,
-            completeDone: 0,
-            completeFailed: 0,
-            completeSkipped: 0,
-          });
-          if (targets.length === 0) {
-            set({ completing: false, error: translate("complete.none") });
-            return;
-          }
-          // 正在播放的文件即将被重命名，旧流地址会失效：先停下再改。
-          if (playingId !== null && targets.some((track) => track.id === playingId)) {
-            stopAudio();
-            set({ current: -1, playing: false, time: 0, duration: 0 });
-          }
-          let done = 0;
-          let failed = 0;
-          let skipped = 0;
-          for (const track of targets) {
-            if (!state.completing) break;
-            try {
-              const payload = await api("/api/match?p=" + encodeURIComponent(track.id));
-              // 旧宿主：不要假装“跳过”，直接停下并说明原因。
-              if (payload.terms === undefined && payload.best === undefined) {
-                set({ error: translate("error.staleHost") });
-                break;
-              }
-              const candidate = payload.best !== undefined && payload.best !== null
-                ? payload.best
-                : (Array.isArray(payload.candidates) ? payload.candidates[0] : undefined);
-              if (candidate === undefined) {
-                failed += 1;
-              } else if (payload.auto !== true) {
-                // 置信不足：只统计、跳过，绝不把错误信息写进文件
-                skipped += 1;
-              } else if (track.tagged === true
-                && sameKey(candidate.title) === sameKey(track.title)
-                && sameKey(candidate.artist ?? "") === sameKey(track.artist ?? "")
-                && track.name === expectedFileName(candidate.title, candidate.artist, track.name)
-                && !(state.completeOverwriteCover && typeof candidate.cover === "string" && candidate.cover.length > 0)) {
-                // 标签与文件名都已规范 ⇒ 通常无事可做，算「已正确」直接跳过。例外：用户勾选了
-                // 「覆盖已有封面」而候选带封面时，封面正是要写的东西，不能算已完成 —— 否则
-                // 已有封面的歌在批量里永远轮不到。
-                skipped += 1;
-              } else {
-                const entry: MetaEntry = {};
-                if (typeof candidate.title === "string" && candidate.title.length > 0) entry.title = candidate.title;
-                if (typeof candidate.artist === "string" && candidate.artist.length > 0) entry.artist = candidate.artist;
-                if (typeof candidate.album === "string" && candidate.album.length > 0) entry.album = candidate.album;
-                if (typeof candidate.cover === "string" && candidate.cover.length > 0) entry.cover = candidate.cover;
-                await api("/api/apply", {
-                  method: "POST",
-                  headers: { "content-type": "application/json" },
-                  body: JSON.stringify({
-                    id: track.id,
-                    ...entry,
-                    rename: true,
-                    replaceCover: state.completeOverwriteCover === true,
-                  }),
-                });
-                // 注意：这里**不再**顺手转格式。一键补全只做它本来的事（写标签 + 重命名）。
-                // 之前把「转码 + 丢原件」挂在补全里是设计错误：批量、不可逆、还看不出发生了什么。
-              }
-            } catch {
-              failed += 1;
-            }
-            done += 1;
-            set({ completeDone: done, completeFailed: failed, completeSkipped: skipped });
-            await new Promise((resolve) => setTimeout(resolve, 600));
-          }
-          try {
-            applyLibrary(await api("/api/library"));
-          } catch {
-            // 列表刷新失败不影响已完成的补全。
-          }
-          set({ completing: false, completeTotal: targets.length, completeDone: done, completeFailed: failed, completeSkipped: skipped });
-        },
-        /** 清除某曲目的在线补全，恢复文件内嵌标签/文件名回退。 */
-        clearMeta: (id) => {
-          if (state.meta[id] === undefined) return;
-          matchSeq += 1;
-          const meta = { ...state.meta };
-          delete meta[id];
-          persistMeta(meta);
-          set({ meta, match: null });
-          updateMediaSession();
-        },
-        effective,
-        coverFor,
-        /** Live playback clock for the smooth progress fill (rAF consumers). */
-        now: () => audio.currentTime,
-        /** 可见列表：渲染与播放推进共用的同一顺序（所见即所播）。 */
-        visibleRows,
+      const core = {
+        get FADE_PAUSE_MS() { return FADE_PAUSE_MS; },
+        get FADE_SEEK_MS() { return FADE_SEEK_MS; },
+        get RG_PREAMP_MAX_DB() { return RG_PREAMP_MAX_DB; },
+        get RG_PREAMP_MIN_DB() { return RG_PREAMP_MIN_DB; },
+        get activationGen() { return activationGen; },
+        set activationGen(value) { activationGen = value; },
+        get activeLevelNode() { return activeLevelNode; },
+        set activeLevelNode(value) { activeLevelNode = value; },
+        get activeSource() { return activeSource; },
+        set activeSource(value) { activeSource = value; },
+        get applyEqualizer() { return applyEqualizer; },
+        get applyLibrary() { return applyLibrary; },
+        get applyReplayGain() { return applyReplayGain; },
+        get applyVolume() { return applyVolume; },
+        get attachSource() { return attachSource; },
+        get audio() { return audio; },
+        set audio(value) { audio = value; },
+        get audioCtx() { return audioCtx; },
+        set audioCtx(value) { audioCtx = value; },
+        get cancelFade() { return cancelFade; },
+        get commitPendingCrossfade() { return commitPendingCrossfade; },
+        get coverFor() { return coverFor; },
+        get device() { return device; },
+        get disposed() { return disposed; },
+        set disposed(value) { disposed = value; },
+        get effective() { return effective; },
+        get ensureStreamBase() { return ensureStreamBase; },
+        get gainNode() { return gainNode; },
+        set gainNode(value) { gainNode = value; },
+        get hasRgData() { return hasRgData; },
+        get idleEl() { return idleEl; },
+        set idleEl(value) { idleEl = value; },
+        get idleLevelNode() { return idleLevelNode; },
+        set idleLevelNode(value) { idleLevelNode = value; },
+        get idleSource() { return idleSource; },
+        set idleSource(value) { idleSource = value; },
+        get lastFailureAt() { return lastFailureAt; },
+        set lastFailureAt(value) { lastFailureAt = value; },
+        get listeners() { return listeners; },
+        get load() { return load; },
+        get logSeek() { return logSeek; },
+        get matchSeq() { return matchSeq; },
+        set matchSeq(value) { matchSeq = value; },
+        get mediaPark() { return mediaPark; },
+        set mediaPark(value) { mediaPark = value; },
+        get mvEscalated() { return mvEscalated; },
+        get next() { return next; },
+        get onPageHide() { return onPageHide; },
+        get pauseEpoch() { return pauseEpoch; },
+        set pauseEpoch(value) { pauseEpoch = value; },
+        get playIndex() { return playIndex; },
+        get playerCloseTimer() { return playerCloseTimer; },
+        set playerCloseTimer(value) { playerCloseTimer = value; },
+        get playingId() { return playingId; },
+        set playingId(value) { playingId = value; },
+        get pollTimer() { return pollTimer; },
+        set pollTimer(value) { pollTimer = value; },
+        get prepareVideo() { return prepareVideo; },
+        get prev() { return prev; },
+        get rampVolume() { return rampVolume; },
+        get releaseElement() { return releaseElement; },
+        get resumeAttempts() { return resumeAttempts; },
+        set resumeAttempts(value) { resumeAttempts = value; },
+        get resumeGraph() { return resumeGraph; },
+        get rgPollTimer() { return rgPollTimer; },
+        set rgPollTimer(value) { rgPollTimer = value; },
+        get seekAudio() { return seekAudio; },
+        get set() { return set; },
+        get skipAttempts() { return skipAttempts; },
+        set skipAttempts(value) { skipAttempts = value; },
+        get startRgMeasure() { return startRgMeasure; },
+        get state() { return state; },
+        set state(value) { state = value; },
+        get stopAudio() { return stopAudio; },
+        get stopWasmVideo() { return stopWasmVideo; },
+        get streamUrl() { return streamUrl; },
+        get targetVolume() { return targetVolume; },
+        get unseekableTimer() { return unseekableTimer; },
+        set unseekableTimer(value) { unseekableTimer = value; },
+        get updateMediaSession() { return updateMediaSession; },
+        get visibleRows() { return visibleRows; },
+        get watchSuspended() { return watchSuspended; },
       };
+      const api0 = createPlayerApi(core);
       return api0;
     }
 

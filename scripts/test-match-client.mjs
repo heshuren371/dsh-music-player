@@ -2,6 +2,7 @@
 //  - row ✦ → candidate dialog → apply writes tags + renames via POST /api/apply
 //  - unchecking "write file" keeps a local display-only override (and clear)
 //  - one-click Complete All skips already-tagged/overridden tracks
+import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import React from 'react';
 import { createRoot } from 'react-dom/client';
@@ -143,6 +144,19 @@ check('five rows rendered with a cover cell', rows().length === 5 && rows()[0].q
     }
     check('clearing from the empty state restores all rows', rows().length === 5, 'rows=' + rows().length);
   }
+}
+
+// ── API 表面：接口声明的每个方法都必须真的存在（提取后防漏/防改名）──────────
+{
+  const source = readFileSync(new URL('../src/client.ts', import.meta.url), 'utf8');
+  const ifaceStart = source.indexOf('interface MusicPlayerApi {');
+  const iface = source.slice(ifaceStart, source.indexOf('\n}', ifaceStart));
+  const declared = [...iface.matchAll(/^  ([A-Za-z_$][\w$]*)\s*\(/gm)].map((m) => m[1]);
+  const live = window.__dshMusicPlayer;
+  const missing = declared.filter((name) => typeof live[name] !== 'function');
+  check('every declared MusicPlayerApi method exists on the live player',
+    declared.length > 30 && missing.length === 0,
+    declared.length + ' declared, missing: ' + missing.join(','));
 }
 
 // ── 行键盘可达：Tab 到行、Enter 播放 ─────────────────────────────────────────

@@ -2478,3 +2478,18 @@ old 与 new 完全相同（duration=right/10px/64px；cover=center/4px/clip/44px
 2. 传输与交叉淡化（`attachSource` 139 行，12 个 `let`）——D 段覆盖已较全；
 3. 音频图与设备（`ensureDevice` 67 行等）——D/E 段覆盖。
 4. 每阶段完成后把棘轮数值下调，只许变小。
+
+## 5.54 第 43 轮 —— createPlayer 拆分阶段 2（api0 622 行）
+
+- 提取 `api0`（40 个方法，622 行）到同级 `createPlayerApi(core)`。
+- 依赖注入：`let` 绑定用 getter/setter（`state`/`audio`/`playingId`/`disposed`/各 timer/`matchSeq`/`activationGen`/`pauseEpoch` 等），
+  `const` 函数用 getter；共 60 个依赖，由编译器错误坐标逐处改写（每处只在真实自由引用位置加 `core.`）。
+- `createPlayer` 2486 → 1949 行；35 套全绿。
+- 棘轮下调至 ≤1950；新增 API 表面门禁：从 `MusicPlayerApi` 接口静态提取方法名，断言 live player 上全部存在
+  （提取/改名漏一个就红）。
+- 保留 `api0` 局部名：工厂内仍叫 `api0`，方法间自引用零改动。
+
+### 剩余阶段
+
+1. 传输与交叉淡化（`attachSource` 139 行，12 个 `let`）；
+2. 音频图与设备（`ensureDevice` 67 行等）。
