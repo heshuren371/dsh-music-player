@@ -170,6 +170,8 @@ interface PlayerState {
   error: string | null;
   current: number;
   playing: boolean;
+  /** 用户按了静音：`volume` 保留设定值，实际输出按 0 处理。 */
+  muted: boolean;
   /** 正在等数据（网络/宿主慢）：UI 显示「缓冲中」。 */
   buffering: boolean;
   mode: "loop" | "one";
@@ -338,6 +340,7 @@ interface MusicPlayerApi {
   match(id: string, query?: string): Promise<void>;
   closeMatch(): void;
   clearError(): void;
+  toggleMute(): void;
   applyMatch(candidate: MatchCandidate, writeFile: boolean, replaceCover: boolean): Promise<void>;
   setCompleteOverwriteCover(on: boolean): void;
   completeRequest(): void;
@@ -602,6 +605,8 @@ window.__ModuleLoader__.load({
       "action.play": "播放",
       "action.pause": "暂停",
       "action.volume": "音量",
+      "action.mute": "静音",
+      "action.unmute": "取消静音",
       "rg.label": "响度归一化（ReplayGain）",
       "rg.off": "关闭",
       "rg.track": "单曲",
@@ -692,6 +697,8 @@ window.__ModuleLoader__.load({
       "action.play": "Play",
       "action.pause": "Pause",
       "action.volume": "Volume",
+      "action.mute": "Mute",
+      "action.unmute": "Unmute",
       "rg.label": "ReplayGain loudness normalisation",
       "rg.off": "Off",
       "rg.track": "Track",
@@ -735,7 +742,9 @@ window.__ModuleLoader__.load({
    事件，所以由这层 inline-flex 容器收 hover；自身不占额外空间。 */
 .dshm-tip{display:inline-flex;min-width:0;align-items:center;flex:none}
 .dshm-glyph{line-height:1}
-.dshm-volIcon{flex:none;color:var(--dsw-alias-label-tertiary);align-items:center;display:inline-flex}
+.dshm-volIcon{flex:none;color:var(--dsw-alias-label-tertiary);align-items:center;display:inline-flex;background:none;border:0;padding:0;cursor:pointer;border-radius:4px}
+.dshm-volIcon:hover{color:var(--dsw-alias-label-primary)}
+.dshm-volIcon--muted{color:var(--dsw-alias-state-error-primary)}
 /* 不启用 composer 悬浮（避免底部留白空隙）：恢复原布局，仅用 :has() 在音乐页隐藏两侧宽度条 */
 body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-root *{box-sizing:border-box}
@@ -778,7 +787,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
    box for the 22px delete button, so the td clipped it and painted a "…". */
 .dshm-del{cursor:pointer;width:22px;height:22px;color:var(--dsw-alias-label-tertiary);border:0;background:transparent;border-radius:6px;justify-content:center;align-items:center;padding:0;display:inline-flex;font-size:15px;line-height:1;font-weight:600}
 .dshm-del:hover{color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-tertiary)}
-.dshm-colDuration{width:64px;text-align:right!important;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.dshm-table td.dshm-colDuration,.dshm-table th.dshm-colDuration{width:64px;text-align:right;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
 .dshm-colArtist{width:26%}
 .dshm-row{cursor:default;transition:background-color .12s var(--ds-ease-in-out)}
 .dshm-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
@@ -980,7 +989,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-playerVolume{align-items:center;gap:8px;display:flex}
 /* 音量条的圆钮与进度条同款（macOS 原生白色圆钮），只是常显 */
 /* 在线补全：行内封面列 / 匹配按钮 / 候选弹层 */
-.dshm-colCover{width:44px;text-align:center!important;padding:0 4px!important;text-overflow:clip!important}
+.dshm-table td.dshm-colCover,.dshm-table th.dshm-colCover{width:44px;text-align:center;padding:0 4px;text-overflow:clip}
 /* ── 列表封面上的「正在播放」指示（Apple Music 的 .playing-bars）─────────────
    正在播放的行：封面上叠三根跳动条；悬停时跳动条淡出、换成播放/暂停图标
    （他们用 --playButtonOpacity + .playing-bars-hover 做同一件事）。 */
@@ -1006,7 +1015,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-root button:focus-visible,.dshm-root input:focus-visible,.dshm-root [role="button"]:focus-visible{outline:none;box-shadow:0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-business-primary) 55%, transparent)}
 .dshm-rowCover{width:28px;height:28px;border:1px solid var(--dsw-alias-border-l2);border-radius:5px;object-fit:cover;background:var(--dsw-alias-bg-layer-2);vertical-align:middle}
 .dshm-rowNote{width:28px;height:28px;color:var(--dsw-alias-label-caption);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:5px;justify-content:center;align-items:center;vertical-align:middle;display:inline-flex}
-.dshm-colActions{width:60px;text-align:center!important;padding:0!important;text-overflow:clip!important}
+.dshm-table td.dshm-colActions,.dshm-table th.dshm-colActions{width:60px;text-align:center;padding:0;text-overflow:clip}
 .dshm-match{cursor:pointer;width:22px;height:22px;color:var(--dsw-alias-label-tertiary);border:0;background:transparent;border-radius:6px;justify-content:center;align-items:center;padding:0;display:inline-flex;font-size:12px;line-height:1}
 .dshm-match:hover{color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-interactive-bg-hover)}
 .dshm-match--done{color:var(--dsw-alias-state-business-primary)}
@@ -1057,6 +1066,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       note: h("svg", { width: 16, height: 16, viewBox: "0 0 16 16", fill: "currentColor" }, h("path", { d: "M12.9 1.3 5.9 2.9c-.5.1-.9.6-.9 1.1v6.9c-.3-.1-.7-.2-1-.2-1.2 0-2.2.8-2.2 1.9s1 1.9 2.2 1.9 2.2-.8 2.2-1.9V5.4c0-.3.2-.6.5-.6l5.7-1.3c.3-.1.6.2.6.5v5.3c-.3-.1-.7-.2-1-.2-1.2 0-2.2.8-2.2 1.9s1 1.9 2.2 1.9 2.2-.8 2.2-1.9V2.2c0-.5-.4-1-1.3-.9z" })),
       // 喇叭：macOS 原生样式（SF Symbols 的 speaker.wave.2 形状——实心喇叭 + 两道弧）
       volume: h("svg", { width: 15, height: 15, viewBox: "0 0 16 16", fill: "none" }, h("path", { d: "M8.35 2.72c0-.66-.8-1-1.27-.53L4.6 4.68H2.9c-.61 0-1.1.49-1.1 1.1v4.44c0 .61.49 1.1 1.1 1.1h1.7l2.48 2.49c.47.47 1.27.14 1.27-.53z", fill: "currentColor" }), h("path", { d: "M10.5 5.75c.75.75.75 1.97 0 2.72", stroke: "currentColor", strokeWidth: 1.35, strokeLinecap: "round" }), h("path", { d: "M12.55 3.9c1.72 1.72 1.72 4.5 0 6.22", stroke: "currentColor", strokeWidth: 1.35, strokeLinecap: "round" })),
+      volumeOff: h("svg", { width: 15, height: 15, viewBox: "0 0 16 16", fill: "none" }, h("path", { d: "M8.35 2.72c0-.66-.8-1-1.27-.53L4.6 4.68H2.9c-.61 0-1.1.49-1.1 1.1v4.44c0 .61.49 1.1 1.1 1.1h1.7l2.48 2.49c.47.47 1.27.14 1.27-.53z", fill: "currentColor" }), h("path", { d: "M10.5 6.1l3 3m0-3l-3 3", stroke: "currentColor", strokeWidth: 1.35, strokeLinecap: "round" })),
       folder: officialIcon(["IconFolderOpenRegular", "IconFolderOpenOutlineRegular", "IconFolderOpen16"], 14, h("svg", { width: 13, height: 13, viewBox: "0 0 16 16", fill: "currentColor" }, h("path", { d: "M1.8 3.4c0-.7.5-1.2 1.2-1.2h3c.4 0 .8.2 1 .5l.8 1.1c.1.2.3.3.5.3H13c.7 0 1.2.5 1.2 1.2v7.3c0 .7-.5 1.2-1.2 1.2H3c-.7 0-1.2-.5-1.2-1.2V3.4z" }))),
       refresh: officialIcon(["IconRefreshOutlineRegular", "IconRefreshOutlineMedium", "IconRefreshOutline16"], 14, h("svg", { width: 13, height: 13, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2.2, strokeLinecap: "round", strokeLinejoin: "round" }, h("path", { d: "M21 12a9 9 0 1 1-2.6-6.4" }), h("path", { d: "M21 3.5V10h-6.5" }))),
       edit: officialIcon(["IconEditOutlineRegular", "IconEditOutlineMedium", "IconEditOutline16"], 13, h("svg", { width: 13, height: 13, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" }, h("path", { d: "M17 3.5a2.6 2.6 0 0 1 3.7 3.7L8.4 19.5 3 21l1.5-5.4L17 3.5z" }))),
@@ -1386,6 +1396,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         error: null,
         current: -1,
         playing: false,
+        muted: false,
         buffering: false,
         mode: prefs.mode === "one" ? "one" : "loop",
         time: 0,
@@ -2142,6 +2153,9 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       };
 
       /** 瞬时音量：有音频图就走 GainNode，否则写元素音量（两条路都不写 state）。 */
+      /** 实际输出音量：静音时按 0，`state.volume` 始终保留用户设定值。 */
+      const targetVolume = () => (state.muted ? 0 : state.volume);
+
       const applyVolume = (value: number) => {
         const v = Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
         if (gainNode !== null) {
@@ -2471,12 +2485,12 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           audio.src = url;
           const promise = audio.play();
           if (promise === undefined) {
-            applyVolume(state.volume);
+            applyVolume(targetVolume());
             return;
           }
           // 起播后淡入到用户音量，避免第一帧就是满幅。
           void promise.then(() => {
-            if (!disposed) void rampVolume(state.volume, changeFadeInMs);
+            if (!disposed) void rampVolume(targetVolume(), changeFadeInMs);
             // 起播后把**下一首**挂到空闲元素上，切换时就能直接交叉进入。
             if (!disposed) schedulePrefetch();
           }).catch((error) => {
@@ -3469,11 +3483,11 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             // 从当前瞬时音量（cue 之后是 0）淡入到用户音量。
             const promise = audio.play();
             if (promise === undefined) {
-              applyVolume(state.volume);
+              applyVolume(targetVolume());
               return;
             }
             promise.then(() => {
-              if (!disposed) void rampVolume(state.volume, FADE_PAUSE_MS);
+              if (!disposed) void rampVolume(targetVolume(), FADE_PAUSE_MS);
             }).catch((error) => {
               // 同 attachSource：AbortError 是被打断，不是格式不支持。
               if (error?.name === "NotAllowedError" || error?.name === "AbortError") return;
@@ -3646,7 +3660,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             const ok = await rampVolume(0, FADE_SEEK_MS);
             if (!ok || disposed) return;   // 被更新的拖动接管：这一次不 seek（最后一次赢）
             set({ time: seekAudio(value) });
-            if (!disposed) void rampVolume(state.volume, FADE_SEEK_MS);
+            if (!disposed) void rampVolume(targetVolume(), FADE_SEEK_MS);
           })();
         },
         /** 预热 /session（媒体直连基址）；页面挂载时调一次即可。 */
@@ -3678,7 +3692,8 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           // 用户拖动优先：取消在飞的渐变，否则下一帧就把现值覆盖回去。
           cancelFade();
           applyVolume(value);
-          set({ volume: value });
+          // 拖音量条 = 明确要声音：静音状态一并解除。
+          set({ volume: value, muted: false });
           savePrefs({ volume: value });
         },
         /**
@@ -3883,6 +3898,12 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         },
         cancelComplete: () => set({ pendingComplete: false }),
         clearError: () => set({ error: null }),
+        toggleMute: () => {
+          const next = !state.muted;
+          set({ muted: next });
+          // 走短渐变：直接归零/跳回都会有一声「啪」。
+          void rampVolume(next ? 0 : state.volume, FADE_PAUSE_MS);
+        },
         setCompleteOverwriteCover: (on) => set({ completeOverwriteCover: on === true }),
 
         stopComplete: () => set({ completing: false }),
@@ -4853,7 +4874,13 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           }, ICONS.chevronDown), t("player.close"), "bottom"),
           // 参考 macOS Music：右上角是「喇叭图标 + 长条滑杆」
           h("div", { className: "dshm-playerVolume" },
-            h("span", { className: "dshm-volIcon", "aria-hidden": "true" }, ICONS.volume),
+            withTipWrapped(h("button", {
+              type: "button",
+              className: "dshm-volIcon" + (state.muted ? " dshm-volIcon--muted" : ""),
+              "aria-label": t(state.muted ? "action.unmute" : "action.mute"),
+              "aria-pressed": state.muted,
+              onClick: () => player.toggleMute(),
+            }, ICONS[state.muted ? "volumeOff" : "volume"]), t(state.muted ? "action.unmute" : "action.mute"), "bottom"),
             withTipWrapped(h("input", {
               type: "range",
               className: "dshm-slider dshm-volume dshm-volume--wide",
@@ -5135,7 +5162,13 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             onClick: () => player.toggleMode(),
             "aria-label": state.mode === "loop" ? t("mode.loop") : t("mode.one"),
           }, state.mode === "loop" ? ICONS.repeat : ICONS.repeatOne), state.mode === "loop" ? t("mode.loop") : t("mode.one")),
-          h("span", { className: "dshm-volIcon", "aria-hidden": "true" }, ICONS.volume),
+          withTipWrapped(h("button", {
+            type: "button",
+            className: "dshm-volIcon" + (state.muted ? " dshm-volIcon--muted" : ""),
+            "aria-label": t(state.muted ? "action.unmute" : "action.mute"),
+            "aria-pressed": state.muted,
+            onClick: () => player.toggleMute(),
+          }, ICONS[state.muted ? "volumeOff" : "volume"]), t(state.muted ? "action.unmute" : "action.mute"), "bottom"),
           withTipWrapped(h("input", {
             type: "range",
             className: "dshm-slider dshm-volume",

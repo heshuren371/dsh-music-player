@@ -37,6 +37,10 @@ const UNSTYLED_HOOKS = new Set(['dshm-completeGo', 'dshm-completeCancel', 'dshm-
 const jsOnly = [...jsClasses].filter((c) => !cssClasses.has(c) && !UNSTYLED_HOOKS.has(c));
 check('every class used in JS has a CSS rule', jsOnly.length === 0, jsOnly.join(', '));
 
+// ── 1b. 优先级不许靠 !important（对 .dshm-table td 的覆盖用更高特异性）──────
+const importantHits = (css.match(/!important/g) ?? []).length;
+check('client CSS uses no !important', importantHits === 0, importantHits + ' hit(s)');
+
 // ── 2. @keyframes 必须真的被 animation 引用 ──────────────────────────────
 const kf = [...css.matchAll(/@keyframes ([a-zA-Z0-9_-]+)/g)].map((m) => m[1]);
 const animated = new Set([...css.matchAll(/animation:\s*([^;}]+)/g)].flatMap((m) => [...m[1].matchAll(/[a-zA-Z][\w-]*/g)].map((x) => x[0])));

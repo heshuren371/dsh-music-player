@@ -798,5 +798,23 @@ async function bootAtTransition() {
     'during=' + during + ' after=' + b.state().buffering);
 }
 
+// ── D21：喇叭静音（设定值保留、输出归零、再点恢复、拖音量自动解除）────────────
+{
+  const b = await boot({ search: '?crossfade=0' });   // 无 AudioContext → 元素音量模式
+  await act(async () => { b.player.setVolume(0.6); await b.sleep(60); });
+  const base = b.media.volume;
+  await act(async () => { b.player.toggleMute(); await b.sleep(220); });
+  const muted = { muted: b.state().muted, out: b.media.volume, volume: b.state().volume };
+  await act(async () => { b.player.toggleMute(); await b.sleep(220); });
+  const restored = { muted: b.state().muted, out: b.media.volume };
+  await act(async () => { b.player.toggleMute(); await b.sleep(220); b.player.setVolume(0.4); await b.sleep(60); });
+  const drag = { muted: b.state().muted, volume: b.state().volume };
+  check('D21: 静音输出归零且保留设定值，再点恢复，拖音量自动解除',
+    Math.abs(base - 0.6) < 0.01 && muted.muted === true && muted.out < 0.01 && muted.volume === 0.6
+      && restored.muted === false && Math.abs(restored.out - 0.6) < 0.01
+      && drag.muted === false && drag.volume === 0.4,
+    JSON.stringify({ base, muted, restored, drag }));
+}
+
 console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)');
 process.exit(failures === 0 ? 0 : 1);

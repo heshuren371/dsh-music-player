@@ -42,6 +42,7 @@ D0b 断言「`?crossfade=0` 仍可回到旧路径」；RG / 均衡器 / CORS 等
 不交换绑定 → D4/D6 红 · 退化成串行 → D2 红 · halt 不停空闲元素 → D6 红 | 22 / 25 | §2.21 |
 | `媒体事件随元素迁移` | D12–D13：交换后活动元素仍驱动 timeupdate/ended | 39 | AGENTS |
 | `过渡窗口交互` | D14–D15：窗口内 seek 与 pause 落在活动元素上 | 39 | AGENTS |
+| `静音与 CSS 优先级` | D21 喇叭静音（设定值保留/输出归零/再点恢复/拖条解除）；client CSS 无 `!important`（静态） | 40 | AGENTS |
 | `列表与反馈体验` | 行键盘播放、搜索空态+清除、错误关闭、缓冲反馈（D20） | 40 | AGENTS |
 | `弹层与键盘契约` | 弹层 dialog 语义/焦点锁/滚动锁/Escape + 确认条 Escape + D16–D19 键盘 | 39 | AGENTS |
 | `MV 转码缓存持久化` | `test-mv.mjs`（5 条，不依赖 ffmpeg）：数据区路径 · 预置产物命中 · `/mvfile` 字节一致 · 有界淘汰保留刚用的 · 过期 `.part` 才清；对照三组全红（详见台账） | 33 | AGENTS「MV 转码缓存」 |

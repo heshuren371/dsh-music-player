@@ -2434,3 +2434,25 @@ bundles 也必须用新名** —— 缺任何一处都表现为「插件未激�
 门禁：行键盘、空态+清除、错误关闭、D20 缓冲；四组对照全部精确变红。
 
 未做：音量图标点击静音 —— 需要用户先确认交互（避免与拖拽调节冲突）。
+
+## 5.52 第 41 轮 —— 音量静音 + 去掉 3 处 `!important`
+
+修复：
+
+1. 音量图标改按钮：点击静音/取消静音（`toggleMute()`），图标切到 `volumeOff`、`aria-pressed` 同步；
+   `state.volume` 保留用户设定值，输出按 `targetVolume()` 取 0；拖音量条自动解除静音；底栏喇叭同样可点。
+   渐变走 `rampVolume(…, FADE_PAUSE_MS)`，避免直接归零的「啪」声。
+2. 三处 `!important` 改为按元素选择器提高特异性（`.dshm-table td.dshm-colCover, … th.…`），
+   对手是 `.dshm-table td`（类 + 元素，`0,1,1`）；新规则 `0,2,1` 胜出。
+
+门禁：
+
+- D21：静音输出归零、设定值保留、再点恢复、拖音量解除；对照（不写 muted）→ 红。
+- 静态：`client CSS uses no !important`；对照（重新引入一处）→ 红。
+
+真浏览器验证（ego-lite，Chromium）：把 HEAD 的 `!important` 版 CSS 与当前版 CSS 分别渲染同样的
+`.dshm-table` 标记，逐项比对 `getComputedStyle`（3 类 td + 3 类 th 的 text-align/padding/text-overflow/width），
+old 与 new 完全相同（duration=right/10px/64px；cover=center/4px/clip/44px；actions=center/0/clip/60px）。
+
+说明：DSH Web GUI 的新浏览器会话要求 `dsh web` 令牌，ego-lite 直接打开被鉴权拦下；
+因此验证用的是插件真实 CSS + 真实表格标记（冲突完全在插件 CSS 内部，宿主不参与这条级联）。
