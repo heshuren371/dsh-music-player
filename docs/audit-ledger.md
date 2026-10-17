@@ -2525,3 +2525,20 @@ old 与 new 完全相同（duration=right/10px/64px；cover=center/4px/clip/44px
 
 - 恢复/错误链路（`onError`、`recoverAt` 等）、MV 视频路径（`prepareVideo`/`startWasmVideo`）、
   播放控制与列表元数据。可按同一模式继续拆，每阶段下调棘轮。
+
+## 5.57 第 46 轮 —— createPlayer 拆分阶段 5（剩余全部函数块）
+
+- 迁移 51 个函数块、约 869 行到同级 `createRuntime(core)`：列表/恢复（`applyLibrary`/
+  `restoreLastPlayed`/`load`/`remapCurrent`）、音量与进度（`seekAudio`/`savePosition`）、
+  MV（`prepareVideo`/`startWasmVideo`/`stopWasmVideo`/`schedulePoll`）、播放控制
+  （`playIndex`/`next`/`prev`/`stopAudio`/`visibleRows`/`effective`/`coverFor`）、
+  媒体事件（`bindMedia` 的 6 个处理器）、错误恢复（`onError`/`recoverAt`/
+  `healUnseekableSource`/`escalateToTranscode`）、波形（`loadWaveform`/`prefetchWaveform`）。
+- 50 个依赖用 core getter/setter 注入；可变绑定全部留在 createPlayer。
+- createPlayer 1572 → 836 行；D/E 段、activation、replaygain、MV 全套全绿。
+- 棘轮下调至 ≤845；累计 2696 → 836（-1860，-69%）。
+
+### 收尾说明
+
+createPlayer 现在只剩：初始 state、`set`/listeners、`prefs`、四个 core 接线对象与入口调用。
+继续压缩需要先统一接线对象（四个 core 合并），收益约百行，风险在 api0 依赖面，建议单独评估。

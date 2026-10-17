@@ -278,7 +278,7 @@ if (createPlayerStart >= 0) {
   }
 }
 const createPlayerLines = createPlayerStart < 0 ? 0 : createPlayerEnd - createPlayerStart + 1;
-check('createPlayer stays within its size ratchet', createPlayerStart >= 0 && createPlayerLines <= 1576, createPlayerLines + ' lines');
+check('createPlayer stays within its size ratchet', createPlayerStart >= 0 && createPlayerLines <= 845, createPlayerLines + ' lines');
 const mvViewLine = clientSrcLines.findIndex((line) => /function MusicView\(|const MusicView\s*=/.test(line));
 const mvRefAfterView = clientSrcLines
   .map((text, i) => ({ i, code: codeOf(text) }))

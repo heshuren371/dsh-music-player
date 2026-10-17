@@ -2642,6 +2642,829 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       return { ensureDevice, ensureAudioGraph, resumeGraph, applyVolume, rampVolume, cancelFade, readVolume, applyReplayGain, startRgMeasure, hasRgData, applyEqualizer, probeCrossOriginCors, watchSuspended, releaseElement };
     }
 
+    function createRuntime(core) {
+      /**
+       * 播放运行时的其余职责：列表与恢复、音量/进度、预取、MV、媒体事件、错误恢复。
+       * 依赖用 core getter/setter 注入；可变绑定留在 createPlayer。
+       */
+    const stopAudio = () => {
+      core.playingId = null;
+      core.pauseEpoch += 1;   // 在飞的 startNow 不得把已停掉的播放重新起来
+      core.cancelFade();
+      core.applyVolume(0);
+      core.audio.pause();
+      if (core.idleEl !== null) {
+        // 交叉淡化模式下另一个元素也可能在出声：只停 `audio` 会留下它继续播。
+        try { core.idleEl.pause(); } catch { /* 假元素 */ }
+      }
+      core.audio.removeAttribute("src");
+      core.audio.load();
+    };
+    const mvCacheUrl = (key) => {
+      const encoded = encodeURIComponent(key);
+      if (hasStreamBase()) {
+        return systemStreamBase + "&k=" + encoded;
+      }
+      return endpointBase + "/mvfile?k=" + encoded;
+    };
+    const hasStreamBase = () => typeof systemStreamBase === "string" && systemStreamBase.length > 0;
+    const ensureStreamBase = async () => {
+      if (hasStreamBase()) return true;
+      await Promise.race([loadSystemArtBase(), new Promise((resolve) => setTimeout(resolve, 2000))]);
+      if (hasStreamBase()) return true;
+      invalidateSessionBase();
+      await Promise.race([loadSystemArtBase(true), new Promise((resolve) => setTimeout(resolve, 4000))]);
+      return hasStreamBase();
+    };
+    const streamUrl = (track) => {
+      const rev = "&v=" + (core.state.scannedAt ?? 0);
+      // Desktop：走 token 直连（保住 Range，拖动/快进才不会回到 0 秒）。
+      if (hasStreamBase()) {
+        return systemStreamBase + "&p=" + encodeURIComponent(track.id) + rev;
+      }
+      return endpointBase + "/stream?p=" + encodeURIComponent(track.id) + rev;
+    };
+    const mediaSrcKind = (url: string): string => {
+      if (url === "") return "empty";
+      if (url.startsWith("http")) return url.includes("system-stream") ? "token" : "abs";
+      if (url.includes("/mvfile")) return "mvfile-rel";
+      if (url.startsWith("blob:")) return "blob";
+      return "rel";
+    };
+    const redactSrc = (url: string): string => url.replace(/t=[^&]*/g, "t=***");
+    const logSeek = (asked) => {
+      setTimeout(() => {
+        try {
+          const seekable = core.audio.seekable ?? null;
+          const bounds = seekable !== null && seekable.length > 0
+            ? seekable.start(0).toFixed(1) + ".." + seekable.end(0).toFixed(1) : "-";
+          const src = typeof core.audio.currentSrc === "string" ? core.audio.currentSrc : "";
+          console.info("[dsh-music] seek asked=" + asked.toFixed(1) + " now=" + (Number.isFinite(core.audio.currentTime) ? core.audio.currentTime.toFixed(1) : "?")
+            + " dur=" + (Number.isFinite(core.audio.duration) ? core.audio.duration.toFixed(1) : String(core.audio.duration))
+            + " seekable=" + (seekable === null ? "-" : seekable.length) + "(" + bounds + ")"
+            + " src=" + mediaSrcKind(src) + " err=" + (core.audio.error !== null && core.audio.error !== undefined ? core.audio.error.code : 0)
+            + " base=" + (hasStreamBase() ? "token" : "none") + " ep=" + endpointBase
+            + " url=" + redactSrc(src));
+        } catch { /* 日志失败无所谓 */ }
+      }, 400);
+    };
+    const healUnseekableSource = () => {
+      if (core.disposed) return;
+      const src = typeof core.audio.currentSrc === "string" ? core.audio.currentSrc : "";
+      if (src.includes("system-stream")) return;                       // 已是 token 直连，基址没问题
+      if (!(Number.isFinite(core.audio.duration) && core.audio.duration > 0)) return;
+      const range = core.audio.seekable ?? null;
+      if (range === null) return;                                      // 拿不到可寻址信息就不猜（假元素可能没有这个属性）
+      if (range.length > 0 && range.end(0) > 0) return;                // 能 seek，正常
+      const index = core.state.current;
+      const track = index >= 0 ? core.state.tracks[index] : undefined;
+      if (track === undefined) return;
+      // 换了源就重新开一个窗口（每首歌各有自己的预算）。
+      // ⚠️ 条件必须带 `deadline === 0`：首次调用时 `src` 可能与 `unseekableSrc`
+      // 的初值同为 ""（假元素没有 currentSrc 时就是如此），只判「变了」会导致
+      // deadline 永远停在 0 → 第一行就 `Date.now() > 0` 直接 return，自愈从不执行。
+      if (src !== core.unseekableSrc || core.unseekableHealDeadline === 0) {
+        core.unseekableSrc = src;
+        core.unseekableHealDeadline = Date.now() + core.UNSEEKABLE_HEAL_WINDOW_MS;
+      }
+      if (Date.now() > core.unseekableHealDeadline) return;                 // 窗口内一直没成功：放弃，不再打扰
+      const wasAt = Number.isFinite(core.audio.currentTime) ? core.audio.currentTime : 0;
+      const wasPlaying = core.state.playing;
+      invalidateSessionBase();
+      void (async () => {
+        const usable = await ensureStreamBase();
+        if (core.disposed || core.playingId !== track.id) return;
+        if (!usable) {
+          // ⚠️ 基址还没就绪时**不能一次就放弃**。第一版就是一次性的：第一次尝试压在
+          // 宿主还没准备好的时刻上，失败后永久锁死 —— 真机上等于自愈从未生效。
+          // 退回窗口内再试，由 deadline 收口，不会变成无限重试。
+          scheduleUnseekableHeal(1200);
+          return;
+        }
+        // ⚠️ 按**当前这条源是什么类型**决定怎么修，不能按 track.kind 猜：
+        //   含 `/mvfile` 或 `&k=` → MV 转码缓存文件，要重新问一次 /api/mv 拿缓存键；
+        //   否则                  → 音轨 / 音频流，重建 streamUrl 即可。
+        // 真机教训：`.mov` 走 **WASM 旁路**时元素播的是 `/stream?p=<视频文件>`
+        // （画面由 WASM 解，元素只播音轨），而这时 track.kind 仍是 "video" —— 按 kind
+        // 去 prepareVideo 会去等一次可能长达几分钟的转码，自愈于是永远卡住、源从未被换掉
+        // （用户日志里 url 从第一次 seek 到最后一次完全没变，就是这个原因）。
+        const wasMvCache = src.includes("/mvfile") || src.includes("&k=");
+        const next = wasMvCache ? await prepareVideo(track) : streamUrl(track);
+        if (core.disposed || core.playingId !== track.id) return;
+        if (next === null) { scheduleUnseekableHeal(1200); return; }   // 还没就绪：窗口内再试
+        core.audio.src = next;
+        core.audio.addEventListener("loadedmetadata", () => {
+          if (core.playingId !== track.id) return;
+          if (wasAt > 0 && Number.isFinite(core.audio.duration) && wasAt < core.audio.duration - 0.5) core.audio.currentTime = wasAt;
+          if (wasPlaying) {
+            const promise = core.audio.play();
+            if (promise !== undefined) promise.catch(() => {});
+          }
+        }, { once: true });
+        core.audio.load();
+      })();
+    };
+    const scheduleUnseekableHeal = (delayMs = 700) => {
+      if (core.disposed) return;                                            // 已立闸门：不再排期（§2.10）
+      if (core.unseekableTimer !== null) clearTimeout(core.unseekableTimer);
+      core.unseekableTimer = setTimeout(() => {
+        core.unseekableTimer = null;
+        healUnseekableSource();
+      }, delayMs);
+    };
+    const logAttach = (url: string) => {
+      const kind = mediaSrcKind(url);
+      if (kind === "token") return;
+      console.info("[dsh-music] attach kind=" + kind + " base=" + (hasStreamBase() ? "token" : "none")
+        + " ep=" + endpointBase + " url=" + redactSrc(url));
+    };
+    const seekAudio = (value) => {
+      if (!Number.isFinite(value)) return 0;
+      const known = Number.isFinite(core.audio.duration) && core.audio.duration > 0 ? core.audio.duration : core.state.duration;
+      const at = known > 0 ? Math.max(0, Math.min(known, value)) : Math.max(0, value);
+      // Re-assigning the position we are already at would abort and re-issue
+      // the range request (the native change event lands after pointerup).
+      if (!Number.isFinite(core.audio.currentTime) || Math.abs(core.audio.currentTime - at) > 0.01) core.audio.currentTime = at;
+      return at;
+    };
+    const savePosition = (force) => {
+      if (core.state.current < 0) return;
+      const track = core.state.tracks[core.state.current];
+      if (track === undefined) return;
+      const at = Math.max(0, Math.floor(core.audio.currentTime));
+      if (!force && Math.abs(at - core.lastSavedAt) < 5) return;
+      core.lastSavedAt = at;
+      savePrefs({ last: { id: track.id, time: at } });
+    };
+    const schedulePoll = () => {
+      if (core.disposed || core.pollTimer !== null) return;
+      core.pollTimer = setTimeout(async () => {
+        core.pollTimer = null;
+        if (core.disposed || !core.state.scanning) return;
+        try {
+          applyLibrary(await api("/api/library"));
+        } catch {
+          if (!core.disposed) schedulePoll();
+        }
+      }, 1500);
+    };
+    const applyLibrary = (payload) => {
+      const scanning = payload.scanning === true;
+      const incoming = payload.tracks ?? [];
+      // A host scan reports no rows (library = null while it runs). For a
+      // refresh of the SAME directory, keep the current table and the
+      // scannedAt cache-busters so the list does not blank out mid-scan.
+      const keepRows = scanning && incoming.length === 0 && core.state.dir !== null && payload.dir === core.state.dir;
+      const nextTracks = keepRows ? core.state.tracks : incoming;
+      // 补全结果按稳定 id 保存：库变化时剔除已不在库内的条目，防止旧目录的
+      // 补全串到新目录里的同名文件（id 是相对路径，可能重名）。
+      let nextMeta = core.state.meta;
+      if (!scanning) {
+        const liveIds = new Set(nextTracks.map((track) => track.id));
+        let stale = false;
+        for (const id of Object.keys(core.state.meta)) {
+          if (!liveIds.has(id)) { stale = true; break; }
+        }
+        if (stale) {
+          const pruned = {};
+          for (const track of nextTracks) {
+            if (core.state.meta[track.id] !== undefined) pruned[track.id] = core.state.meta[track.id];
+          }
+          nextMeta = pruned;
+          persistMeta(pruned);
+        }
+      }
+      core.set({
+        dir: payload.dir,
+        tracks: nextTracks,
+        meta: nextMeta,
+        scannedAt: scanning && payload.scannedAt == null ? core.state.scannedAt : (payload.scannedAt ?? null),
+        scanning,
+        scanParsed: payload.scanParsed ?? 0,
+        scanTotal: payload.scanTotal ?? 0,
+        truncated: keepRows ? core.state.truncated : payload.truncated === true,
+        skippedPackages: keepRows ? core.state.skippedPackages : (payload.skippedPackages ?? 0),
+        error: null,
+        pendingDelete: scanning ? core.state.pendingDelete : -1,
+      });
+      if (scanning) {
+        // Keep the current playback untouched while the new scan runs.
+        schedulePoll();
+        return;
+      }
+      // Cover probes are keyed by id: drop ids that left the library so the
+      // map cannot grow across directory switches.
+      const liveIds = new Set(core.state.tracks.map((track) => track.id));
+      for (const id of core.coverKnown.keys()) {
+        if (!liveIds.has(id)) core.coverKnown.delete(id);
+      }
+      remapCurrent();
+      restoreLastPlayed();
+    };
+    const remapCurrent = () => {
+      if (core.playingId === null) return;
+      const nextIndex = core.state.tracks.findIndex((track) => track.id === core.playingId);
+      if (nextIndex >= 0) {
+        if (nextIndex !== core.state.current) core.set({ current: nextIndex });
+        return;
+      }
+      // The playing track vanished from the library: stop for real, not just UI.
+      stopAudio();
+      core.set({ current: -1, playing: false, time: 0, duration: 0 });
+    };
+    const load = async () => {
+      core.set({ loading: true, error: null });
+      try {
+        applyLibrary(await api("/api/library"));
+      } catch (error) {
+        core.set({ error: error instanceof Error ? error.message : String(error) });
+      } finally {
+        core.set({ loading: false });
+      }
+    };
+    const restoreLastPlayed = () => {
+      if (core.lastPlayedRestored || core.state.current >= 0) return;
+      const last = loadPrefs().last;
+      if (last === undefined || typeof last.id !== "string") {
+        // 从未保存过曲目：这次库无论大小都无回补对象，标记完成。
+        core.lastPlayedRestored = true;
+        return;
+      }
+      const index = core.state.tracks.findIndex((track) => track.id === last.id);
+      // 保存过的曲目不在当前库：先不标记完成，等下一次（换目录/刷新）
+      // 载入包含该曲目的库时再回补。
+      if (index < 0) return;
+      core.lastPlayedRestored = true;
+      const track = core.state.tracks[index];
+      core.playingId = track.id;
+      core.set({
+        current: index,
+        duration: typeof track.duration === "number" ? track.duration : 0,
+        mv: track.kind === "video" ? { id: track.id, state: "checking", progress: 0, mode: null, error: null } : null,
+      });
+      core.updateMediaSession();
+      if (track.kind === "video") {
+        // 视频轨：先拿 MV 地址（可能要先转封装），拿到再挂源。
+        void prepareVideo(track).then((url) => {
+          if (url === null || core.playingId !== track.id) return;
+          cueSource(url);          // cue 成暂停态：不调 play，也就不会有 AbortError
+        });
+        return;
+      }
+      // 音频：同样要先等媒体直连基址。用一个 IIFE 包住是因为 streamUrl() 是同步的，
+      // 而基址可能是这次才去取的——不等就会拼出相对地址，Desktop 上丢了 Range，
+      // cue 出来的这首之后一拖进度就回 0 秒（与 MV 同一个根因）。
+      void (async () => {
+        await ensureStreamBase();
+        if (core.playingId !== track.id) return;
+        core.audio.src = streamUrl(track);
+        if (typeof last.time === "number" && last.time > 0) {
+          core.audio.addEventListener("loadedmetadata", () => {
+            // The user may have picked another track before metadata landed:
+            // the stale resume position must not hijack that track.
+            if (core.state.current !== index || core.playingId !== track.id) return;
+            if (Number.isFinite(core.audio.duration) && last.time < core.audio.duration - 1) {
+              core.audio.currentTime = last.time;
+              core.set({ time: last.time });
+            }
+          }, { once: true });
+        }
+      })();
+    };
+    const bindElement = (): boolean => {
+      const ctx = core.device.ctx;
+      const rg = core.device.rg;
+      if (ctx === null || rg === null) return false;
+      let head: AudioNode = rg;
+      if (core.crossfadeOn) {
+        const level = ctx.createGain();
+        level.gain.value = 1;
+        level.connect(rg);
+        core.activeLevelNode = level;
+        head = level;
+      }
+      // 一个媒体元素只能建一次 source；建不上就永久退回元素音量。
+      core.activeSource = ctx.createMediaElementSource(core.audio);
+      core.activeSource.connect(head);
+      return true;
+    };
+    const targetVolume = () => (core.state.muted ? 0 : core.state.volume);
+    const rgForTrack = (track: MusicTrack | undefined): { linear: number; db: number | null } => {
+      if (track === undefined || core.state.rgMode === "off") return { linear: 1, db: null };
+      const album = core.state.rgMode === "album";
+      // 优先级：**标签 > 测量**。同一优先级里 album 优先、缺则回退 track。
+      // 测量值只到 track 级（v1 不按专辑合并测量），所以 album 模式的测量兜底就是它。
+      const firstFinite = (list: (number | null | undefined)[]): number | undefined =>
+        list.find((v): v is number => typeof v === "number" && Number.isFinite(v));
+      const rawDb = firstFinite(album
+        ? [track.rgAlbumGainDb, track.rgTrackGainDb, track.rgMeasuredGainDb]
+        : [track.rgTrackGainDb, track.rgMeasuredGainDb]);
+      if (rawDb === undefined) return { linear: 1, db: null };
+      const gainDb = Math.max(core.RG_GAIN_MIN_DB, Math.min(core.RG_GAIN_MAX_DB, rawDb));
+      const preampDb = Math.max(core.RG_PREAMP_MIN_DB, Math.min(core.RG_PREAMP_MAX_DB, core.state.rgPreampDb));
+      const db = gainDb + preampDb;
+      let linear = Math.pow(10, db / 20);
+      const rawPeak = firstFinite(album
+        ? [track.rgAlbumPeak, track.rgTrackPeak, track.rgMeasuredPeak]
+        : [track.rgTrackPeak, track.rgMeasuredPeak]);
+      if (core.RG_PREVENT_CLIPPING && typeof rawPeak === "number" && Number.isFinite(rawPeak)
+        && rawPeak > 0 && rawPeak <= core.RG_PEAK_MAX) {
+        linear = Math.min(linear, 1 / rawPeak);
+      }
+      return { linear, db };
+    };
+    const nextTrackForPrefetch = (): MusicTrack | null => {
+      const rows = visibleRows();
+      if (rows.length === 0) return null;
+      const pos = rows.findIndex((row) => row.index === core.state.current);
+      if (pos < 0) return null;
+      const track = core.state.tracks[rows[(pos + 1) % rows.length].index];
+      // 只预取音频：MV 走单元素路径（画面要搬进舞台，换元素的代价与风险都不值得）。
+      if (track === undefined || track.kind === "video") return null;
+      if (core.state.tracks[core.state.current]?.kind === "video") return null;
+      return track;
+    };
+    const scheduleRgPoll = () => {
+      if (core.disposed || core.rgPollTimer !== null) return;
+      core.rgPollTimer = setTimeout(async () => {
+        core.rgPollTimer = null;
+        if (core.disposed || !core.state.rgMeasuring) return;
+        try {
+          const status = await api("/api/measure");
+          const running = status?.running === true;
+          core.set({
+            rgMeasuring: running,
+            rgMeasureDone: Number(status?.done) || 0,
+            rgMeasureTotal: Number(status?.total) || 0,
+          });
+          if (running) {
+            scheduleRgPoll();
+          } else {
+            // 测完刷新一次库：测量值随 payload 下发，客户端据此生效。
+            applyLibrary(await api("/api/library"));
+          }
+        } catch {
+          if (!core.disposed) core.set({ rgMeasuring: false });
+        }
+      }, 1200);
+    };
+    const cueSource = (url) => {
+      logAttach(url);
+      // cue 是暂停态：直接把瞬时音量归零，等用户按播放时由 toggle 淡入。
+      core.cancelFade();
+      core.applyVolume(0);
+      core.audio.src = url;
+    };
+    const prepareVideo = async (track, forcedMode?: string, retry = false) => {
+      // ⚠️ 必须先拿到媒体直连基址再拼 URL。mvCacheUrl() 在基址为空时会退回**相对**
+      // 地址 `/api/dsh-music/mvfile?k=…`，而 Desktop 上相对地址要经 Electron
+      // forwardWebRequest —— **那条路会丢 Range/206**，于是 <video> 认为流不可 seek，
+      // 症状就是「MV 进度条一拖就从头开始播」。
+      // 放在这里而不是每个调用点：5 个调用点里有 4 个不会自己 await
+      // （restoreLastPlayed、两处 error→转码升级、手动转换）。
+      await ensureStreamBase();
+      for (let round = 0; round < 900; round += 1) {
+        if (core.playingId !== track.id) return null;
+        let payload;
+        try {
+          payload = await api("/api/mv?id=" + encodeURIComponent(track.id)
+            + (typeof forcedMode === "string" ? "&mode=" + forcedMode : "")
+            + (retry && round === 0 ? "&retry=1" : ""));
+        } catch (error) {
+          // 与原来 `String(error?.message ?? error)` 逐字等价：catch 变量在
+          // useUnknownInCatchVariables 下是 unknown，用 typeof / in 收窄后取同一个值。
+          const detail = error !== null && (typeof error === "object" || typeof error === "function") && "message" in error
+            ? (error.message ?? error) : error;
+          core.set({ mv: { id: track.id, state: "failed", progress: 0, mode: null, error: String(detail) } });
+          return null;
+        }
+        if (core.playingId !== track.id) return null;
+        if (payload.state === "ready") {
+          core.set({ mv: { id: track.id, state: "ready", progress: 1, mode: payload.mode ?? null, error: null } });
+          // 有 key 就自己拼（Desktop 下用 token 直连，保住 Range）。
+          if (typeof payload.key === "string") return mvCacheUrl(payload.key);
+          // direct：宿主给的 url 是**相对**地址（`/api/dsh-music/stream?p=…`）。相对地址在
+          // Desktop 上经转发会丢 Range（I-02），所以这里自己拼 streamUrl（有 token 基址时
+          // 就是绝对地址，没有才退回相对）。
+          if (payload.mode === "direct") return streamUrl(track);
+          if (typeof payload.url === "string") return payload.url;
+        }
+        if (payload.state === "failed") {
+          core.set({ mv: { id: track.id, state: "failed", progress: 0, mode: payload.mode ?? null, error: payload.error ?? null } });
+          return null;
+        }
+        core.set({ mv: { id: track.id, state: "preparing", progress: typeof payload.progress === "number" ? payload.progress : 0, mode: payload.mode ?? null, error: null } });
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      }
+      return null;
+    };
+    const stopWasmVideo = () => {
+      if (core.wasmAbort !== null) core.wasmAbort.aborted = true;
+      core.wasmAbort = null;
+    };
+    const wasmAudioPlayable = (track: MusicTrack): boolean =>
+      track.audioCodec === null || track.audioCodec === undefined || core.MV_DIRECT_AUDIO.has(track.audioCodec);
+    const startWasmVideo = async (track, stage) => {
+      if (typeof document === "undefined" || stage === null || stage === undefined) return false;
+      try {
+        const libavUrl = endpointBase + "/mvlib?f=" + encodeURIComponent("@libav.js/variant-webcodecs/dist/libav-6.10.9.0-webcodecs.mjs");
+        const polyUrl = endpointBase + "/mvlib?f=" + encodeURIComponent("libavjs-webcodecs-polyfill/dist/libavjs-webcodecs-polyfill.min.mjs");
+        const mbUrl = endpointBase + "/mvlib?f=" + encodeURIComponent("mediabunny/dist/bundles/mediabunny.min.mjs");
+        const [libav, polyfill, mediabunny] = await Promise.all([import(libavUrl), import(polyUrl), import(mbUrl)]);
+        // 这个包的 ESM 导出是具名 load（不是 README 里那个 LibAVWebCodecs.load）
+        const loadPolyfill = polyfill.load ?? polyfill.LibAVWebCodecs?.load;
+        if (typeof loadPolyfill !== "function") return false;
+        await loadPolyfill.call(polyfill, { polyfill: true, libavOptions: { LibAV: libav.LibAV ?? libav.default ?? libav } });
+        const buffer = await (await fetch(streamUrl(track))).arrayBuffer();
+        const input = new mediabunny.Input({ source: new mediabunny.BlobSource(new Blob([buffer])), formats: mediabunny.ALL_FORMATS });
+        const videoTrack = await input.getPrimaryVideoTrack();
+        if (videoTrack === null || videoTrack === undefined) return false;
+        const sink = new mediabunny.CanvasSink(videoTrack, { width: 1280 });
+        const canvas = document.createElement("canvas");
+        canvas.className = "dshm-mvCanvas";
+        stage.querySelector(".dshm-mvCanvas")?.remove();
+        stage.appendChild(canvas);
+        // 这块 canvas 是上面刚 createElement 出来的、且从未请求过别的上下文，
+        // 所以 "2d" 上下文必然拿得到（getContext 只在类型不支持或已请求过其它
+        // 类型时返回 null）；非空断言因此可证，也没有改变任何失败路径的行为
+        // （原来的实现同样不做判空，只在拿不到时于绘制处抛错并静默停住画面）。
+        const ctx = canvas.getContext("2d")!;
+        const token = { aborted: false };
+        core.wasmAbort = token;
+        void (async () => {
+          for await (const frame of sink.canvases()) {
+            if (token.aborted || core.playingId !== track.id) return;
+            // 跟音频时钟对齐：画面快了就等，慢了就丢帧（丢帧比卡顿好看）
+            const at = typeof frame.timestamp === "number" ? frame.timestamp / 1e6 : 0;
+            const drift = at - (Number.isFinite(core.audio.currentTime) ? core.audio.currentTime : 0);
+            if (drift > 0.15) await new Promise((r) => setTimeout(r, Math.min(200, drift * 500)));
+            if (drift < -0.4) continue;
+            canvas.width = frame.canvas.width;
+            canvas.height = frame.canvas.height;
+            ctx.drawImage(frame.canvas, 0, 0);
+          }
+        })().catch(() => { /* 解到一半失败：画面停住，不影响音频 */ });
+        return true;
+      } catch {
+        stopWasmVideo();
+        return false;
+      }
+    };
+    const cacheWavePeaks = (id: string, peaks: number[]) => {
+      core.wavePeaksCache.delete(id);
+      core.wavePeaksCache.set(id, peaks);
+      while (core.wavePeaksCache.size > core.WAVE_PEAKS_CACHE_MAX) {
+        core.wavePeaksCache.delete(core.wavePeaksCache.keys().next().value as string);
+      }
+    };
+    const prefetchWaveform = async (track: MusicTrack) => {
+      if (core.disposed || core.wavePeaksCache.has(track.id)) return;
+      try {
+        const result = await api("/api/waveform?p=" + encodeURIComponent(track.id));
+        if (core.disposed) return;
+        const peaks = (Array.isArray(result?.peaks) ? result.peaks : [])
+          .filter((v) => typeof v === "number" && Number.isFinite(v));
+        if (peaks.length > 0) cacheWavePeaks(track.id, peaks);
+      } catch {
+        // 预取失败无所谓：真正切到那首时会再请求一次（不报错、不重试风暴）。
+      }
+    };
+    const loadWaveform = async (track: MusicTrack) => {
+      if (core.state.waveTrackId === track.id && core.state.wavePeaks !== null) return;
+      const cached = core.wavePeaksCache.get(track.id);
+      if (cached !== undefined) {
+        // 命中缓存（多是预取来的）：**同步**出图，切歌时看不到空白期。
+        core.set({ wavePeaks: cached, waveTrackId: track.id });
+        return;
+      }
+      core.set({ wavePeaks: null, waveTrackId: track.id });
+      try {
+        const result = await api("/api/waveform?p=" + encodeURIComponent(track.id));
+        // 快速连切时回来的是**上一首**的结果，必须丢弃 —— 否则波形与正在播的歌对不上。
+        if (core.state.waveTrackId !== track.id) return;
+        const raw = Array.isArray(result?.peaks) ? result.peaks : [];
+        const peaks = raw.filter((v) => typeof v === "number" && Number.isFinite(v));
+        if (peaks.length > 0) cacheWavePeaks(track.id, peaks);
+        core.set({ wavePeaks: peaks.length > 0 ? peaks : null });
+      } catch {
+        core.set({ wavePeaks: null });
+      }
+    };
+    const playIndex = (index) => {
+      const track = core.state.tracks[index];
+      if (track === undefined) return;
+      // 手动切歌 vs 曲末自动接下一首：fooyin 给后者更长的过渡（700ms vs 300ms）。
+      const auto = core.advanceIsAuto;
+      core.advanceIsAuto = false;
+      core.changeFadeOutMs = auto ? core.FADE_AUTO_OUT_MS : core.FADE_CHANGE_OUT_MS;
+      core.changeFadeInMs = auto ? core.FADE_AUTO_IN_MS : core.FADE_CHANGE_IN_MS;
+      core.resumeAttempts = 0;
+      core.skipAttempts = 0;
+      core.lastFailureAt = 0;
+      core.playingId = track.id;
+      stopWasmVideo();   // 换曲：停掉上一条的 WASM 解码循环
+      // 手动重新播这一首时给升级一次新机会：升级标记只防「一次播放里失败→升级→再失败」
+      // 的死循环，不是「这一首永久只能直出」。不清它，失败过一次的歌就再也升不了级
+      // （症状：回去再播还是没声音，只有刷新页面才好）。
+      if (track.kind === "video") core.mvEscalated.delete(track.id);
+      core.set({
+        current: index,
+        time: 0,
+        duration: typeof track.duration === "number" ? track.duration : 0,
+        mv: track.kind === "video" ? { id: track.id, state: "checking", progress: 0, mode: null, error: null } : null,
+      });
+      savePrefs({ last: { id: track.id, time: 0 } });
+      void loadWaveform(track);
+      core.updateMediaSession();
+      if (track.kind === "video") {
+        void (async () => {
+          await ensureStreamBase();   // 先拿到媒体直连基址（拖不动进度就是它没拿到）
+          // 1) 浏览器没有这个解码器 → 先试 WASM 旁路（不碰文件、不用等转码）。
+          // 前提是**音轨元素自己能解**：WASM 只补画面，音轨解不了就是有画面没声音。
+          if (core.WASM_CODECS.has(track.videoCodec ?? "") && wasmAudioPlayable(track)) {
+            await new Promise((resolve) => setTimeout(resolve, 30));   // 等 React 把画面槽渲染出来
+            const stage = typeof document === "undefined" ? null : document.querySelector(".dshm-mvStage");
+            const ok = await startWasmVideo(track, stage);
+            if (ok && core.playingId === track.id) {
+              core.attachSource(streamUrl(track));     // 音频照旧走 /stream
+              core.set({ mv: { id: track.id, state: "ready", progress: 1, mode: "wasm", error: null } });
+              guardAudioTrack(track);             // 画面由 WASM 出，音轨仍归元素：它没解出来就是没声
+              return;
+            }
+          }
+          // 2) 退回只读缓存转码（同样不改用户文件）
+          const url = await prepareVideo(track);
+          if (url === null || core.playingId !== track.id) return;
+          core.attachSource(url);
+          guardVideoPicture(track);
+          guardAudioTrack(track);
+        })();
+        return;
+      }
+      // 音频：先等媒体直连基址再挂源（拿不到就退回相对地址，播放不受影响）。
+      void (async () => {
+        await ensureStreamBase();
+        if (core.playingId !== track.id) return;
+        core.attachSource(streamUrl(track));
+      })();
+      return;
+    };
+    const effective = (track) => {
+      if (track === undefined) return undefined;
+      const meta = core.state.meta[track.id];
+      if (meta === undefined) return track;
+      return {
+        ...track,
+        title: typeof meta.title === "string" && meta.title.length > 0 ? meta.title : track.title,
+        artist: typeof meta.artist === "string" && meta.artist.length > 0 ? meta.artist : track.artist,
+        album: typeof meta.album === "string" && meta.album.length > 0 ? meta.album : undefined,
+      };
+    };
+    const coverFor = (track) => {
+      const meta = track === undefined ? undefined : core.state.meta[track.id];
+      if (meta !== undefined && typeof meta.cover === "string" && meta.cover.length > 0) return artUrl(meta.cover);
+      return coverUrl(track === undefined ? "" : track.id);
+    };
+    const visibleRows = () => {
+      const cache = core.rowsCache;
+      if (cache !== null && cache.tracks === core.state.tracks && cache.query === core.state.query
+        && cache.sortKey === core.state.sortKey && cache.sortDir === core.state.sortDir
+        && cache.meta === core.state.meta) {
+        return cache.rows;
+      }
+      const query = core.state.query.trim().toLowerCase();
+      let rows;
+      if (query.length === 0) {
+        rows = core.state.tracks.map((track, index) => ({ track, index }));
+      } else {
+        rows = [];
+        for (let index = 0; index < core.state.tracks.length; index += 1) {
+          const track = core.state.tracks[index];
+          const item = effective(track);
+          const haystack = (item.title + " " + (item.artist ?? "") + " " + track.name).toLowerCase();
+          if (haystack.includes(query)) rows.push({ track, index });
+        }
+      }
+      if (core.state.sortKey !== "none") {
+        rows = [...rows].sort((a, b) => {
+          const dir = core.state.sortDir === "asc" ? 1 : -1;
+          const va = effective(a.track)[core.state.sortKey];
+          const vb = effective(b.track)[core.state.sortKey];
+          if (va == null && vb == null) return a.index - b.index;
+          if (va == null) return 1;
+          if (vb == null) return -1;
+          const order = typeof va === "number" && typeof vb === "number"
+            ? va - vb
+            : String(va).localeCompare(String(vb), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
+          return dir * (order || (a.index - b.index));
+        });
+      }
+      core.rowsCache = { tracks: core.state.tracks, query: core.state.query, sortKey: core.state.sortKey, sortDir: core.state.sortDir, meta: core.state.meta, rows };
+      return rows;
+    };
+    const next = () => {
+      const rows = visibleRows();
+      if (rows.length === 0) return;
+      // 当前曲目不在可见列表里（被筛选掉）时，从第一行开始。
+      const pos = rows.findIndex((row) => row.index === core.state.current);
+      playIndex(rows[(pos + 1) % rows.length].index);
+    };
+    const prev = () => {
+      const rows = visibleRows();
+      if (rows.length === 0) return;
+      // macOS Music behavior: beyond 3s into the song, "previous" restarts it.
+      if (core.audio.currentTime > 3 && core.state.current >= 0) {
+        core.audio.currentTime = 0;
+        return;
+      }
+      const pos = rows.findIndex((row) => row.index === core.state.current);
+      playIndex(rows[pos <= 0 ? rows.length - 1 : pos - 1].index);
+    };
+    const onTimeupdate = (el: HTMLVideoElement) => {
+      if (el !== core.audio || core.state.current < 0) return;
+      const live = core.audio.currentTime;
+      // Playback moved 5s past the last failure: that failure is behind us,
+      // so a later, independent bad spot gets its own retry budget again.
+      if (core.lastFailureAt > 0 && live > core.lastFailureAt + 5) {
+        core.resumeAttempts = 0;
+        core.skipAttempts = 0;
+        core.lastFailureAt = 0;
+      }
+      const liveDuration = Number.isFinite(core.audio.duration) && core.audio.duration > 0 ? core.audio.duration : core.state.duration;
+      // The progress bar follows the audio clock itself (rAF), so publishing
+      // every ~4Hz timeupdate would only re-render the track list: publish on
+      // the whole second, or immediately when the duration finally arrives.
+      if (liveDuration !== core.state.duration || Math.floor(live) !== Math.floor(core.state.time)) {
+        core.set({ time: live, duration: liveDuration });
+        // 同一处节流（≈1Hz）顺手把进度推给系统 Now Playing 的进度条。
+        core.updatePositionState();
+      }
+      savePosition(false);
+    };
+    const coverUrl = (id) => endpointBase + "/cover?p=" + encodeURIComponent(id) + "&v=" + (core.state.scannedAt ?? 0);
+    const onPlay = (el: HTMLVideoElement) => {
+      if (el !== core.audio) return;
+      core.errorStreak = 0;
+      core.set({ playing: true, error: null });
+      core.updateMediaSession();
+    };
+    const onPause = (el: HTMLVideoElement) => {
+      if (el !== core.audio) return;
+      core.set({ playing: false });
+      savePosition(true);
+      core.updateMediaSession();
+    };
+    const onPageHide = () => { savePosition(true); };
+    window.addEventListener("pagehide", onPageHide);
+    const onEnded = (el: HTMLVideoElement) => {
+      if (el !== core.audio) return;
+      if (core.state.mode === "one") {
+        core.audio.currentTime = 0;
+        const promise = core.audio.play();
+        if (promise !== undefined) promise.catch(() => {});
+      } else {
+        core.advanceIsAuto = true;   // 曲末自动接下一首：用更长的过渡（fooyin autoChange）
+        next();
+      }
+    };
+    const onLoadedMetadata = (el: HTMLVideoElement) => {
+      if (el !== core.audio) return;
+      scheduleUnseekableHeal();
+    };
+    const onWaiting = (el: HTMLVideoElement) => {
+      if (el !== core.audio || !core.state.playing) return;
+      core.set({ buffering: true });
+    };
+    const onResumed = (el: HTMLVideoElement) => {
+      if (el !== core.audio) return;
+      core.set({ buffering: false });
+    };
+    const recoverAt = (failedTrack, failedIndex, target, delay) => {
+      setTimeout(() => {
+        if (core.state.current !== failedIndex || core.playingId !== failedTrack.id) return;
+        // 必须**先等基址**：不等就会拼出相对地址，Desktop 上丢了 Range ⇒ 之后一拖就回 0
+        // （§2.16「降级成不可 seek 的源比等待更糟」）。
+        void (async () => {
+          await ensureStreamBase();
+          if (core.disposed || core.state.current !== failedIndex || core.playingId !== failedTrack.id) return;
+          core.audio.src = streamUrl(failedTrack);
+          core.audio.addEventListener("loadedmetadata", () => {
+            if (core.state.current !== failedIndex || core.playingId !== failedTrack.id) return;
+            if (Number.isFinite(core.audio.duration)) {
+              core.audio.currentTime = Math.min(target, Math.max(0, core.audio.duration - 1));
+            }
+          }, { once: true });
+          const promise = core.audio.play();
+          if (promise !== undefined) promise.catch(() => {});
+        })();
+      }, delay);
+    };
+    const escalateToTranscode = (track) => {
+      if (core.mvEscalated.has(track.id)) return;
+      core.mvEscalated.add(track.id);
+      core.set({ mv: { id: track.id, state: "preparing", progress: 0, mode: "transcode", error: null } });
+      void prepareVideo(track, "transcode").then((url) => {
+        if (url === null || core.playingId !== track.id) return;
+        core.attachSource(url);
+      });
+    };
+    const guardVideoPicture = (track) => {
+      setTimeout(() => {
+        if (core.playingId !== track.id) return;
+        const current = core.state.tracks[core.state.current];
+        if (current === undefined || current.kind !== "video") return;
+        if (Number(core.audio.videoWidth ?? 1) > 0 || core.audio.readyState < 2) return;
+        escalateToTranscode(track);
+      }, 2000);
+    };
+    const guardAudioTrack = (track) => {
+      if (track.audioCodec === null || track.audioCodec === undefined) return;
+      setTimeout(() => {
+        if (core.playingId !== track.id) return;
+        const decoded = (core.audio as unknown as { webkitAudioDecodedByteCount?: number }).webkitAudioDecodedByteCount;
+        if (typeof decoded !== "number" || decoded > 0) return;
+        if (core.audio.paused !== false || core.audio.readyState < 2) return;
+        escalateToTranscode(track);
+      }, 3500);
+    };
+    const onError = (el: HTMLVideoElement) => {
+      if (el !== core.audio || core.state.current < 0) return;
+      core.set({ buffering: false });
+      // ① 优先自愈「token 基址失效」：宿主热重载会换 token（已改为进程级，但历史
+      //    快照仍可能过期），而**音频永远走 system-stream token 直连** —— 一旦失效
+      //    就是「音乐全不能播、MV 照播（/api/mv 返相对地址）」。丢掉缓存，让下面
+      //    的重试路径重新取一次 /session，用新基址重挂。
+      const failedSrc = typeof core.audio.currentSrc === "string" ? core.audio.currentSrc : "";
+      if (failedSrc.includes("system-stream") && !sessionBaseHealed) {
+        sessionBaseHealed = true;
+        invalidateSessionBase();
+        // 立刻用新基址重放本曲（而不是让它退化成「跳过一首」）：
+        // ensureStreamBase 会重新取 /session，streamUrl 于是拿到新 token。
+        const retryTrack = core.state.tracks[core.state.current];
+        if (retryTrack !== undefined) {
+          void (async () => {
+            await ensureStreamBase();
+            if (core.playingId !== retryTrack.id) return;
+            core.attachSource(streamUrl(retryTrack));
+          })();
+          return;
+        }
+      }
+      // 错误分类（借鉴 Feishin 的 MediaError 分派）：`MEDIA_ERR_SRC_NOT_SUPPORTED (4)` 意味着
+      // **格式/源根本不可用** —— 原位置重试与「跳过坏区」都救不了它，直接走「放弃 + 自动下一首」，
+      // 省掉 1 次重试 + 2 次跳区（每次 400ms，还会放出一段垃圾声）。
+      // `MEDIA_ERR_DECODE (3)` 保持现有策略（跳坏区对**局部**坏帧是对的）；`NETWORK (2)` 走重试。
+      const mediaErrorCode = typeof core.audio.error?.code === "number" ? core.audio.error.code : 0;
+      const hopelessSource = mediaErrorCode === 4;
+      const failedIndex = core.state.current;
+      const failedTrack = core.state.tracks[failedIndex];
+      // MV 直出失败（容器解不了 / 该构建没有这个解码器）：升级成 ffmpeg 转码再试一次。
+      if (failedTrack !== undefined && failedTrack.kind === "video" && !core.mvEscalated.has(failedTrack.id)) {
+        core.mvEscalated.add(failedTrack.id);
+        core.set({ mv: { id: failedTrack.id, state: "preparing", progress: 0, mode: "transcode", error: null } });
+        void prepareVideo(failedTrack, "transcode").then((url) => {
+          if (url === null || core.playingId !== failedTrack.id) return;
+          core.attachSource(url);
+        });
+        return;
+      }
+      const resumeAt = Number.isFinite(core.audio.currentTime) ? core.audio.currentTime : 0;
+      core.errorStreak += 1;
+      const knownDuration = Number.isFinite(core.audio.duration) && core.audio.duration > 0 ? core.audio.duration : core.state.duration;
+      // 1) 流中途被切断（宿主 requestTimeout 截断长连接、瞬时网络错误等）：
+      //    原位置重试一次，恢复后 timeupdate 会把预算清零。
+      const mayRetrySame = !hopelessSource && failedTrack !== undefined && resumeAt > 0 && core.resumeAttempts < 1
+        && (!Number.isFinite(core.audio.duration) || resumeAt < core.audio.duration - 2);
+      if (mayRetrySame) {
+        core.resumeAttempts += 1;
+        core.lastFailureAt = resumeAt;
+        recoverAt(failedTrack, failedIndex, resumeAt, 400);
+        return;
+      }
+      // 2) 同一位置再次失败 = 文件局部坏帧（坏源/下载损坏）：
+      //    向前跳过坏区继续播放，而不是让几 KB 垃圾废掉整首歌。
+      const jump = hopelessSource ? undefined : core.FAILURE_JUMPS[core.skipAttempts];
+      if (failedTrack !== undefined && resumeAt > 0 && jump !== undefined
+        && (knownDuration === 0 || resumeAt + jump < knownDuration - 1)) {
+        const target = resumeAt + jump;
+        core.skipAttempts += 1;
+        core.lastFailureAt = target;
+        core.set({ time: target });
+        recoverAt(failedTrack, failedIndex, target, 400);
+        return;
+      }
+      // 3) 放弃本曲：提示 + 列表循环下自动跳下一首（每一行都失败后停手）。
+      core.set({ playing: false, error: translate("error.unsupported") });
+      const rowCount = visibleRows().length;
+      if (core.state.mode === "loop" && rowCount > 1 && core.errorStreak < rowCount) {
+        setTimeout(() => {
+          if (core.state.error !== null && core.state.current === failedIndex && !core.state.playing) next();
+        }, 600);
+      }
+    };
+      return { stopAudio, mvCacheUrl, hasStreamBase, ensureStreamBase, streamUrl, mediaSrcKind, redactSrc, logSeek, healUnseekableSource, scheduleUnseekableHeal, logAttach, seekAudio, savePosition, schedulePoll, applyLibrary, remapCurrent, load, restoreLastPlayed, bindElement, targetVolume, rgForTrack, nextTrackForPrefetch, scheduleRgPoll, cueSource, prepareVideo, stopWasmVideo, wasmAudioPlayable, startWasmVideo, cacheWavePeaks, prefetchWaveform, loadWaveform, playIndex, effective, coverFor, visibleRows, next, prev, onTimeupdate, coverUrl, onPlay, onPause, onPageHide, onEnded, onLoadedMetadata, onWaiting, onResumed, recoverAt, escalateToTranscode, guardVideoPicture, guardAudioTrack, onError };
+    }
+
     function createPlayer() {
       /**
        * 媒体元素用 <video>：音频文件本来就能播，MV 才有画面可显示（一个元素搞定两种媒体，
@@ -2811,19 +3634,85 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * （§2.10）。先把瞬时音量落到 0 再 pause，至少不是「满幅被掐断」。
        * 有停止按钮的交互式停止会走 toggle 的暂停路径（那条有淡出）。
        */
-      const stopAudio = () => {
-        playingId = null;
-        pauseEpoch += 1;   // 在飞的 startNow 不得把已停掉的播放重新起来
-        cancelFade();
-        applyVolume(0);
-        audio.pause();
-        if (idleEl !== null) {
-          // 交叉淡化模式下另一个元素也可能在出声：只停 `audio` 会留下它继续播。
-          try { idleEl.pause(); } catch { /* 假元素 */ }
-        }
-        audio.removeAttribute("src");
-        audio.load();
+      const runtimeCore = {
+        get FADE_AUTO_IN_MS() { return FADE_AUTO_IN_MS; },
+        get FADE_AUTO_OUT_MS() { return FADE_AUTO_OUT_MS; },
+        get FADE_CHANGE_IN_MS() { return FADE_CHANGE_IN_MS; },
+        get FADE_CHANGE_OUT_MS() { return FADE_CHANGE_OUT_MS; },
+        get FAILURE_JUMPS() { return FAILURE_JUMPS; },
+        get MV_DIRECT_AUDIO() { return MV_DIRECT_AUDIO; },
+        get RG_GAIN_MAX_DB() { return RG_GAIN_MAX_DB; },
+        get RG_GAIN_MIN_DB() { return RG_GAIN_MIN_DB; },
+        get RG_PEAK_MAX() { return RG_PEAK_MAX; },
+        get RG_PREAMP_MAX_DB() { return RG_PREAMP_MAX_DB; },
+        get RG_PREAMP_MIN_DB() { return RG_PREAMP_MIN_DB; },
+        get RG_PREVENT_CLIPPING() { return RG_PREVENT_CLIPPING; },
+        get UNSEEKABLE_HEAL_WINDOW_MS() { return UNSEEKABLE_HEAL_WINDOW_MS; },
+        get WASM_CODECS() { return WASM_CODECS; },
+        get WAVE_PEAKS_CACHE_MAX() { return WAVE_PEAKS_CACHE_MAX; },
+        get activeLevelNode() { return activeLevelNode; },
+        set activeLevelNode(value) { activeLevelNode = value; },
+        get activeSource() { return activeSource; },
+        set activeSource(value) { activeSource = value; },
+        get advanceIsAuto() { return advanceIsAuto; },
+        set advanceIsAuto(value) { advanceIsAuto = value; },
+        get applyVolume() { return applyVolume; },
+        get attachSource() { return attachSource; },
+        get audio() { return audio; },
+        set audio(value) { audio = value; },
+        get cancelFade() { return cancelFade; },
+        get changeFadeInMs() { return changeFadeInMs; },
+        set changeFadeInMs(value) { changeFadeInMs = value; },
+        get changeFadeOutMs() { return changeFadeOutMs; },
+        set changeFadeOutMs(value) { changeFadeOutMs = value; },
+        get coverKnown() { return coverKnown; },
+        get crossfadeOn() { return crossfadeOn; },
+        get device() { return device; },
+        get disposed() { return disposed; },
+        set disposed(value) { disposed = value; },
+        get errorStreak() { return errorStreak; },
+        set errorStreak(value) { errorStreak = value; },
+        get idleEl() { return idleEl; },
+        set idleEl(value) { idleEl = value; },
+        get lastFailureAt() { return lastFailureAt; },
+        set lastFailureAt(value) { lastFailureAt = value; },
+        get lastPlayedRestored() { return lastPlayedRestored; },
+        set lastPlayedRestored(value) { lastPlayedRestored = value; },
+        get lastSavedAt() { return lastSavedAt; },
+        set lastSavedAt(value) { lastSavedAt = value; },
+        get mvEscalated() { return mvEscalated; },
+        get pauseEpoch() { return pauseEpoch; },
+        set pauseEpoch(value) { pauseEpoch = value; },
+        get playingId() { return playingId; },
+        set playingId(value) { playingId = value; },
+        get pollTimer() { return pollTimer; },
+        set pollTimer(value) { pollTimer = value; },
+        get resumeAttempts() { return resumeAttempts; },
+        set resumeAttempts(value) { resumeAttempts = value; },
+        get rgPollTimer() { return rgPollTimer; },
+        set rgPollTimer(value) { rgPollTimer = value; },
+        get rowsCache() { return rowsCache; },
+        set rowsCache(value) { rowsCache = value; },
+        get set() { return set; },
+        get skipAttempts() { return skipAttempts; },
+        set skipAttempts(value) { skipAttempts = value; },
+        get state() { return state; },
+        set state(value) { state = value; },
+        get unseekableHealDeadline() { return unseekableHealDeadline; },
+        set unseekableHealDeadline(value) { unseekableHealDeadline = value; },
+        get unseekableSrc() { return unseekableSrc; },
+        set unseekableSrc(value) { unseekableSrc = value; },
+        get unseekableTimer() { return unseekableTimer; },
+        set unseekableTimer(value) { unseekableTimer = value; },
+        get updateMediaSession() { return updateMediaSession; },
+        get updatePositionState() { return updatePositionState; },
+        get wasmAbort() { return wasmAbort; },
+        set wasmAbort(value) { wasmAbort = value; },
+        get wavePeaksCache() { return wavePeaksCache; },
       };
+      const runtime = createRuntime(runtimeCore);
+      const { stopAudio, ensureStreamBase, streamUrl, logSeek, logAttach, seekAudio, applyLibrary, load, bindElement, targetVolume, rgForTrack, nextTrackForPrefetch, scheduleRgPoll, prepareVideo, stopWasmVideo, prefetchWaveform, playIndex, effective, coverFor, visibleRows, next, prev, onTimeupdate, coverUrl, onPlay, onPause, onPageHide, onEnded, onLoadedMetadata, onWaiting, onResumed, onError } = runtime;
+
 
       /**
        * 断开一个本代接进设备的节点（音源 / 电平）。释放路径要容忍三件事：空值、
@@ -2832,19 +3721,11 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 
       /** Range-stream URL for one track, revisioned by the current scan. */
       /** MV 转码缓存文件的地址：Desktop 下同样走 token 直连（否则拖不动进度）。 */
-      const mvCacheUrl = (key) => {
-        const encoded = encodeURIComponent(key);
-        if (hasStreamBase()) {
-          return systemStreamBase + "&k=" + encoded;
-        }
-        return endpointBase + "/mvfile?k=" + encoded;
-      };
       /**
        * 是否运行在 DSH Desktop。**每次调用现算**，不看模块加载时抓的 window.dshDesktop
        * —— 插件先于产品 API 注入执行时那个值是 undefined，于是媒体一直用相对地址，
        * 经 Desktop 转发后 Range 丢失 → seekable=[0,0] → 一拖就回 0 秒（实测读数如此）。
        */
-      const hasStreamBase = () => typeof systemStreamBase === "string" && systemStreamBase.length > 0;
       /**
        * 等一次 /session（媒体直连基址）。返回是否**真的**拿到了。
        *
@@ -2853,22 +3734,6 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * 秒。所以先给一次预算，还没有就**作废缓存强制重取**再来一次 —— 第二次会走
        * `/session` 的回环回落路径（见 loadSystemArtBase），这正是 Desktop 上唯一能走通的路。
        */
-      const ensureStreamBase = async () => {
-        if (hasStreamBase()) return true;
-        await Promise.race([loadSystemArtBase(), new Promise((resolve) => setTimeout(resolve, 2000))]);
-        if (hasStreamBase()) return true;
-        invalidateSessionBase();
-        await Promise.race([loadSystemArtBase(true), new Promise((resolve) => setTimeout(resolve, 4000))]);
-        return hasStreamBase();
-      };
-      const streamUrl = (track) => {
-        const rev = "&v=" + (state.scannedAt ?? 0);
-        // Desktop：走 token 直连（保住 Range，拖动/快进才不会回到 0 秒）。
-        if (hasStreamBase()) {
-          return systemStreamBase + "&p=" + encodeURIComponent(track.id) + rev;
-        }
-        return endpointBase + "/stream?p=" + encodeURIComponent(track.id) + rev;
-      };
 
       /** Move the audio clock (clamped to the track) without touching store state. */
       /** 后台日志（不占界面）：排查"拖不动进度"用，DevTools 控制台可见。 */
@@ -2877,32 +3742,8 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * 所以分类必须**无歧义**：空串 / blob: / dsh-app:// / 相对路径原来会被
        * 一起算成 `rel`，等于看不出到底是哪一路。
        */
-      const mediaSrcKind = (url: string): string => {
-        if (url === "") return "empty";
-        if (url.startsWith("http")) return url.includes("system-stream") ? "token" : "abs";
-        if (url.includes("/mvfile")) return "mvfile-rel";
-        if (url.startsWith("blob:")) return "blob";
-        return "rel";
-      };
       /** 日志里不得出现能力 token（§2.9 凭据不进日志）。 */
-      const redactSrc = (url: string): string => url.replace(/t=[^&]*/g, "t=***");
 
-      const logSeek = (asked) => {
-        setTimeout(() => {
-          try {
-            const seekable = audio.seekable ?? null;
-            const bounds = seekable !== null && seekable.length > 0
-              ? seekable.start(0).toFixed(1) + ".." + seekable.end(0).toFixed(1) : "-";
-            const src = typeof audio.currentSrc === "string" ? audio.currentSrc : "";
-            console.info("[dsh-music] seek asked=" + asked.toFixed(1) + " now=" + (Number.isFinite(audio.currentTime) ? audio.currentTime.toFixed(1) : "?")
-              + " dur=" + (Number.isFinite(audio.duration) ? audio.duration.toFixed(1) : String(audio.duration))
-              + " seekable=" + (seekable === null ? "-" : seekable.length) + "(" + bounds + ")"
-              + " src=" + mediaSrcKind(src) + " err=" + (audio.error !== null && audio.error !== undefined ? audio.error.code : 0)
-              + " base=" + (hasStreamBase() ? "token" : "none") + " ep=" + endpointBase
-              + " url=" + redactSrc(src));
-          } catch { /* 日志失败无所谓 */ }
-        }, 400);
-      };
 
       /**
        * 「一拖就回 0 秒」的可观测判据自愈（第 13 轮）。
@@ -2921,101 +3762,13 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       let unseekableTimer: ReturnType<typeof setTimeout> | null = null;
       /** 自愈窗口：只有源真的不可 seek 才会进来，所以在这里等基址是值得的（有界，非无限）。 */
       const UNSEEKABLE_HEAL_WINDOW_MS = 20000;
-      const healUnseekableSource = () => {
-        if (disposed) return;
-        const src = typeof audio.currentSrc === "string" ? audio.currentSrc : "";
-        if (src.includes("system-stream")) return;                       // 已是 token 直连，基址没问题
-        if (!(Number.isFinite(audio.duration) && audio.duration > 0)) return;
-        const range = audio.seekable ?? null;
-        if (range === null) return;                                      // 拿不到可寻址信息就不猜（假元素可能没有这个属性）
-        if (range.length > 0 && range.end(0) > 0) return;                // 能 seek，正常
-        const index = state.current;
-        const track = index >= 0 ? state.tracks[index] : undefined;
-        if (track === undefined) return;
-        // 换了源就重新开一个窗口（每首歌各有自己的预算）。
-        // ⚠️ 条件必须带 `deadline === 0`：首次调用时 `src` 可能与 `unseekableSrc`
-        // 的初值同为 ""（假元素没有 currentSrc 时就是如此），只判「变了」会导致
-        // deadline 永远停在 0 → 第一行就 `Date.now() > 0` 直接 return，自愈从不执行。
-        if (src !== unseekableSrc || unseekableHealDeadline === 0) {
-          unseekableSrc = src;
-          unseekableHealDeadline = Date.now() + UNSEEKABLE_HEAL_WINDOW_MS;
-        }
-        if (Date.now() > unseekableHealDeadline) return;                 // 窗口内一直没成功：放弃，不再打扰
-        const wasAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
-        const wasPlaying = state.playing;
-        invalidateSessionBase();
-        void (async () => {
-          const usable = await ensureStreamBase();
-          if (disposed || playingId !== track.id) return;
-          if (!usable) {
-            // ⚠️ 基址还没就绪时**不能一次就放弃**。第一版就是一次性的：第一次尝试压在
-            // 宿主还没准备好的时刻上，失败后永久锁死 —— 真机上等于自愈从未生效。
-            // 退回窗口内再试，由 deadline 收口，不会变成无限重试。
-            scheduleUnseekableHeal(1200);
-            return;
-          }
-          // ⚠️ 按**当前这条源是什么类型**决定怎么修，不能按 track.kind 猜：
-          //   含 `/mvfile` 或 `&k=` → MV 转码缓存文件，要重新问一次 /api/mv 拿缓存键；
-          //   否则                  → 音轨 / 音频流，重建 streamUrl 即可。
-          // 真机教训：`.mov` 走 **WASM 旁路**时元素播的是 `/stream?p=<视频文件>`
-          // （画面由 WASM 解，元素只播音轨），而这时 track.kind 仍是 "video" —— 按 kind
-          // 去 prepareVideo 会去等一次可能长达几分钟的转码，自愈于是永远卡住、源从未被换掉
-          // （用户日志里 url 从第一次 seek 到最后一次完全没变，就是这个原因）。
-          const wasMvCache = src.includes("/mvfile") || src.includes("&k=");
-          const next = wasMvCache ? await prepareVideo(track) : streamUrl(track);
-          if (disposed || playingId !== track.id) return;
-          if (next === null) { scheduleUnseekableHeal(1200); return; }   // 还没就绪：窗口内再试
-          audio.src = next;
-          audio.addEventListener("loadedmetadata", () => {
-            if (playingId !== track.id) return;
-            if (wasAt > 0 && Number.isFinite(audio.duration) && wasAt < audio.duration - 0.5) audio.currentTime = wasAt;
-            if (wasPlaying) {
-              const promise = audio.play();
-              if (promise !== undefined) promise.catch(() => {});
-            }
-          }, { once: true });
-          audio.load();
-        })();
-      };
       /** 换源后延迟一点再判：`seekable` 在 loadedmetadata 当场可能还没填好。 */
-      const scheduleUnseekableHeal = (delayMs = 700) => {
-        if (disposed) return;                                            // 已立闸门：不再排期（§2.10）
-        if (unseekableTimer !== null) clearTimeout(unseekableTimer);
-        unseekableTimer = setTimeout(() => {
-          unseekableTimer = null;
-          healUnseekableSource();
-        }, delayMs);
-      };
       /** 挂非 token 源时记一行 —— Desktop 上这就是「之后拖不动」的前兆，正常路径不刷屏。 */
-      const logAttach = (url: string) => {
-        const kind = mediaSrcKind(url);
-        if (kind === "token") return;
-        console.info("[dsh-music] attach kind=" + kind + " base=" + (hasStreamBase() ? "token" : "none")
-          + " ep=" + endpointBase + " url=" + redactSrc(url));
-      };
 
-      const seekAudio = (value) => {
-        if (!Number.isFinite(value)) return 0;
-        const known = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : state.duration;
-        const at = known > 0 ? Math.max(0, Math.min(known, value)) : Math.max(0, value);
-        // Re-assigning the position we are already at would abort and re-issue
-        // the range request (the native change event lands after pointerup).
-        if (!Number.isFinite(audio.currentTime) || Math.abs(audio.currentTime - at) > 0.01) audio.currentTime = at;
-        return at;
-      };
 
       /** Remember the resume position. localStorage writes are synchronous, so
        *  timeupdate only persists every ~5s; pause/pagehide flush exactly. */
       let lastSavedAt = -1;
-      const savePosition = (force) => {
-        if (state.current < 0) return;
-        const track = state.tracks[state.current];
-        if (track === undefined) return;
-        const at = Math.max(0, Math.floor(audio.currentTime));
-        if (!force && Math.abs(at - lastSavedAt) < 5) return;
-        lastSavedAt = at;
-        savePrefs({ last: { id: track.id, time: at } });
-      };
 
       /** One outstanding library poll while a host-side scan is running. */
       let pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -3035,148 +3788,13 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * 先后引用（新 bundle 先求值、旧 disposer 后跑），谁有权释放必须按号判断。
        */
       let activationGen = 0;
-      const schedulePoll = () => {
-        if (disposed || pollTimer !== null) return;
-        pollTimer = setTimeout(async () => {
-          pollTimer = null;
-          if (disposed || !state.scanning) return;
-          try {
-            applyLibrary(await api("/api/library"));
-          } catch {
-            if (!disposed) schedulePoll();
-          }
-        }, 1500);
-      };
 
-      const applyLibrary = (payload) => {
-        const scanning = payload.scanning === true;
-        const incoming = payload.tracks ?? [];
-        // A host scan reports no rows (library = null while it runs). For a
-        // refresh of the SAME directory, keep the current table and the
-        // scannedAt cache-busters so the list does not blank out mid-scan.
-        const keepRows = scanning && incoming.length === 0 && state.dir !== null && payload.dir === state.dir;
-        const nextTracks = keepRows ? state.tracks : incoming;
-        // 补全结果按稳定 id 保存：库变化时剔除已不在库内的条目，防止旧目录的
-        // 补全串到新目录里的同名文件（id 是相对路径，可能重名）。
-        let nextMeta = state.meta;
-        if (!scanning) {
-          const liveIds = new Set(nextTracks.map((track) => track.id));
-          let stale = false;
-          for (const id of Object.keys(state.meta)) {
-            if (!liveIds.has(id)) { stale = true; break; }
-          }
-          if (stale) {
-            const pruned = {};
-            for (const track of nextTracks) {
-              if (state.meta[track.id] !== undefined) pruned[track.id] = state.meta[track.id];
-            }
-            nextMeta = pruned;
-            persistMeta(pruned);
-          }
-        }
-        set({
-          dir: payload.dir,
-          tracks: nextTracks,
-          meta: nextMeta,
-          scannedAt: scanning && payload.scannedAt == null ? state.scannedAt : (payload.scannedAt ?? null),
-          scanning,
-          scanParsed: payload.scanParsed ?? 0,
-          scanTotal: payload.scanTotal ?? 0,
-          truncated: keepRows ? state.truncated : payload.truncated === true,
-          skippedPackages: keepRows ? state.skippedPackages : (payload.skippedPackages ?? 0),
-          error: null,
-          pendingDelete: scanning ? state.pendingDelete : -1,
-        });
-        if (scanning) {
-          // Keep the current playback untouched while the new scan runs.
-          schedulePoll();
-          return;
-        }
-        // Cover probes are keyed by id: drop ids that left the library so the
-        // map cannot grow across directory switches.
-        const liveIds = new Set(state.tracks.map((track) => track.id));
-        for (const id of coverKnown.keys()) {
-          if (!liveIds.has(id)) coverKnown.delete(id);
-        }
-        remapCurrent();
-        restoreLastPlayed();
-      };
 
       /** After a fresh library arrives, re-map the playing track by stable id. */
-      const remapCurrent = () => {
-        if (playingId === null) return;
-        const nextIndex = state.tracks.findIndex((track) => track.id === playingId);
-        if (nextIndex >= 0) {
-          if (nextIndex !== state.current) set({ current: nextIndex });
-          return;
-        }
-        // The playing track vanished from the library: stop for real, not just UI.
-        stopAudio();
-        set({ current: -1, playing: false, time: 0, duration: 0 });
-      };
 
-      const load = async () => {
-        set({ loading: true, error: null });
-        try {
-          applyLibrary(await api("/api/library"));
-        } catch (error) {
-          set({ error: error instanceof Error ? error.message : String(error) });
-        } finally {
-          set({ loading: false });
-        }
-      };
 
       /** Cue the last played track (paused, at the remembered position). */
       let lastPlayedRestored = false;
-      const restoreLastPlayed = () => {
-        if (lastPlayedRestored || state.current >= 0) return;
-        const last = loadPrefs().last;
-        if (last === undefined || typeof last.id !== "string") {
-          // 从未保存过曲目：这次库无论大小都无回补对象，标记完成。
-          lastPlayedRestored = true;
-          return;
-        }
-        const index = state.tracks.findIndex((track) => track.id === last.id);
-        // 保存过的曲目不在当前库：先不标记完成，等下一次（换目录/刷新）
-        // 载入包含该曲目的库时再回补。
-        if (index < 0) return;
-        lastPlayedRestored = true;
-        const track = state.tracks[index];
-        playingId = track.id;
-        set({
-          current: index,
-          duration: typeof track.duration === "number" ? track.duration : 0,
-          mv: track.kind === "video" ? { id: track.id, state: "checking", progress: 0, mode: null, error: null } : null,
-        });
-        updateMediaSession();
-        if (track.kind === "video") {
-          // 视频轨：先拿 MV 地址（可能要先转封装），拿到再挂源。
-          void prepareVideo(track).then((url) => {
-            if (url === null || playingId !== track.id) return;
-            cueSource(url);          // cue 成暂停态：不调 play，也就不会有 AbortError
-          });
-          return;
-        }
-        // 音频：同样要先等媒体直连基址。用一个 IIFE 包住是因为 streamUrl() 是同步的，
-        // 而基址可能是这次才去取的——不等就会拼出相对地址，Desktop 上丢了 Range，
-        // cue 出来的这首之后一拖进度就回 0 秒（与 MV 同一个根因）。
-        void (async () => {
-          await ensureStreamBase();
-          if (playingId !== track.id) return;
-          audio.src = streamUrl(track);
-          if (typeof last.time === "number" && last.time > 0) {
-            audio.addEventListener("loadedmetadata", () => {
-              // The user may have picked another track before metadata landed:
-              // the stale resume position must not hijack that track.
-              if (state.current !== index || playingId !== track.id) return;
-              if (Number.isFinite(audio.duration) && last.time < audio.duration - 1) {
-                audio.currentTime = last.time;
-                set({ time: last.time });
-              }
-            }, { once: true });
-          }
-        })();
-      };
 
       /**
        * 只换源、**不开播**（刷新后 cue 上一首用的就是这条）。
@@ -3407,30 +4025,12 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       /** 建（或复用）设备上的固定采样率输出流与增益链。返回设备是否可用。 */
 
       /** 把本代媒体元素接进设备：交叉淡化时经每元素电平节点，否则直连 RG（形态与以前逐字一致）。 */
-      const bindElement = (): boolean => {
-        const ctx = device.ctx;
-        const rg = device.rg;
-        if (ctx === null || rg === null) return false;
-        let head: AudioNode = rg;
-        if (crossfadeOn) {
-          const level = ctx.createGain();
-          level.gain.value = 1;
-          level.connect(rg);
-          activeLevelNode = level;
-          head = level;
-        }
-        // 一个媒体元素只能建一次 source；建不上就永久退回元素音量。
-        activeSource = ctx.createMediaElementSource(audio);
-        activeSource.connect(head);
-        return true;
-      };
 
 
       /** 跨源媒体是否已确认宿主回显 ACAO（页级只探一次；失败就永久走直连）。 */
 
       /** 瞬时音量：有音频图就走 GainNode，否则写元素音量（两条路都不写 state）。 */
       /** 实际输出音量：静音时按 0，`state.volume` 始终保留用户设定值。 */
-      const targetVolume = () => (state.muted ? 0 : state.volume);
 
 
       /**
@@ -3439,47 +4039,12 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * ③ Track / Album 两种模式，Album 缺标签回退 Track；
        * ④ 防削波：增益后峰值可能越过满刻度，按 peak **收窄**增益。
        */
-      const rgForTrack = (track: MusicTrack | undefined): { linear: number; db: number | null } => {
-        if (track === undefined || state.rgMode === "off") return { linear: 1, db: null };
-        const album = state.rgMode === "album";
-        // 优先级：**标签 > 测量**。同一优先级里 album 优先、缺则回退 track。
-        // 测量值只到 track 级（v1 不按专辑合并测量），所以 album 模式的测量兜底就是它。
-        const firstFinite = (list: (number | null | undefined)[]): number | undefined =>
-          list.find((v): v is number => typeof v === "number" && Number.isFinite(v));
-        const rawDb = firstFinite(album
-          ? [track.rgAlbumGainDb, track.rgTrackGainDb, track.rgMeasuredGainDb]
-          : [track.rgTrackGainDb, track.rgMeasuredGainDb]);
-        if (rawDb === undefined) return { linear: 1, db: null };
-        const gainDb = Math.max(RG_GAIN_MIN_DB, Math.min(RG_GAIN_MAX_DB, rawDb));
-        const preampDb = Math.max(RG_PREAMP_MIN_DB, Math.min(RG_PREAMP_MAX_DB, state.rgPreampDb));
-        const db = gainDb + preampDb;
-        let linear = Math.pow(10, db / 20);
-        const rawPeak = firstFinite(album
-          ? [track.rgAlbumPeak, track.rgTrackPeak, track.rgMeasuredPeak]
-          : [track.rgTrackPeak, track.rgMeasuredPeak]);
-        if (RG_PREVENT_CLIPPING && typeof rawPeak === "number" && Number.isFinite(rawPeak)
-          && rawPeak > 0 && rawPeak <= RG_PEAK_MAX) {
-          linear = Math.min(linear, 1 / rawPeak);
-        }
-        return { linear, db };
-      };
 
       /** 空闲元素（预取用的另一半）。惰性创建：只在开启交叉淡化时存在。 */
 
       /** 空闲元素接进**同一条常驻输出流**：设备格式仍然只开一次（§2.19 的前提不变）。 */
 
       /** 可见列表里的下一首（与 next() 同一套顺序：播放顺序 = 你看到的顺序）。 */
-      const nextTrackForPrefetch = (): MusicTrack | null => {
-        const rows = visibleRows();
-        if (rows.length === 0) return null;
-        const pos = rows.findIndex((row) => row.index === state.current);
-        if (pos < 0) return null;
-        const track = state.tracks[rows[(pos + 1) % rows.length].index];
-        // 只预取音频：MV 走单元素路径（画面要搬进舞台，换元素的代价与风险都不值得）。
-        if (track === undefined || track.kind === "video") return null;
-        if (state.tracks[state.current]?.kind === "video") return null;
-        return track;
-      };
 
       /** 把下一首挂到空闲元素上（只加载，不出声）。 */
 
@@ -3490,30 +4055,6 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * 否则 teardown 撞上在飞回调会再武装（§2.10 / A3-01）。
        */
       let rgPollTimer: ReturnType<typeof setTimeout> | null = null;
-      const scheduleRgPoll = () => {
-        if (disposed || rgPollTimer !== null) return;
-        rgPollTimer = setTimeout(async () => {
-          rgPollTimer = null;
-          if (disposed || !state.rgMeasuring) return;
-          try {
-            const status = await api("/api/measure");
-            const running = status?.running === true;
-            set({
-              rgMeasuring: running,
-              rgMeasureDone: Number(status?.done) || 0,
-              rgMeasureTotal: Number(status?.total) || 0,
-            });
-            if (running) {
-              scheduleRgPoll();
-            } else {
-              // 测完刷新一次库：测量值随 payload 下发，客户端据此生效。
-              applyLibrary(await api("/api/library"));
-            }
-          } catch {
-            if (!disposed) set({ rgMeasuring: false });
-          }
-        }, 1200);
-      };
 
       /** 让宿主开始测量（幂等：宿主侧正在跑就只返回状态）。 */
 
@@ -3530,13 +4071,6 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 
       /** 把瞬时音量在 ms 内推到 to。返回是否**正常走完**（false = 被更新的动作取消）。 */
       /** 只换源、**不开播**（刷新后 cue 上一首用的就是这条）。 */
-      const cueSource = (url) => {
-        logAttach(url);
-        // cue 是暂停态：直接把瞬时音量归零，等用户按播放时由 toggle 淡入。
-        cancelFade();
-        applyVolume(0);
-        audio.src = url;
-      };
 
       /** 换源并开播（音频与 MV 共用；MV 的 URL 由 /mv 决定）。 */
 
@@ -3549,49 +4083,6 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        */
       /** 已经升级过转码的视频轨（避免失败→升级→再失败的死循环）。 */
       const mvEscalated = new Set<string>();
-      const prepareVideo = async (track, forcedMode?: string, retry = false) => {
-        // ⚠️ 必须先拿到媒体直连基址再拼 URL。mvCacheUrl() 在基址为空时会退回**相对**
-        // 地址 `/api/dsh-music/mvfile?k=…`，而 Desktop 上相对地址要经 Electron
-        // forwardWebRequest —— **那条路会丢 Range/206**，于是 <video> 认为流不可 seek，
-        // 症状就是「MV 进度条一拖就从头开始播」。
-        // 放在这里而不是每个调用点：5 个调用点里有 4 个不会自己 await
-        // （restoreLastPlayed、两处 error→转码升级、手动转换）。
-        await ensureStreamBase();
-        for (let round = 0; round < 900; round += 1) {
-          if (playingId !== track.id) return null;
-          let payload;
-          try {
-            payload = await api("/api/mv?id=" + encodeURIComponent(track.id)
-              + (typeof forcedMode === "string" ? "&mode=" + forcedMode : "")
-              + (retry && round === 0 ? "&retry=1" : ""));
-          } catch (error) {
-            // 与原来 `String(error?.message ?? error)` 逐字等价：catch 变量在
-            // useUnknownInCatchVariables 下是 unknown，用 typeof / in 收窄后取同一个值。
-            const detail = error !== null && (typeof error === "object" || typeof error === "function") && "message" in error
-              ? (error.message ?? error) : error;
-            set({ mv: { id: track.id, state: "failed", progress: 0, mode: null, error: String(detail) } });
-            return null;
-          }
-          if (playingId !== track.id) return null;
-          if (payload.state === "ready") {
-            set({ mv: { id: track.id, state: "ready", progress: 1, mode: payload.mode ?? null, error: null } });
-            // 有 key 就自己拼（Desktop 下用 token 直连，保住 Range）。
-            if (typeof payload.key === "string") return mvCacheUrl(payload.key);
-            // direct：宿主给的 url 是**相对**地址（`/api/dsh-music/stream?p=…`）。相对地址在
-            // Desktop 上经转发会丢 Range（I-02），所以这里自己拼 streamUrl（有 token 基址时
-            // 就是绝对地址，没有才退回相对）。
-            if (payload.mode === "direct") return streamUrl(track);
-            if (typeof payload.url === "string") return payload.url;
-          }
-          if (payload.state === "failed") {
-            set({ mv: { id: track.id, state: "failed", progress: 0, mode: payload.mode ?? null, error: payload.error ?? null } });
-            return null;
-          }
-          set({ mv: { id: track.id, state: "preparing", progress: typeof payload.progress === "number" ? payload.progress : 0, mode: payload.mode ?? null, error: null } });
-          await new Promise((resolve) => setTimeout(resolve, 700));
-        }
-        return null;
-      };
 
       /**
        * WASM 画面旁路：浏览器没有的解码器（mpeg4/DivX、老 mpeg2 等）用
@@ -3600,10 +4091,6 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * 任何一步失败都返回 false，让调用方退回只读缓存转码 —— 绝不改用户的文件。
        */
       let wasmAbort: { aborted: boolean } | null = null;
-      const stopWasmVideo = () => {
-        if (wasmAbort !== null) wasmAbort.aborted = true;
-        wasmAbort = null;
-      };
       const WASM_CODECS = new Set(["mpeg4", "mpeg2", "vc1", "theora", "msmpeg4"]);
       /**
        * Chromium 能自己解的音轨编码（与宿主 `mvPlan` 的 `MV_DIRECT_AUDIO` 同一张表）。
@@ -3612,54 +4099,6 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * 探测不到编码（null）时按宿主同样的口径保守放行。
        */
       const MV_DIRECT_AUDIO = new Set(["aac", "mp3", "opus", "vorbis", "flac", "ac3", "eac3", "pcm", "alac"]);
-      const wasmAudioPlayable = (track: MusicTrack): boolean =>
-        track.audioCodec === null || track.audioCodec === undefined || MV_DIRECT_AUDIO.has(track.audioCodec);
-      const startWasmVideo = async (track, stage) => {
-        if (typeof document === "undefined" || stage === null || stage === undefined) return false;
-        try {
-          const libavUrl = endpointBase + "/mvlib?f=" + encodeURIComponent("@libav.js/variant-webcodecs/dist/libav-6.10.9.0-webcodecs.mjs");
-          const polyUrl = endpointBase + "/mvlib?f=" + encodeURIComponent("libavjs-webcodecs-polyfill/dist/libavjs-webcodecs-polyfill.min.mjs");
-          const mbUrl = endpointBase + "/mvlib?f=" + encodeURIComponent("mediabunny/dist/bundles/mediabunny.min.mjs");
-          const [libav, polyfill, mediabunny] = await Promise.all([import(libavUrl), import(polyUrl), import(mbUrl)]);
-          // 这个包的 ESM 导出是具名 load（不是 README 里那个 LibAVWebCodecs.load）
-          const loadPolyfill = polyfill.load ?? polyfill.LibAVWebCodecs?.load;
-          if (typeof loadPolyfill !== "function") return false;
-          await loadPolyfill.call(polyfill, { polyfill: true, libavOptions: { LibAV: libav.LibAV ?? libav.default ?? libav } });
-          const buffer = await (await fetch(streamUrl(track))).arrayBuffer();
-          const input = new mediabunny.Input({ source: new mediabunny.BlobSource(new Blob([buffer])), formats: mediabunny.ALL_FORMATS });
-          const videoTrack = await input.getPrimaryVideoTrack();
-          if (videoTrack === null || videoTrack === undefined) return false;
-          const sink = new mediabunny.CanvasSink(videoTrack, { width: 1280 });
-          const canvas = document.createElement("canvas");
-          canvas.className = "dshm-mvCanvas";
-          stage.querySelector(".dshm-mvCanvas")?.remove();
-          stage.appendChild(canvas);
-          // 这块 canvas 是上面刚 createElement 出来的、且从未请求过别的上下文，
-          // 所以 "2d" 上下文必然拿得到（getContext 只在类型不支持或已请求过其它
-          // 类型时返回 null）；非空断言因此可证，也没有改变任何失败路径的行为
-          // （原来的实现同样不做判空，只在拿不到时于绘制处抛错并静默停住画面）。
-          const ctx = canvas.getContext("2d")!;
-          const token = { aborted: false };
-          wasmAbort = token;
-          void (async () => {
-            for await (const frame of sink.canvases()) {
-              if (token.aborted || playingId !== track.id) return;
-              // 跟音频时钟对齐：画面快了就等，慢了就丢帧（丢帧比卡顿好看）
-              const at = typeof frame.timestamp === "number" ? frame.timestamp / 1e6 : 0;
-              const drift = at - (Number.isFinite(audio.currentTime) ? audio.currentTime : 0);
-              if (drift > 0.15) await new Promise((r) => setTimeout(r, Math.min(200, drift * 500)));
-              if (drift < -0.4) continue;
-              canvas.width = frame.canvas.width;
-              canvas.height = frame.canvas.height;
-              ctx.drawImage(frame.canvas, 0, 0);
-            }
-          })().catch(() => { /* 解到一半失败：画面停住，不影响音频 */ });
-          return true;
-        } catch {
-          stopWasmVideo();
-          return false;
-        }
-      };
 
       /**
        * 波形客户端缓存（**有界**，§2.2）。宿主那边要跑一次 ffmpeg，客户端这边一次往返也不便宜：
@@ -3667,116 +4106,17 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        */
       const wavePeaksCache = new Map<string, number[]>();
       const WAVE_PEAKS_CACHE_MAX = 30;
-      const cacheWavePeaks = (id: string, peaks: number[]) => {
-        wavePeaksCache.delete(id);
-        wavePeaksCache.set(id, peaks);
-        while (wavePeaksCache.size > WAVE_PEAKS_CACHE_MAX) {
-          wavePeaksCache.delete(wavePeaksCache.keys().next().value as string);
-        }
-      };
 
       /**
        * 预取**下一首**的包络进客户端缓存。与交叉淡化**无关**（关掉淡化也值得预取）。
        * 注意它只填缓存、**不动当前显示** —— 预取绝不能改 UI。
        */
-      const prefetchWaveform = async (track: MusicTrack) => {
-        if (disposed || wavePeaksCache.has(track.id)) return;
-        try {
-          const result = await api("/api/waveform?p=" + encodeURIComponent(track.id));
-          if (disposed) return;
-          const peaks = (Array.isArray(result?.peaks) ? result.peaks : [])
-            .filter((v) => typeof v === "number" && Number.isFinite(v));
-          if (peaks.length > 0) cacheWavePeaks(track.id, peaks);
-        } catch {
-          // 预取失败无所谓：真正切到那首时会再请求一次（不报错、不重试风暴）。
-        }
-      };
 
       /**
        * 波形：按需取当前曲目的包络。宿主侧是**只读** ffmpeg 解码 + 缓存（与 §2.20 同族纪律）。
        * 取不到（没有 ffmpeg / 解码失败 / 未知曲目）就保持 `null` 静默降级 —— 不报红字、不影响播放。
        */
-      const loadWaveform = async (track: MusicTrack) => {
-        if (state.waveTrackId === track.id && state.wavePeaks !== null) return;
-        const cached = wavePeaksCache.get(track.id);
-        if (cached !== undefined) {
-          // 命中缓存（多是预取来的）：**同步**出图，切歌时看不到空白期。
-          set({ wavePeaks: cached, waveTrackId: track.id });
-          return;
-        }
-        set({ wavePeaks: null, waveTrackId: track.id });
-        try {
-          const result = await api("/api/waveform?p=" + encodeURIComponent(track.id));
-          // 快速连切时回来的是**上一首**的结果，必须丢弃 —— 否则波形与正在播的歌对不上。
-          if (state.waveTrackId !== track.id) return;
-          const raw = Array.isArray(result?.peaks) ? result.peaks : [];
-          const peaks = raw.filter((v) => typeof v === "number" && Number.isFinite(v));
-          if (peaks.length > 0) cacheWavePeaks(track.id, peaks);
-          set({ wavePeaks: peaks.length > 0 ? peaks : null });
-        } catch {
-          set({ wavePeaks: null });
-        }
-      };
 
-      const playIndex = (index) => {
-        const track = state.tracks[index];
-        if (track === undefined) return;
-        // 手动切歌 vs 曲末自动接下一首：fooyin 给后者更长的过渡（700ms vs 300ms）。
-        const auto = advanceIsAuto;
-        advanceIsAuto = false;
-        changeFadeOutMs = auto ? FADE_AUTO_OUT_MS : FADE_CHANGE_OUT_MS;
-        changeFadeInMs = auto ? FADE_AUTO_IN_MS : FADE_CHANGE_IN_MS;
-        resumeAttempts = 0;
-        skipAttempts = 0;
-        lastFailureAt = 0;
-        playingId = track.id;
-        stopWasmVideo();   // 换曲：停掉上一条的 WASM 解码循环
-        // 手动重新播这一首时给升级一次新机会：升级标记只防「一次播放里失败→升级→再失败」
-        // 的死循环，不是「这一首永久只能直出」。不清它，失败过一次的歌就再也升不了级
-        // （症状：回去再播还是没声音，只有刷新页面才好）。
-        if (track.kind === "video") mvEscalated.delete(track.id);
-        set({
-          current: index,
-          time: 0,
-          duration: typeof track.duration === "number" ? track.duration : 0,
-          mv: track.kind === "video" ? { id: track.id, state: "checking", progress: 0, mode: null, error: null } : null,
-        });
-        savePrefs({ last: { id: track.id, time: 0 } });
-        void loadWaveform(track);
-        updateMediaSession();
-        if (track.kind === "video") {
-          void (async () => {
-            await ensureStreamBase();   // 先拿到媒体直连基址（拖不动进度就是它没拿到）
-            // 1) 浏览器没有这个解码器 → 先试 WASM 旁路（不碰文件、不用等转码）。
-            // 前提是**音轨元素自己能解**：WASM 只补画面，音轨解不了就是有画面没声音。
-            if (WASM_CODECS.has(track.videoCodec ?? "") && wasmAudioPlayable(track)) {
-              await new Promise((resolve) => setTimeout(resolve, 30));   // 等 React 把画面槽渲染出来
-              const stage = typeof document === "undefined" ? null : document.querySelector(".dshm-mvStage");
-              const ok = await startWasmVideo(track, stage);
-              if (ok && playingId === track.id) {
-                attachSource(streamUrl(track));     // 音频照旧走 /stream
-                set({ mv: { id: track.id, state: "ready", progress: 1, mode: "wasm", error: null } });
-                guardAudioTrack(track);             // 画面由 WASM 出，音轨仍归元素：它没解出来就是没声
-                return;
-              }
-            }
-            // 2) 退回只读缓存转码（同样不改用户文件）
-            const url = await prepareVideo(track);
-            if (url === null || playingId !== track.id) return;
-            attachSource(url);
-            guardVideoPicture(track);
-            guardAudioTrack(track);
-          })();
-          return;
-        }
-        // 音频：先等媒体直连基址再挂源（拿不到就退回相对地址，播放不受影响）。
-        void (async () => {
-          await ensureStreamBase();
-          if (playingId !== track.id) return;
-          attachSource(streamUrl(track));
-        })();
-        return;
-      };
       /**
        * 可见列表（筛选 + 排序后的行序）。它就是播放队列：
        * next/prev/播完自动下一首/出错自动跳过，全部按这个顺序走——
@@ -3785,104 +4125,11 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * share one sorted array instead of re-sorting per call.
        */
       /** 叠加在线补全后的展示信息（不改动 state.tracks 本身）。 */
-      const effective = (track) => {
-        if (track === undefined) return undefined;
-        const meta = state.meta[track.id];
-        if (meta === undefined) return track;
-        return {
-          ...track,
-          title: typeof meta.title === "string" && meta.title.length > 0 ? meta.title : track.title,
-          artist: typeof meta.artist === "string" && meta.artist.length > 0 ? meta.artist : track.artist,
-          album: typeof meta.album === "string" && meta.album.length > 0 ? meta.album : undefined,
-        };
-      };
       /** 优先用补全的远端封面，否则回退文件内嵌封面。 */
-      const coverFor = (track) => {
-        const meta = track === undefined ? undefined : state.meta[track.id];
-        if (meta !== undefined && typeof meta.cover === "string" && meta.cover.length > 0) return artUrl(meta.cover);
-        return coverUrl(track === undefined ? "" : track.id);
-      };
 
       let rowsCache: RowsCache | null = null;
-      const visibleRows = () => {
-        const cache = rowsCache;
-        if (cache !== null && cache.tracks === state.tracks && cache.query === state.query
-          && cache.sortKey === state.sortKey && cache.sortDir === state.sortDir
-          && cache.meta === state.meta) {
-          return cache.rows;
-        }
-        const query = state.query.trim().toLowerCase();
-        let rows;
-        if (query.length === 0) {
-          rows = state.tracks.map((track, index) => ({ track, index }));
-        } else {
-          rows = [];
-          for (let index = 0; index < state.tracks.length; index += 1) {
-            const track = state.tracks[index];
-            const item = effective(track);
-            const haystack = (item.title + " " + (item.artist ?? "") + " " + track.name).toLowerCase();
-            if (haystack.includes(query)) rows.push({ track, index });
-          }
-        }
-        if (state.sortKey !== "none") {
-          rows = [...rows].sort((a, b) => {
-            const dir = state.sortDir === "asc" ? 1 : -1;
-            const va = effective(a.track)[state.sortKey];
-            const vb = effective(b.track)[state.sortKey];
-            if (va == null && vb == null) return a.index - b.index;
-            if (va == null) return 1;
-            if (vb == null) return -1;
-            const order = typeof va === "number" && typeof vb === "number"
-              ? va - vb
-              : String(va).localeCompare(String(vb), "zh-Hans-CN", { numeric: true, sensitivity: "base" });
-            return dir * (order || (a.index - b.index));
-          });
-        }
-        rowsCache = { tracks: state.tracks, query: state.query, sortKey: state.sortKey, sortDir: state.sortDir, meta: state.meta, rows };
-        return rows;
-      };
-      const next = () => {
-        const rows = visibleRows();
-        if (rows.length === 0) return;
-        // 当前曲目不在可见列表里（被筛选掉）时，从第一行开始。
-        const pos = rows.findIndex((row) => row.index === state.current);
-        playIndex(rows[(pos + 1) % rows.length].index);
-      };
-      const prev = () => {
-        const rows = visibleRows();
-        if (rows.length === 0) return;
-        // macOS Music behavior: beyond 3s into the song, "previous" restarts it.
-        if (audio.currentTime > 3 && state.current >= 0) {
-          audio.currentTime = 0;
-          return;
-        }
-        const pos = rows.findIndex((row) => row.index === state.current);
-        playIndex(rows[pos <= 0 ? rows.length - 1 : pos - 1].index);
-      };
 
       /** 播放进度：只有**活动元素**的事件算数（另一个在淡出或预取）。 */
-      const onTimeupdate = (el: HTMLVideoElement) => {
-        if (el !== audio || state.current < 0) return;
-        const live = audio.currentTime;
-        // Playback moved 5s past the last failure: that failure is behind us,
-        // so a later, independent bad spot gets its own retry budget again.
-        if (lastFailureAt > 0 && live > lastFailureAt + 5) {
-          resumeAttempts = 0;
-          skipAttempts = 0;
-          lastFailureAt = 0;
-        }
-        const liveDuration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : state.duration;
-        // The progress bar follows the audio clock itself (rAF), so publishing
-        // every ~4Hz timeupdate would only re-render the track list: publish on
-        // the whole second, or immediately when the duration finally arrives.
-        if (liveDuration !== state.duration || Math.floor(live) !== Math.floor(state.time)) {
-          set({ time: live, duration: liveDuration });
-          // 同一处节流（≈1Hz）顺手把进度推给系统 Now Playing 的进度条。
-          updatePositionState();
-        }
-        savePosition(false);
-      };
-      const coverUrl = (id) => endpointBase + "/cover?p=" + encodeURIComponent(id) + "&v=" + (state.scannedAt ?? 0);
 
       /**
        * Apple Music–style placeholder artwork for the OS now-playing widget.
@@ -3916,96 +4163,21 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         });
       }
 
-      const onPlay = (el: HTMLVideoElement) => {
-        if (el !== audio) return;
-        errorStreak = 0;
-        set({ playing: true, error: null });
-        updateMediaSession();
-      };
-      const onPause = (el: HTMLVideoElement) => {
-        if (el !== audio) return;
-        set({ playing: false });
-        savePosition(true);
-        updateMediaSession();
-      };
       /** 关页面前把位置落盘：节流写入会丢最后 5 秒。注册的监听必须在 halt() 里摘掉。 */
-      const onPageHide = () => { savePosition(true); };
-      window.addEventListener("pagehide", onPageHide);
-      const onEnded = (el: HTMLVideoElement) => {
-        if (el !== audio) return;
-        if (state.mode === "one") {
-          audio.currentTime = 0;
-          const promise = audio.play();
-          if (promise !== undefined) promise.catch(() => {});
-        } else {
-          advanceIsAuto = true;   // 曲末自动接下一首：用更长的过渡（fooyin autoChange）
-          next();
-        }
-      };
       /** 每次换源都会重新触发 loadedmetadata：统一检查这个源能不能 seek。 */
-      const onLoadedMetadata = (el: HTMLVideoElement) => {
-        if (el !== audio) return;
-        scheduleUnseekableHeal();
-      };
       /** 缓冲反馈：等数据时给明确信号，恢复后立刻撤掉（状态由 bindMedia 装在两个元素上）。 */
-      const onWaiting = (el: HTMLVideoElement) => {
-        if (el !== audio || !state.playing) return;
-        set({ buffering: true });
-      };
-      const onResumed = (el: HTMLVideoElement) => {
-        if (el !== audio) return;
-        set({ buffering: false });
-      };
       /**
        * Re-pull the stream and land at `target` (used by both recovery paths).
        * Re-checks the playing track inside the timer: the user may have picked
        * another song during the grace period, and that choice must win.
        */
-      const recoverAt = (failedTrack, failedIndex, target, delay) => {
-        setTimeout(() => {
-          if (state.current !== failedIndex || playingId !== failedTrack.id) return;
-          // 必须**先等基址**：不等就会拼出相对地址，Desktop 上丢了 Range ⇒ 之后一拖就回 0
-          // （§2.16「降级成不可 seek 的源比等待更糟」）。
-          void (async () => {
-            await ensureStreamBase();
-            if (disposed || state.current !== failedIndex || playingId !== failedTrack.id) return;
-            audio.src = streamUrl(failedTrack);
-            audio.addEventListener("loadedmetadata", () => {
-              if (state.current !== failedIndex || playingId !== failedTrack.id) return;
-              if (Number.isFinite(audio.duration)) {
-                audio.currentTime = Math.min(target, Math.max(0, audio.duration - 1));
-              }
-            }, { once: true });
-            const promise = audio.play();
-            if (promise !== undefined) promise.catch(() => {});
-          })();
-        }, delay);
-      };
 
       /** 升级成转码（画面看门狗与音轨看门狗共用；每首各自只有一次预算）。 */
-      const escalateToTranscode = (track) => {
-        if (mvEscalated.has(track.id)) return;
-        mvEscalated.add(track.id);
-        set({ mv: { id: track.id, state: "preparing", progress: 0, mode: "transcode", error: null } });
-        void prepareVideo(track, "transcode").then((url) => {
-          if (url === null || playingId !== track.id) return;
-          attachSource(url);
-        });
-      };
 
       /**
        * 画面看门狗：有些编码 Chromium 既不报 error 也不出画面（只有声音，实测 MPEG-4 Part 2
        * 与部分 HEVC 就是这样）。播了 2 秒 videoWidth 仍是 0 就当成失败，升级成转码。
        */
-      const guardVideoPicture = (track) => {
-        setTimeout(() => {
-          if (playingId !== track.id) return;
-          const current = state.tracks[state.current];
-          if (current === undefined || current.kind !== "video") return;
-          if (Number(audio.videoWidth ?? 1) > 0 || audio.readyState < 2) return;
-          escalateToTranscode(track);
-        }, 2000);
-      };
 
       /**
        * 音轨看门狗：图面对得上、音轨解不了时 Chromium **不报 error**，只是把那条流丢掉 ——
@@ -4015,92 +4187,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * 播了 3.5 秒仍是 0 个音频字节 ⇒ 这条音轨实际没解出来 ⇒ 升级成转码（音轨转 AAC）。
        * 只在**已知有音轨**（`audioCodec` 非 null）时才判：否则会把本来就无声的 MV 也送去转码。
        */
-      const guardAudioTrack = (track) => {
-        if (track.audioCodec === null || track.audioCodec === undefined) return;
-        setTimeout(() => {
-          if (playingId !== track.id) return;
-          const decoded = (audio as unknown as { webkitAudioDecodedByteCount?: number }).webkitAudioDecodedByteCount;
-          if (typeof decoded !== "number" || decoded > 0) return;
-          if (audio.paused !== false || audio.readyState < 2) return;
-          escalateToTranscode(track);
-        }, 3500);
-      };
 
-      const onError = (el: HTMLVideoElement) => {
-        if (el !== audio || state.current < 0) return;
-        set({ buffering: false });
-        // ① 优先自愈「token 基址失效」：宿主热重载会换 token（已改为进程级，但历史
-        //    快照仍可能过期），而**音频永远走 system-stream token 直连** —— 一旦失效
-        //    就是「音乐全不能播、MV 照播（/api/mv 返相对地址）」。丢掉缓存，让下面
-        //    的重试路径重新取一次 /session，用新基址重挂。
-        const failedSrc = typeof audio.currentSrc === "string" ? audio.currentSrc : "";
-        if (failedSrc.includes("system-stream") && !sessionBaseHealed) {
-          sessionBaseHealed = true;
-          invalidateSessionBase();
-          // 立刻用新基址重放本曲（而不是让它退化成「跳过一首」）：
-          // ensureStreamBase 会重新取 /session，streamUrl 于是拿到新 token。
-          const retryTrack = state.tracks[state.current];
-          if (retryTrack !== undefined) {
-            void (async () => {
-              await ensureStreamBase();
-              if (playingId !== retryTrack.id) return;
-              attachSource(streamUrl(retryTrack));
-            })();
-            return;
-          }
-        }
-        // 错误分类（借鉴 Feishin 的 MediaError 分派）：`MEDIA_ERR_SRC_NOT_SUPPORTED (4)` 意味着
-        // **格式/源根本不可用** —— 原位置重试与「跳过坏区」都救不了它，直接走「放弃 + 自动下一首」，
-        // 省掉 1 次重试 + 2 次跳区（每次 400ms，还会放出一段垃圾声）。
-        // `MEDIA_ERR_DECODE (3)` 保持现有策略（跳坏区对**局部**坏帧是对的）；`NETWORK (2)` 走重试。
-        const mediaErrorCode = typeof audio.error?.code === "number" ? audio.error.code : 0;
-        const hopelessSource = mediaErrorCode === 4;
-        const failedIndex = state.current;
-        const failedTrack = state.tracks[failedIndex];
-        // MV 直出失败（容器解不了 / 该构建没有这个解码器）：升级成 ffmpeg 转码再试一次。
-        if (failedTrack !== undefined && failedTrack.kind === "video" && !mvEscalated.has(failedTrack.id)) {
-          mvEscalated.add(failedTrack.id);
-          set({ mv: { id: failedTrack.id, state: "preparing", progress: 0, mode: "transcode", error: null } });
-          void prepareVideo(failedTrack, "transcode").then((url) => {
-            if (url === null || playingId !== failedTrack.id) return;
-            attachSource(url);
-          });
-          return;
-        }
-        const resumeAt = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
-        errorStreak += 1;
-        const knownDuration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : state.duration;
-        // 1) 流中途被切断（宿主 requestTimeout 截断长连接、瞬时网络错误等）：
-        //    原位置重试一次，恢复后 timeupdate 会把预算清零。
-        const mayRetrySame = !hopelessSource && failedTrack !== undefined && resumeAt > 0 && resumeAttempts < 1
-          && (!Number.isFinite(audio.duration) || resumeAt < audio.duration - 2);
-        if (mayRetrySame) {
-          resumeAttempts += 1;
-          lastFailureAt = resumeAt;
-          recoverAt(failedTrack, failedIndex, resumeAt, 400);
-          return;
-        }
-        // 2) 同一位置再次失败 = 文件局部坏帧（坏源/下载损坏）：
-        //    向前跳过坏区继续播放，而不是让几 KB 垃圾废掉整首歌。
-        const jump = hopelessSource ? undefined : FAILURE_JUMPS[skipAttempts];
-        if (failedTrack !== undefined && resumeAt > 0 && jump !== undefined
-          && (knownDuration === 0 || resumeAt + jump < knownDuration - 1)) {
-          const target = resumeAt + jump;
-          skipAttempts += 1;
-          lastFailureAt = target;
-          set({ time: target });
-          recoverAt(failedTrack, failedIndex, target, 400);
-          return;
-        }
-        // 3) 放弃本曲：提示 + 列表循环下自动跳下一首（每一行都失败后停手）。
-        set({ playing: false, error: translate("error.unsupported") });
-        const rowCount = visibleRows().length;
-        if (state.mode === "loop" && rowCount > 1 && errorStreak < rowCount) {
-          setTimeout(() => {
-            if (state.error !== null && state.current === failedIndex && !state.playing) next();
-          }, 600);
-        }
-      };
 
       // 两个元素都装：这是交叉淡化交换活动元素后仍能收到媒体事件的唯一保证。
       bindMedia = (el) => {
