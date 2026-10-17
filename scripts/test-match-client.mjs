@@ -51,8 +51,12 @@ const ARTISTS = { a: 'Real X', b: 'Real Y', c: 'Real Z', d: 'Real D' };
 const stemOf = (id) => id.replace(/\.[^.]+$/, '');
 const matchCalls = [];
 const applyCalls = [];
+let failRefresh = false;
 const mockFetch = async (url, options) => {
   const target = String(url);
+  if (failRefresh && target.includes('/api/dsh-music/refresh')) {
+    return { ok: false, status: 500, json: async () => ({ error: 'refresh-failed' }) };
+  }
   const parsed = new URL(target, 'http://127.0.0.1');
   if (target.includes('/api/dsh-music/match')) {
     matchCalls.push(target);
@@ -126,10 +130,30 @@ check('five rows rendered with a cover cell', rows().length === 5 && rows()[0].q
     const filtered = rows().length;
     check('typing filters after the debounce window (not on every keystroke)',
       immediate === 5 && filtered === 1, 'immediate=' + immediate + ' filtered=' + filtered);
-    await type('');
+    await type('zzz');
     await settle(260);
-    check('clearing the search restores all rows', rows().length === 5, 'rows=' + rows().length);
+    const emptyState = container.querySelector('.dshm-empty');
+    const clearButton = container.querySelector('.dshm-clearSearch');
+    check('a no-match search shows an empty state with a clear button',
+      rows().length === 0 && emptyState !== null && clearButton !== null,
+      'rows=' + rows().length + ' empty=' + (emptyState !== null) + ' clear=' + (clearButton !== null));
+    if (clearButton !== null) {
+      await act(async () => { clearButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+      await settle(60);
+    }
+    check('clearing from the empty state restores all rows', rows().length === 5, 'rows=' + rows().length);
   }
+}
+
+// ── 行键盘可达：Tab 到行、Enter 播放 ─────────────────────────────────────────
+{
+  const row = rows()[2];
+  const before = window.__dshMusicPlayer.getState().current;
+  await act(async () => { row.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+  await settle(80);
+  const after = window.__dshMusicPlayer.getState().current;
+  check('a row is focusable and Enter plays it', row.tabIndex === 0 && after !== before,
+    'tabIndex=' + row.tabIndex + ' current ' + before + '→' + after);
 }
 
 check('DRM-skipped package count is shown', container.querySelector('.dshm-header .dshm-stats')?.textContent.includes('1 drm skipped'), container.querySelector('.dshm-header .dshm-stats')?.textContent);
@@ -170,6 +194,25 @@ check('no local override is kept once tags were written', meta()['a.mp3'] === un
   await settle(60);
   check('Escape closes the overlay', container.querySelector('.dshm-modal') === null);
   check('closing the overlay restores background scroll', document.body.style.overflow === '', 'overflow=' + document.body.style.overflow);
+}
+
+// ── 错误横幅可关闭 ───────────────────────────────────────────────────────────
+{
+  failRefresh = true;
+  await act(async () => { await window.__dshMusicPlayer.refresh(); });
+  await settle(40);
+  const banner = container.querySelector('.dshm-error');
+  const close = container.querySelector('.dshm-errorClose');
+  check('a failed refresh surfaces a dismissible error banner', banner !== null && close !== null,
+    'banner=' + (banner !== null) + ' close=' + (close !== null));
+  if (close !== null) {
+    await act(async () => { close.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    await settle(30);
+  }
+  failRefresh = false;
+  check('dismissing the error removes the banner',
+    container.querySelector('.dshm-error') === null && window.__dshMusicPlayer.getState().error === null,
+    'error=' + String(window.__dshMusicPlayer.getState().error));
 }
 
 // ── Display-only fallback (unchecked box) ────────────────────────────────────

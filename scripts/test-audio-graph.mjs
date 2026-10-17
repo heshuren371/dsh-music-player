@@ -785,5 +785,18 @@ async function bootAtTransition() {
   check('D19: ↑ 提高音量 5%', Math.abs(b.state().volume - 0.55) < 1e-6, 'volume=' + b.state().volume);
 }
 
+// ── D20：缓冲反馈（等数据时显示，恢复后撤掉）──────────────────────────────────
+{
+  const b = await boot({ fakeCtx: {}, search: '?crossfade=0' });
+  await act(async () => { b.player.play(0); await b.sleep(80); });
+  const el = b.player.media();
+  await act(async () => { el._fire('waiting'); await b.sleep(20); });
+  const during = b.state().buffering;
+  await act(async () => { el._fire('playing'); await b.sleep(20); });
+  check('D20: 等数据时 state.buffering=true，恢复后回到 false',
+    during === true && b.state().buffering === false,
+    'during=' + during + ' after=' + b.state().buffering);
+}
+
 console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)');
 process.exit(failures === 0 ? 0 : 1);

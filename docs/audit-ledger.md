@@ -2418,3 +2418,19 @@ bundles 也必须用新名** —— 缺任何一处都表现为「插件未激�
 - `createPlayer()` 仍是 ~2960 行单体：拆分风险最高，建议单独一轮并先补测试。
 - 3 处 `!important`（表格列对齐）保留：去掉需要真实浏览器视觉验证，jsdom 无法判断。
 - 审计中「无空格/方向键」属交互缺口而非缺陷，按上面的键盘契约补上；未加全局快捷键（避免与 DSH shell 抢键）。
+
+## 5.51 第 40 轮 —— 体验复审与五项优化
+
+审查结论（只读）：列表行只能鼠标点（无 Tab/Enter）、筛选为空只剩表头、错误横幅无法关闭、等数据时无任何反馈。滚动跟随已存在（`activeRowRef` + `scrollIntoView({block:"nearest"})`，实测在 `MusicView` 的 effect 里），静音切换缺失。
+
+修复：
+
+1. 行 `tabIndex=0` + Enter/空格播放 + `aria-current` + `:focus-visible` 轮廓；行内按钮按键不冒泡到行。
+2. 缓冲反馈：`waiting`/`stalled` → `state.buffering`，`playing`/`canplay`/`onPlay`/`onError`/`halt` 清除；状态条 `role=status`。
+3. 搜索无结果空态 + 「清除搜索」按钮（直接 flush 防抖，不等 140ms）。
+4. 错误横幅可关闭：`clearError()` API + ✕ 按钮（`aria-label`）。
+5. i18n 中英各补 5 键（键数继续由静态审计守）。
+
+门禁：行键盘、空态+清除、错误关闭、D20 缓冲；四组对照全部精确变红。
+
+未做：音量图标点击静音 —— 需要用户先确认交互（避免与拖拽调节冲突）。

@@ -170,6 +170,8 @@ interface PlayerState {
   error: string | null;
   current: number;
   playing: boolean;
+  /** 正在等数据（网络/宿主慢）：UI 显示「缓冲中」。 */
+  buffering: boolean;
   mode: "loop" | "one";
   time: number;
   duration: number;
@@ -335,6 +337,7 @@ interface MusicPlayerApi {
   toggleSort(key: string): void;
   match(id: string, query?: string): Promise<void>;
   closeMatch(): void;
+  clearError(): void;
   applyMatch(candidate: MatchCandidate, writeFile: boolean, replaceCover: boolean): Promise<void>;
   setCompleteOverwriteCover(on: boolean): void;
   completeRequest(): void;
@@ -577,6 +580,11 @@ window.__ModuleLoader__.load({
       "empty.title": "尚未选择音乐目录",
       "empty.hint": "选择一个本地目录，支持 flac / mp3 / m4a / ogg / wav 等常见格式",
       "empty.tracks": "该目录下没有找到音频文件",
+      "empty.search": "没有匹配的歌曲",
+      "empty.searchHint": "换个关键词，或清除搜索",
+      "action.clearSearch": "清除搜索",
+      "action.dismiss": "关闭提示",
+      "status.buffering": "缓冲中…",
       "mode.loop": "列表循环",
       "mode.one": "单曲循环",
       "stats": (count) => `${count} 首歌曲`,
@@ -662,6 +670,11 @@ window.__ModuleLoader__.load({
       "empty.title": "No music folder selected",
       "empty.hint": "Pick a local folder — flac / mp3 / m4a / ogg / wav and more are supported",
       "empty.tracks": "No audio files found in this folder",
+      "empty.search": "No matching songs",
+      "empty.searchHint": "Try another keyword, or clear the search",
+      "action.clearSearch": "Clear search",
+      "action.dismiss": "Dismiss",
+      "status.buffering": "Buffering…",
       "mode.loop": "Repeat All",
       "mode.one": "Repeat One",
       "stats": (count) => `${count} songs`,
@@ -741,7 +754,8 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .dshm-btn{transition:background-color .12s var(--ds-ease-in-out),border-color .12s var(--ds-ease-in-out)}
 .dshm-btn:disabled{cursor:not-allowed;opacity:.45}
-.dshm-error{border-bottom:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-tertiary);flex:none;padding:6px 14px;font-size:12px}
+.dshm-error{border-bottom:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-tertiary);flex:none;align-items:center;gap:8px;padding:6px 14px;font-size:12px;display:flex}
+.dshm-errorClose{margin-left:auto;color:inherit;background:none;border:0;border-radius:4px;cursor:pointer;font-size:14px;line-height:1;padding:2px 6px}
 .dshm-notice{border-bottom:1px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-text-secondary);background:var(--dsw-alias-bg-secondary);flex:none;padding:6px 14px;font-size:12px}
 .dshm-confirmBar{border-bottom:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-state-error-tertiary);flex:none;align-items:center;gap:10px;padding:8px 14px;display:flex}
 .dshm-coverToggle{display:flex;align-items:center;gap:6px;margin-left:auto;cursor:pointer;white-space:nowrap}
@@ -768,6 +782,9 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-colArtist{width:26%}
 .dshm-row{cursor:default;transition:background-color .12s var(--ds-ease-in-out)}
 .dshm-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.dshm-row:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}
+.dshm-buffering{flex:none;padding:4px 14px;font-size:12px;color:var(--dsw-alias-label-tertiary);border-bottom:1px solid var(--dsw-alias-border-l2)}
+.dshm-clearSearch{margin-top:2px}
 .dshm-row--active{background:var(--dsw-alias-interactive-bg-active)}
 .dshm-row--active .dshm-cellTitle{color:var(--dsw-alias-state-business-primary);font-weight:500}
 .dshm-cellTitle{color:var(--dsw-alias-label-primary)}
@@ -1369,6 +1386,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         error: null,
         current: -1,
         playing: false,
+        buffering: false,
         mode: prefs.mode === "one" ? "one" : "loop",
         time: 0,
         duration: 0,
@@ -2508,7 +2526,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           inLevel.gain.setValueAtTime(0, now);
           inLevel.gain.linearRampToValueAtTime(1, now + changeFadeInMs / 1000);
           const promise = inEl.play();
-          set({ playing: true, error: null });
+          set({ playing: true, error: null, buffering: false });
           const settle = () => {
             if (disposed) return;
             // ⚠️ **不要**清掉旧元素的 `src` / 调 `load()`：那会再触发一次媒体管线拆除 ——
@@ -3177,6 +3195,15 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         if (el !== audio) return;
         scheduleUnseekableHeal();
       };
+      /** 缓冲反馈：等数据时给明确信号，恢复后立刻撤掉（状态由 bindMedia 装在两个元素上）。 */
+      const onWaiting = (el: HTMLVideoElement) => {
+        if (el !== audio || !state.playing) return;
+        set({ buffering: true });
+      };
+      const onResumed = (el: HTMLVideoElement) => {
+        if (el !== audio) return;
+        set({ buffering: false });
+      };
       /**
        * Re-pull the stream and land at `target` (used by both recovery paths).
        * Re-checks the playing track inside the timer: the user may have picked
@@ -3249,6 +3276,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 
       const onError = (el: HTMLVideoElement) => {
         if (el !== audio || state.current < 0) return;
+        set({ buffering: false });
         // ① 优先自愈「token 基址失效」：宿主热重载会换 token（已改为进程级，但历史
         //    快照仍可能过期），而**音频永远走 system-stream token 直连** —— 一旦失效
         //    就是「音乐全不能播、MV 照播（/api/mv 返相对地址）」。丢掉缓存，让下面
@@ -3325,6 +3353,10 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       // 两个元素都装：这是交叉淡化交换活动元素后仍能收到媒体事件的唯一保证。
       bindMedia = (el) => {
         el.addEventListener("timeupdate", () => onTimeupdate(el));
+        el.addEventListener("waiting", () => onWaiting(el));
+        el.addEventListener("stalled", () => onWaiting(el));
+        el.addEventListener("playing", () => onResumed(el));
+        el.addEventListener("canplay", () => onResumed(el));
         el.addEventListener("play", () => onPlay(el));
         el.addEventListener("pause", () => onPause(el));
         el.addEventListener("ended", () => onEnded(el));
@@ -3576,6 +3608,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             current: -1,
             error: null,
             completing: false,
+            buffering: false,
             pendingComplete: false,
             match: null,
             playerPhase: "closed",
@@ -3849,6 +3882,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           set({ pendingComplete: true, error: null });
         },
         cancelComplete: () => set({ pendingComplete: false }),
+        clearError: () => set({ error: null }),
         setCompleteOverwriteCover: (on) => set({ completeOverwriteCover: on === true }),
 
         stopComplete: () => set({ completing: false }),
@@ -4313,7 +4347,16 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             const rowElement = h("tr", {
               className: "dshm-row" + (index === current ? " dshm-row--active" : ""),
               ref: index === current ? activeRowRef : undefined,
+              // 行可用键盘直接播放（Enter/空格）。行内按钮自己处理按键，不冒泡到行。
+              tabIndex: 0,
+              "aria-current": index === current ? "true" : undefined,
               onClick: () => player.play(index),
+              onKeyDown: (event) => {
+                if (event.target !== event.currentTarget) return;
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                player.play(index);
+              },
             },
               h("td", { className: "dshm-colCover" }, h(RowCover, {
                 src: coverFor(track),
@@ -4560,6 +4603,15 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       useEffect(() => () => {
         if (queryTimerRef.current !== null) clearTimeout(queryTimerRef.current);
       }, []);
+      const clearQuery = () => {
+        setQueryDraft("");
+        queryDraftRef.current = "";
+        if (queryTimerRef.current !== null) {
+          clearTimeout(queryTimerRef.current);
+          queryTimerRef.current = null;
+        }
+        player.setQuery("");
+      };
       const applyQuerySoon = (value) => {
         setQueryDraft(value);
         queryDraftRef.current = value;
@@ -4729,6 +4781,14 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         body = h("div", { className: "dshm-empty" },
           h("div", { className: "dshm-emptyIcon" }, "♪"),
           h("div", null, t("empty.tracks")),
+        );
+      } else if (visibleTracks.length === 0) {
+        // 有歌但筛选空了：明确告诉用户，并给一键清除（否则只剩表头，像页面坏了）。
+        body = h("div", { className: "dshm-empty" },
+          h("div", { className: "dshm-emptyIcon" }, "🔍"),
+          h("div", null, t("empty.search")),
+          h("div", { className: "dshm-emptyHint" }, t("empty.searchHint")),
+          h("button", { type: "button", className: "dshm-btn dshm-clearSearch", onClick: () => clearQuery() }, t("action.clearSearch")),
         );
       } else {
         body = h(TrackTable, {
@@ -5232,7 +5292,15 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         completeBar,
         confirmBar,
         state.hostEntry === "legacy" && h("div", { className: "dshm-notice" }, t("error.legacyEntry")),
-        state.error !== null && h("div", { className: "dshm-error", role: "alert", "aria-live": "assertive" }, t("error.prefix"), state.error),
+        state.buffering && h("div", { className: "dshm-buffering", role: "status", "aria-live": "polite" }, t("status.buffering")),
+        state.error !== null && h("div", { className: "dshm-error", role: "alert", "aria-live": "assertive" },
+          t("error.prefix"), state.error,
+          h("button", {
+            type: "button",
+            className: "dshm-errorClose",
+            "aria-label": t("action.dismiss"),
+            onClick: () => player.clearError(),
+          }, "✕")),
         body,
         bar,
         // 全屏播放器盖在内容之上；matchOverlay 的 z-index 更高，弹层仍在它之上
