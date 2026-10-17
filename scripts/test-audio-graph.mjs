@@ -240,8 +240,11 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
       set volume(v) { this._volume = v; log.push({ op: 'volume', v, el: tag }); },
       setAttribute: (n, v) => { attrs[n] = v; },
       removeAttribute: (n) => { log.push({ op: 'removeAttr', name: n, el: tag }); if (n === 'crossorigin') delete attrs.crossorigin; },
-      play() { this.paused = false; log.push({ op: 'play', el: tag }); return Promise.resolve(); },
-      pause() { this.paused = true; log.push({ op: 'pause', el: tag }); },
+      // 真实元素在 play()/pause() 之后会**异步**派发同名事件；夹具照做，否则
+      // 「暂停后 UI 状态同步」这类链路根本没被执行（夹具保真度 = 判别力）。异步是必须的：
+      // 交接时 `outEl.pause()` 先于 `audio = inEl`，同步派发会让守卫误判成活动元素。
+      play() { this.paused = false; log.push({ op: 'play', el: tag }); queueMicrotask(() => this._fire('play')); return Promise.resolve(); },
+      pause() { this.paused = true; log.push({ op: 'pause', el: tag }); queueMicrotask(() => this._fire('pause')); },
       load() { log.push({ op: 'load', el: tag }); },
       // 真实元素一定有 addEventListener —— 夹具要能派发事件，否则「媒体 error 分类」这类
       // 路径根本没被执行（§9 陷阱 4：夹具保真度 = 判别力）。
@@ -700,6 +703,86 @@ async function boot({ fakeCtx = null, search = '', origin = 'http://127.0.0.1:30
     b.log.filter((o) => o.op === 'ctx').length === 1 && b.log.filter((o) => o.op === 'createFilter').length === 0
       && b.media.volume === 1,
     'ctx=' + b.log.filter((o) => o.op === 'ctx').length + ' filters=' + b.log.filter((o) => o.op === 'createFilter').length);
+}
+
+// ── D12–D15：交叉淡化交换后的事件契约 / 过渡窗口内的交互 ─────────────────────
+// 交换（`audio = inEl`）之后，新活动元素必须**自己**能收到 timeupdate/ended/error ——
+// 监听器只装在初始元素上时，曲末不续播、流错误不恢复，且这些都不会报错，只是静默失效。
+async function bootAtTransition() {
+  const b = await boot({ fakeCtx: {}, search: '?crossfade=1' });
+  await act(async () => {
+    b.player.play(0);
+    await b.waitFor(() => b.log.some((o) => o.op === 'src' && o.el === 'B'));
+    b.player.play(1);            // 交叉淡化开始，交接在 +320ms
+  });
+  return b;
+}
+{
+  // D12/D13：交换后活动元素驱动进度与自动续播
+  const b = await boot({ fakeCtx: {}, search: '?crossfade=1' });
+  await act(async () => {
+    b.player.play(0);
+    await b.waitFor(() => b.log.some((o) => o.op === 'src' && o.el === 'B'));
+    b.player.play(1);
+    await b.waitFor(() => b.player.media() === b.media2);
+  });
+  const active = b.player.media();
+  await act(async () => {
+    active.currentTime = 42;
+    active._fire('timeupdate');
+    await b.sleep(30);
+  });
+  check('D12: 交换后活动元素的 timeupdate 仍更新进度（监听器跟着元素走）',
+    Math.round(b.state().time) === 42, 'time=' + b.state().time);
+  const before = b.state().current;
+  await act(async () => { active._fire('ended'); await b.sleep(120); });
+  check('D13: 交换后活动元素的 ended 仍触发自动续播',
+    b.state().current !== before, 'current ' + before + '→' + b.state().current);
+}
+{
+  // D14：过渡窗口内 seek 必须落在交换后的活动元素上（否则 seek 丢、进度与音频脱节）
+  const b = await bootAtTransition();
+  await act(async () => { b.player.seek(100); });
+  await b.sleep(650);
+  const active = b.player.media();
+  check('D14: 过渡窗口内 seek 落在交换后的活动元素上',
+    Math.round(active.currentTime) === 100 && Math.round(b.state().time) === 100,
+    'activeTime=' + active.currentTime + ' stateTime=' + b.state().time);
+}
+{
+  // D15：过渡窗口内 pause 必须真的停住（不能只停淡出中的旧元素，让新元素继续出声）
+  const b = await bootAtTransition();
+  await act(async () => { b.player.toggle(); });
+  await b.sleep(650);
+  check('D15: 过渡窗口内 pause 生效且状态一致',
+    b.player.media().paused === true && b.state().playing === false,
+    JSON.stringify({ activePaused: b.player.media().paused, playing: b.state().playing }));
+}
+
+// ── D16–D19：全屏播放器键盘快捷键（空格 / ←→ / ↑↓）────────────────────────────
+{
+  const b = await boot({ fakeCtx: {}, search: '?crossfade=0' });
+  await act(async () => {
+    b.player.play(0);
+    b.player.openPlayer();
+    await b.sleep(80);
+  });
+  const press = async (key) => {
+    await act(async () => { b.win.dispatchEvent(new b.win.KeyboardEvent('keydown', { key, bubbles: true })); });
+    await b.sleep(220);   // 暂停/seek 都带渐变（120ms）
+  };
+  const playingBefore = b.state().playing;
+  await press(' ');
+  check('D16: 空格切换播放/暂停（全屏播放器打开时）',
+    b.state().playing !== playingBefore, 'playing ' + playingBefore + '→' + b.state().playing);
+  await press(' ');
+  check('D17: 再按空格恢复播放', b.state().playing === playingBefore, 'playing=' + b.state().playing);
+  const beforeSeek = b.player.now();
+  await press('ArrowRight');
+  check('D18: → 快进 5 秒', Math.abs(b.player.now() - beforeSeek - 5) < 0.6, 'delta=' + (b.player.now() - beforeSeek));
+  b.player.setVolume(0.5);
+  await press('ArrowUp');
+  check('D19: ↑ 提高音量 5%', Math.abs(b.state().volume - 0.55) < 1e-6, 'volume=' + b.state().volume);
 }
 
 console.log(failures === 0 ? 'ALL PASS' : failures + ' FAILURE(S)');

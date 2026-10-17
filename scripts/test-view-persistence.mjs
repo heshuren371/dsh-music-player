@@ -125,6 +125,17 @@ const videoRow = Array.from(container.querySelectorAll('.dshm-row')).find((row) 
 await click(videoRow.querySelector('.dshm-cellTitle'));
 await settle(200);
 check('playing a video row asks the host how to show it', calls.some((c) => c.includes('/api/dsh-music/mv?id=v.mp4')), calls.filter((c) => c.includes('/mv')).join(','));
+// ── 内联确认条：Escape 取消（不依赖全屏播放器）────────────────────────────────
+{
+  await act(async () => { player.completeRequest(); await new Promise((r) => setTimeout(r, 20)); });
+  const barShown = container.querySelector('.dshm-confirmBar') !== null;
+  await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+  await settle(60);
+  check('Escape cancels the inline confirmation bar',
+    barShown && player.getState().pendingComplete === false && container.querySelector('.dshm-confirmBar') === null,
+    'shown=' + barShown + ' pending=' + player.getState().pendingComplete);
+}
+
 await click(container.querySelector('.dshm-nowCoverBtn'));
 await settle(80);
 check('clicking the bottom cover opens the full player', container.querySelector('.dshm-player') !== null);

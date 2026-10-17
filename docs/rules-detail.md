@@ -526,3 +526,9 @@ Storage（`storage.zh.md`）。`LocalStorage` 通过 protocol requirement 声明
 `storage.local.read`，写/删需 `storage.local.write`；value 必须是 JSON value；同命名空间同 key
 串行化，**不得**假设 transaction/CAS/enumeration/watch；`deactivate` 不删数据；cleanup 可重复执行，
 **失败不得报告为已完成**；禁止把 value/凭据/secret 写进普通日志。
+
+---
+
+## 客户端交互契约
+
+客户端交互契约。媒体监听器绑在**每个**媒体元素上（`bindMedia(el)`）：交叉淡化交换活动元素后，只绑初始元素会让 `timeupdate`/`ended`/`error` 静默失效。过渡窗口（切歌后 ~320ms）内 seek/pause 必须先 `commitPendingCrossfade()`，并在 `startNow()` 前用 `pauseEpoch` 挡住被暂停的起播。弹层要有 `role=dialog`/`aria-modal`、焦点锁、滚动锁、Escape 关闭；确认条 Escape 取消。全屏键盘：空格、←/→ 5 秒、↑/↓ 音量（输入框/按钮内不抢键）。搜索即时回显 + 140ms 防抖；层级用 `--dshm-z-*` token。

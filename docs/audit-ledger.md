@@ -2384,3 +2384,37 @@ package.json 读 id），其余靠清单核对。另外：改名后**必须**跑
 bundles 也必须用新名** —— 缺任何一处都表现为「插件未激活」。发布检查清单因此固定为两条机械动作：
 跑 `test-route-consistency`（两条新门禁）+ 跑一次 `dsh --profile <p> --dump-config` 看宿主实际解析出的
 `name` 与 `disabled`。
+
+## 5.50 第 39 轮 —— 前端交互逻辑与技术债审计 + 全部修复
+
+### 5.50.1 审查结论（只读审计，先报告后修复）
+
+| 级别 | 发现 | 根因 |
+| --- | --- | --- |
+| P0 | 交叉淡化第一次交换后，活动元素丢失全部媒体监听器 | 6 类监听器一次性绑在初始 `audio` 上；交换只改 `let audio`，没有迁移 |
+| P1 | 过渡窗口内 seek 丢失、pause 不生效 | seek/pause 只操作 `audio`（窗口内还是淡出中的旧元素）；`startNow()` 无条件 `play()` |
+| P1 | 弹层无 dialog 语义/Escape/焦点锁；确认条无 Escape | 覆盖层只做了视觉，没有键盘与 ARIA 契约 |
+| P2 | 搜索逐键全量过滤；`pagehide` 不摘；层级裸数字 | 无防抖、无清理、无 token |
+
+### 5.50.2 修复
+
+1. `bindMedia(el)`：两个媒体元素都装监听器，处理器用 `el !== audio` 守卫（异步 pause 事件在交换后才到）。
+2. `seek()` 与 toggle 暂停先 `commitPendingCrossfade()`；`pauseEpoch` 让淡出途中按下的暂停作废在飞的 `startNow()`。
+3. `stopAudio()` 同时停空闲元素并 `pauseEpoch += 1`。
+4. `useModalA11y`：role/aria-modal/aria-label、Tab 焦点锁、Escape 关闭、背景滚动锁、关闭后焦点归还；确认条 Escape 取消。
+5. 全屏播放器键盘：空格 / ←→ / ↑↓（输入框、按钮内不抢键）；错误横幅 `role=alert`。
+6. 搜索 140ms 防抖（输入即时回显，`onChange`+`onInput` 双挂）；`--dshm-z-*` 层级 token。
+7. `pagehide` 在 `halt()` 里摘除。
+
+### 5.50.3 门禁与对照
+
+新增 D12–D19、弹层 6 条、确认条 Escape、搜索防抖；六组负向对照全部精确变红：
+空闲元素不绑 → D12/D13/D15 红 · seek 不结算 → D14 红 · 暂停不结算 → D15 红 ·
+去掉 dialog 语义 → 红 · 无防抖 → 红 · 去空格分支 → D16 红。
+夹具顺带升级：`play()/pause()` 异步派发同名事件（真实元素行为），否则「暂停后状态同步」链路根本没被执行。
+
+### 5.50.4 未做/有意保留（如实记录）
+
+- `createPlayer()` 仍是 ~2960 行单体：拆分风险最高，建议单独一轮并先补测试。
+- 3 处 `!important`（表格列对齐）保留：去掉需要真实浏览器视觉验证，jsdom 无法判断。
+- 审计中「无空格/方向键」属交互缺口而非缺陷，按上面的键盘契约补上；未加全局快捷键（避免与 DSH shell 抢键）。

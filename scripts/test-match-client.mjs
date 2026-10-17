@@ -109,6 +109,29 @@ const titleOf = (row) => row.querySelector('.dshm-cellTitle').textContent;
 const meta = () => JSON.parse(localStorage.getItem('dsh-music:meta') ?? '{}');
 
 check('five rows rendered with a cover cell', rows().length === 5 && rows()[0].querySelector('.dshm-colCover') !== null, 'rows=' + rows().length);
+// ── 搜索防抖：输入即时回显，过滤按 140ms 防抖（逐键全量过滤会让大库卡顿）────────
+{
+  const search = container.querySelector('.dshm-search');
+  check('header search input renders (fallback without official Input)', search !== null, 'search=' + (search === null ? 'missing' : 'ok'));
+  if (search !== null) {
+    const type = async (value) => act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
+      setter.call(search, value);
+      search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+    });
+    await type('gam');
+    await settle(20);
+    const immediate = rows().length;
+    await settle(260);
+    const filtered = rows().length;
+    check('typing filters after the debounce window (not on every keystroke)',
+      immediate === 5 && filtered === 1, 'immediate=' + immediate + ' filtered=' + filtered);
+    await type('');
+    await settle(260);
+    check('clearing the search restores all rows', rows().length === 5, 'rows=' + rows().length);
+  }
+}
+
 check('DRM-skipped package count is shown', container.querySelector('.dshm-header .dshm-stats')?.textContent.includes('1 drm skipped'), container.querySelector('.dshm-header .dshm-stats')?.textContent);
 
 // ── Per-row apply (writes file) ──────────────────────────────────────────────
@@ -130,6 +153,24 @@ check('apply asks the host to replace an existing embedded cover', applyCalls[0]
 check('dialog closes after applying', container.querySelector('.dshm-modal') === null);
 check('row now shows the renamed/host-tagged entry', titleOf(rows()[0]) === 'Alpha Real' && rows()[0].title === 'Real X - Alpha Real.mp3', titleOf(rows()[0]) + ' / ' + rows()[0].title);
 check('no local override is kept once tags were written', meta()['a.mp3'] === undefined);
+
+// ── 弹层：dialog 语义 / 背景滚动锁 / Escape 关闭 / 焦点进入 ────────────────────
+{
+  await act(async () => { rows()[1].querySelector('.dshm-match').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(90);
+  const overlay = container.querySelector('.dshm-modal');
+  const input = container.querySelector('.dshm-matchInput');
+  check('match overlay exposes dialog semantics',
+    overlay !== null && overlay.getAttribute('role') === 'dialog'
+      && overlay.getAttribute('aria-modal') === 'true' && overlay.getAttribute('aria-label') !== null,
+    overlay === null ? 'missing' : overlay.getAttribute('role') + '/' + overlay.getAttribute('aria-modal'));
+  check('opening the overlay locks background scroll', document.body.style.overflow === 'hidden', 'overflow=' + document.body.style.overflow);
+  check('focus moves into the overlay', input !== null && document.activeElement === input, 'active=' + (document.activeElement?.className ?? '?'));
+  await act(async () => { document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+  await settle(60);
+  check('Escape closes the overlay', container.querySelector('.dshm-modal') === null);
+  check('closing the overlay restores background scroll', document.body.style.overflow === '', 'overflow=' + document.body.style.overflow);
+}
 
 // ── Display-only fallback (unchecked box) ────────────────────────────────────
 await act(async () => { rows()[1].querySelector('.dshm-match').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
