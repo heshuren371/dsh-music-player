@@ -2508,3 +2508,20 @@ old 与 new 完全相同（duration=right/10px/64px；cover=center/4px/clip/44px
 
 - 音频图/引擎（`ensureDevice`/`ensureAudioGraph`/`rampVolume`/RG/EQ 应用）；
 - 其余辅助函数按可变依赖数继续，每阶段下调棘轮。
+
+## 5.56 第 45 轮 —— createPlayer 拆分阶段 4（音频图/引擎）
+
+- 迁移 14 块、260 行到同级 `createAudioEngine(core)`：
+  `releaseElement`、`resumeGraph`、`watchSuspended`、`ensureDevice`、`ensureAudioGraph`、
+  `probeCrossOriginCors`、`applyVolume`、`readVolume`、`hasRgData`、`startRgMeasure`、
+  `applyEqualizer`、`applyReplayGain`、`cancelFade`、`rampVolume`；fade 状态（`fadeSeq`/
+  `fadeCancelTimer`/`fadeSettle`）随工厂闭包。
+- 15 个依赖用 core getter/setter 注入（`audio`/`audioCtx`/`gainNode`/`rgGainNode`/`device`/
+  `bindFailed`/`graphReady`/`set`/`state` 等）。
+- createPlayer 1806 → 1572 行；D/E 段、client-activation、replaygain 全绿。
+- 棘轮下调至 ≤1576；累计 2696 → 1572（-1124，-42%）。
+
+### 剩余
+
+- 恢复/错误链路（`onError`、`recoverAt` 等）、MV 视频路径（`prepareVideo`/`startWasmVideo`）、
+  播放控制与列表元数据。可按同一模式继续拆，每阶段下调棘轮。
