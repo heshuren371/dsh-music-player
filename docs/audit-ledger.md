@@ -2493,3 +2493,18 @@ old 与 new 完全相同（duration=right/10px/64px；cover=center/4px/clip/44px
 
 1. 传输与交叉淡化（`attachSource` 139 行，12 个 `let`）；
 2. 音频图与设备（`ensureDevice` 67 行等）。
+
+## 5.55 第 44 轮 —— createPlayer 拆分阶段 3（传输/交叉淡化）
+
+- 迁移 5 块、192 行到同级 `createTransport(core)`：
+  `settlePending` + `commitPendingCrossfade`、`ensureIdleElement`、`ensureIdleGraph`、
+  `schedulePrefetch`、`attachSource`（含嵌套的 `startNow` / `crossfadeInto` / `settle`）。
+- 依赖 31 个，全部用 core getter/setter 注入（`audio`/`idleEl`/电平节点/`prefetchedUrl`/`pauseEpoch` 等）。
+  `settlePending` 随工厂走，交接语义不变。
+- createPlayer 1949 → 1806 行；D1–D20（含交叉淡化交换、过渡窗口 seek/pause）全绿。
+- 棘轮下调至 ≤1810；累计：2696 → 1806（−890，−33%）。
+
+### 剩余
+
+- 音频图/引擎（`ensureDevice`/`ensureAudioGraph`/`rampVolume`/RG/EQ 应用）；
+- 其余辅助函数按可变依赖数继续，每阶段下调棘轮。
