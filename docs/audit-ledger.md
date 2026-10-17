@@ -2456,3 +2456,25 @@ old 与 new 完全相同（duration=right/10px/64px；cover=center/4px/clip/44px
 
 说明：DSH Web GUI 的新浏览器会话要求 `dsh web` 令牌，ego-lite 直接打开被鉴权拦下；
 因此验证用的是插件真实 CSS + 真实表格标记（冲突完全在插件 CSS 内部，宿主不参与这条级联）。
+
+## 5.53 第 42 轮 —— createPlayer 拆分（阶段 1）+ MV 缓存真机确认
+
+### MV 缓存（真机确认）
+
+- `~/.dsh/storages/dsh-music-mv` 里两个缓存文件的 mtime 是 10-14，当前 DSH 进程启动于 10-17 21:45 → 跨重启存活。
+- 按宿主 `mvCacheKey`（`sha1(mode|path|size-mtimeMs)`）复算：`Sugar.avi` 与「再见 再见.mp4」的 `transcode` 键与现存缓存文件逐字相等 → 当下仍然命中，不会重转。
+- 结论：本机已证实「转一遍以后不用再转」；缓存 mtime 未被 touch，说明这两首自 10-14 后未再播放。
+
+### createPlayer 拆分（阶段 1）
+
+- 提取 MediaSession 簇 218 行到模块级 `createMediaSession(core)`：`mediaArtworkFallback` / `coverKnown` / `probeCover` / `absoluteUrl` / `systemMediaUrl` / `updatePositionState` / `notifyTrack` / `updateMediaSession`。
+  依赖用 getter 注入：`state`（会被 set 替换）、`audio`（交叉淡化会交换）、`endpointBase`、`systemArtBase`；`effective` / `coverUrl` 按值注入（稳定引用）。
+- `createPlayer` 3099 → 2486 行；35 套全绿。
+- 新增体积棘轮：`test-audit` 断言 `createPlayer ≤ 2490` 行；对照（体内加 6 行）→ 红。
+
+### 剩余阶段（按可变依赖数排序）
+
+1. `api0`（622 行，25 个 `let` 依赖）——先补 API 行为测试，再按 accessor core 提取；
+2. 传输与交叉淡化（`attachSource` 139 行，12 个 `let`）——D 段覆盖已较全；
+3. 音频图与设备（`ensureDevice` 67 行等）——D/E 段覆盖。
+4. 每阶段完成后把棘轮数值下调，只许变小。

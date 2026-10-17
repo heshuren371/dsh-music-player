@@ -1317,6 +1317,234 @@ body:has(.dshm-root) [data-width-handle]{display:none}
      * view tree), so playback keeps running when the user switches to another tab
      * and the Music view unmounts.
      */
+    /**
+     * 系统「正在播放」集成：封面回退、位置状态、MediaSession 元数据。
+     * 依赖用 getter 注入（`audio` 会在交叉淡化时交换，`state` 会被 set 替换）。
+     */
+    function createMediaSession(core) {
+      /** 封面回退图（canvas 生成一次）跟工厂实例走。 */
+      let fallbackArtwork;
+    const mediaArtworkFallback = () => {
+      if (fallbackArtwork !== undefined) return fallbackArtwork;
+      try {
+        const size = 256;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        if (ctx === null) return (fallbackArtwork = null);
+        const radius = size * 0.225;
+        const gradient = ctx.createLinearGradient(0, 0, size, size);
+        gradient.addColorStop(0, "#fb5c74");
+        gradient.addColorStop(0.55, "#f7415f");
+        gradient.addColorStop(1, "#e0304a");
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.moveTo(radius, 0);
+        ctx.lineTo(size - radius, 0);
+        ctx.arcTo(size, 0, size, radius, radius);
+        ctx.lineTo(size, size - radius);
+        ctx.arcTo(size, size, size - radius, size, radius);
+        ctx.lineTo(radius, size);
+        ctx.arcTo(0, size, 0, size - radius, radius);
+        ctx.lineTo(0, radius);
+        ctx.arcTo(0, 0, radius, 0, radius);
+        ctx.closePath();
+        ctx.fill();
+        // Reuse the sidebar note glyph (16x16 viewBox) as the white note.
+        const note = new Path2D("M12.9 1.3 5.9 2.9c-.5.1-.9.6-.9 1.1v6.9c-.3-.1-.7-.2-1-.2-1.2 0-2.2.8-2.2 1.9s1 1.9 2.2 1.9 2.2-.8 2.2-1.9V5.4c0-.3.2-.6.5-.6l5.7-1.3c.3-.1.6.2.6.5v5.3c-.3-.1-.7-.2-1-.2-1.2 0-2.2.8-2.2 1.9s1 1.9 2.2 1.9 2.2-.8 2.2-1.9V2.2c0-.5-.4-1-1.3-.9z");
+        const scale = (size / 16) * 0.62;
+        ctx.save();
+        ctx.translate(size / 2 - 8 * scale, size / 2 - 8 * scale);
+        ctx.scale(scale, scale);
+        ctx.fillStyle = "#ffffff";
+        ctx.fill(note);
+        ctx.restore();
+        fallbackArtwork = canvas.toDataURL("image/png");
+      } catch {
+        // No canvas (or Path2D): fall back to the cover URL as before.
+        fallbackArtwork = null;
+      }
+      return fallbackArtwork;
+    };
+
+    /** id → true | false (has embedded cover); absent = not probed yet. */
+    const coverKnown = new Map();
+    const probeCover = (track) => {
+      if (coverKnown.has(track.id)) return;
+      coverKnown.set(track.id, null); // in-flight
+      const image = new Image();
+      image.onload = () => {
+        coverKnown.set(track.id, true);
+        if (core.state.current >= 0 && core.state.tracks[core.state.current]?.id === track.id) updateMediaSession();
+      };
+      image.onerror = () => {
+        coverKnown.set(track.id, false);
+        if (core.state.current >= 0 && core.state.tracks[core.state.current]?.id === track.id) updateMediaSession();
+      };
+      image.src = core.coverUrl(track.id);
+    };
+
+    /**
+     * macOS 的「正在播放」（控制中心 / 锁屏 / 触控栏）由系统 MediaRemote 抓封面，
+     * 它只接受能真正解析到的绝对 URL；在 dsh-app:// 自定义协议下相对路径容易
+     * 被判成无效资源，于是封面一直是空白。统一转绝对地址。
+     */
+    const absoluteUrl = (value) => {
+      try {
+        return new URL(value, window.location.href).href;
+      } catch {
+        return value;
+      }
+    };
+
+    /**
+     * 系统媒体卡片（MediaSession artwork）用的封面地址。
+     *
+     * 必须是绝对 http(s) / data / blob —— Chromium 会直接拒收其它 scheme
+     * （"MediaImage src can only be of http/https/data/blob scheme"），
+     * Desktop 的 dsh-app:// 就是被拒的那一类，表现是「有歌名没封面」。
+     * Desktop 用外壳回环 origin + 免会话 cookie 的旧前缀；Web 用页面同源绝对地址。
+     */
+    const systemMediaUrl = (path, query) => {
+      // Web（DESKTOP=false）保持同源地址不变——那条路本来就正常。
+      if (DESKTOP && typeof core.systemArtBase === "string" && core.systemArtBase.length > 0) {
+        return core.systemArtBase + "&" + query;
+      }
+      return absoluteUrl(core.endpointBase + path + "?" + query);
+    };
+
+    /**
+     * 把播放进度同步给系统 Now Playing 的进度条（macOS 控制中心可以直接拖动）。
+     * setPositionState 的参数校验很严：duration 必须是有限的正值、position 不得
+     * 超过 duration，否则整段调用抛异常；所以先夹紧再调。
+     */
+    const updatePositionState = () => {
+      if (!("mediaSession" in navigator)) return;
+      if (typeof navigator.mediaSession.setPositionState !== "function") return;
+      if (core.state.current < 0) return;
+      try {
+        const live = Number.isFinite(core.audio.duration) && core.audio.duration > 0 ? core.audio.duration : core.state.duration;
+        if (!Number.isFinite(live) || live <= 0) return;
+        const position = Math.min(Math.max(core.audio.currentTime, 0), live);
+        navigator.mediaSession.setPositionState({
+          duration: live,
+          playbackRate: Number.isFinite(core.audio.playbackRate) && core.audio.playbackRate > 0 ? core.audio.playbackRate : 1,
+          position,
+        });
+      } catch {
+        // 旧引擎 / 越界参数：进度只是装饰，绝不因此打断播放。
+      }
+    };
+
+    /**
+     * Desktop 通知栏：换曲时给一条原生通知（Electron 把它转成 macOS/Windows
+     * 系统通知）。策略上只在窗口失焦时发，否则会抢焦点、刷屏。
+     * 官方 desktop app 文档只注入 window.dshDesktop 标记（不带 IPC 能力），
+     * 所以这里用标准 Web Notification；icon 在支持的平台上直接显示专辑封面。
+     */
+    /**
+     * 只在实际开始播放时提示：页面加载时把上次曲目 cue 成暂停态、或用户手动暂停，
+     * 都不该弹通知。'play' 事件里 state.playing 已经为 true，换曲/自动下一首也会
+     * 走到同一处，所以一个判据覆盖全部路径。
+     */
+    const NOTIFY_ALWAYS = true;
+    let lastNoticeId = null;
+    const notifyTrack = (track, view, artwork, playing) => {
+      if (!DESKTOP || track === undefined) return;
+      if (lastNoticeId === track.id) return;
+      if (playing !== true) return;
+      // 焦点策略：默认每次换曲都提示（静音横幅），窗口失焦时当然也提示。
+      // 想安静一点就把 NOTIFY_ALWAYS 改成 false，只在窗口失焦时提示。
+      if (!NOTIFY_ALWAYS && document.visibilityState === "visible" && document.hasFocus()) return;
+      lastNoticeId = track.id;
+      if (typeof Notification !== "function") return;
+      try {
+        if (Notification.permission === "denied") return;
+        // Electron 里默认就是 granted；'default' 时补一次授权请求（首次会走系统弹窗）。
+        if (Notification.permission === "default" && typeof Notification.requestPermission === "function") {
+          Notification.requestPermission().catch(() => undefined);
+        }
+        const body = [view?.artist, view?.album].filter((value) => typeof value === "string" && value.length > 0).join(" · ");
+        const notification = new Notification(view?.title ?? track.title, {
+          body,
+          icon: typeof artwork === "string" ? artwork : undefined,
+          silent: true, // 音乐本身在响，不该再叠一层提示音
+          tag: "dsh-music-now-playing",
+        });
+        notification.onclick = () => {
+          try {
+            window.focus();
+          } catch {
+            // 无窗口句柄：忽略。
+          }
+          notification.close();
+        };
+      } catch {
+        // 通知是增强项：任何平台差异都不影响播放。
+      }
+    };
+
+    /** System media keys / OS now-playing integration (macOS Control Center…). */
+    const updateMediaSession = () => {
+      if (!("mediaSession" in navigator)) return;
+      try {
+        const raw = core.state.current >= 0 ? core.state.tracks[core.state.current] : undefined;
+        if (raw !== undefined) probeCover(raw);
+        const track = core.effective(raw);
+        // 补全的远端封面优先；没有补全才回退内嵌封面 / Apple Music 图标。
+        const meta = raw === undefined ? undefined : core.state.meta[raw.id];
+        /**
+         * `track === undefined` 与 `raw === undefined` 等价（effective 对
+         * undefined 原样返回 undefined），但类型系统看不见这层等价。下面用
+         * 一个收窄过的 id 供 artwork 分支使用 —— 那两个分支里 track 必然存在，
+         * 所以 raw 也必然存在，运行结果与 `raw.id` 完全一致。
+         */
+        const rawId = raw === undefined ? "" : raw.id;
+        const metaCover = meta !== undefined && typeof meta.cover === "string" && meta.cover.length > 0
+          ? systemMediaUrl("/art", "u=" + encodeURIComponent(meta.cover))
+          : null;
+        // While a cover is still being probed, keep the cover URL (tracks
+        // usually have one); swap in the Apple Music icon once a 404 proves
+        // there is none, so the widget never shows a blank square.
+        const fallback = track === undefined ? null : mediaArtworkFallback();
+        // 真实封面不写 sizes：MediaRemote 会按需缩放，写错尺寸反而会被跳过；
+        // canvas 兜底图尺寸是我们自己定的，才标注。
+        const artwork = track === undefined
+          ? []
+          : metaCover !== null
+            ? [{ src: absoluteUrl(metaCover) }]
+            : coverKnown.get(rawId) === false && fallback !== null
+              // canvas 兜底图本身就是 data: URL，Chromium 明确允许。
+              ? [{ src: fallback, sizes: "256x256", type: "image/png" }]
+              : [{ src: systemMediaUrl("/cover", "p=" + encodeURIComponent(rawId) + "&v=" + (core.state.scannedAt ?? 0)) }];
+        navigator.mediaSession.metadata = track === undefined ? null : new MediaMetadata({
+          title: track.title,
+          artist: track.artist ?? "",
+          album: typeof track.album === "string" && track.album.length > 0
+            ? track.album
+            : (typeof core.state.dir === "string" ? core.state.dir.split(/[\\/]/).pop() : ""),
+          artwork,
+        });
+        navigator.mediaSession.playbackState = core.state.current < 0 ? "none" : core.state.playing ? "playing" : "paused";
+        if (track === undefined && typeof navigator.mediaSession.setPositionState === "function") {
+          // 没有当前曲目时必须清掉上一首的进度，否则系统控件停在旧位置。
+          try {
+            navigator.mediaSession.setPositionState();
+          } catch {
+            // 部分引擎不接受空参数：忽略。
+          }
+        } else {
+          updatePositionState();
+        }
+        notifyTrack(raw, track, artwork.length > 0 ? artwork[0].src : undefined, core.state.playing);
+      } catch {
+        // Older engines: metadata is cosmetic, never break playback over it.
+      }
+    };
+      return { mediaArtworkFallback, coverKnown, probeCover, updatePositionState, updateMediaSession };
+    }
+
     function createPlayer() {
       /**
        * 媒体元素用 <video>：音频文件本来就能播，MV 才有画面可显示（一个元素搞定两种媒体，
@@ -2941,225 +3169,15 @@ body:has(.dshm-root) [data-width-handle]{display:none}
        * MediaSession needs a raster URL, so the icon (pink gradient rounded
        * square + white beamed note) is drawn once on a canvas and cached.
        */
-      let fallbackArtwork;
-      const mediaArtworkFallback = () => {
-        if (fallbackArtwork !== undefined) return fallbackArtwork;
-        try {
-          const size = 256;
-          const canvas = document.createElement("canvas");
-          canvas.width = size;
-          canvas.height = size;
-          const ctx = canvas.getContext("2d");
-          if (ctx === null) return (fallbackArtwork = null);
-          const radius = size * 0.225;
-          const gradient = ctx.createLinearGradient(0, 0, size, size);
-          gradient.addColorStop(0, "#fb5c74");
-          gradient.addColorStop(0.55, "#f7415f");
-          gradient.addColorStop(1, "#e0304a");
-          ctx.fillStyle = gradient;
-          ctx.beginPath();
-          ctx.moveTo(radius, 0);
-          ctx.lineTo(size - radius, 0);
-          ctx.arcTo(size, 0, size, radius, radius);
-          ctx.lineTo(size, size - radius);
-          ctx.arcTo(size, size, size - radius, size, radius);
-          ctx.lineTo(radius, size);
-          ctx.arcTo(0, size, 0, size - radius, radius);
-          ctx.lineTo(0, radius);
-          ctx.arcTo(0, 0, radius, 0, radius);
-          ctx.closePath();
-          ctx.fill();
-          // Reuse the sidebar note glyph (16x16 viewBox) as the white note.
-          const note = new Path2D("M12.9 1.3 5.9 2.9c-.5.1-.9.6-.9 1.1v6.9c-.3-.1-.7-.2-1-.2-1.2 0-2.2.8-2.2 1.9s1 1.9 2.2 1.9 2.2-.8 2.2-1.9V5.4c0-.3.2-.6.5-.6l5.7-1.3c.3-.1.6.2.6.5v5.3c-.3-.1-.7-.2-1-.2-1.2 0-2.2.8-2.2 1.9s1 1.9 2.2 1.9 2.2-.8 2.2-1.9V2.2c0-.5-.4-1-1.3-.9z");
-          const scale = (size / 16) * 0.62;
-          ctx.save();
-          ctx.translate(size / 2 - 8 * scale, size / 2 - 8 * scale);
-          ctx.scale(scale, scale);
-          ctx.fillStyle = "#ffffff";
-          ctx.fill(note);
-          ctx.restore();
-          fallbackArtwork = canvas.toDataURL("image/png");
-        } catch {
-          // No canvas (or Path2D): fall back to the cover URL as before.
-          fallbackArtwork = null;
-        }
-        return fallbackArtwork;
-      };
-
-      /** id → true | false (has embedded cover); absent = not probed yet. */
-      const coverKnown = new Map();
-      const probeCover = (track) => {
-        if (coverKnown.has(track.id)) return;
-        coverKnown.set(track.id, null); // in-flight
-        const image = new Image();
-        image.onload = () => {
-          coverKnown.set(track.id, true);
-          if (state.current >= 0 && state.tracks[state.current]?.id === track.id) updateMediaSession();
-        };
-        image.onerror = () => {
-          coverKnown.set(track.id, false);
-          if (state.current >= 0 && state.tracks[state.current]?.id === track.id) updateMediaSession();
-        };
-        image.src = coverUrl(track.id);
-      };
-
-      /**
-       * macOS 的「正在播放」（控制中心 / 锁屏 / 触控栏）由系统 MediaRemote 抓封面，
-       * 它只接受能真正解析到的绝对 URL；在 dsh-app:// 自定义协议下相对路径容易
-       * 被判成无效资源，于是封面一直是空白。统一转绝对地址。
-       */
-      const absoluteUrl = (value) => {
-        try {
-          return new URL(value, window.location.href).href;
-        } catch {
-          return value;
-        }
-      };
-
-      /**
-       * 系统媒体卡片（MediaSession artwork）用的封面地址。
-       *
-       * 必须是绝对 http(s) / data / blob —— Chromium 会直接拒收其它 scheme
-       * （"MediaImage src can only be of http/https/data/blob scheme"），
-       * Desktop 的 dsh-app:// 就是被拒的那一类，表现是「有歌名没封面」。
-       * Desktop 用外壳回环 origin + 免会话 cookie 的旧前缀；Web 用页面同源绝对地址。
-       */
-      const systemMediaUrl = (path, query) => {
-        // Web（DESKTOP=false）保持同源地址不变——那条路本来就正常。
-        if (DESKTOP && typeof systemArtBase === "string" && systemArtBase.length > 0) {
-          return systemArtBase + "&" + query;
-        }
-        return absoluteUrl(endpointBase + path + "?" + query);
-      };
-
-      /**
-       * 把播放进度同步给系统 Now Playing 的进度条（macOS 控制中心可以直接拖动）。
-       * setPositionState 的参数校验很严：duration 必须是有限的正值、position 不得
-       * 超过 duration，否则整段调用抛异常；所以先夹紧再调。
-       */
-      const updatePositionState = () => {
-        if (!("mediaSession" in navigator)) return;
-        if (typeof navigator.mediaSession.setPositionState !== "function") return;
-        if (state.current < 0) return;
-        try {
-          const live = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : state.duration;
-          if (!Number.isFinite(live) || live <= 0) return;
-          const position = Math.min(Math.max(audio.currentTime, 0), live);
-          navigator.mediaSession.setPositionState({
-            duration: live,
-            playbackRate: Number.isFinite(audio.playbackRate) && audio.playbackRate > 0 ? audio.playbackRate : 1,
-            position,
-          });
-        } catch {
-          // 旧引擎 / 越界参数：进度只是装饰，绝不因此打断播放。
-        }
-      };
-
-      /**
-       * Desktop 通知栏：换曲时给一条原生通知（Electron 把它转成 macOS/Windows
-       * 系统通知）。策略上只在窗口失焦时发，否则会抢焦点、刷屏。
-       * 官方 desktop app 文档只注入 window.dshDesktop 标记（不带 IPC 能力），
-       * 所以这里用标准 Web Notification；icon 在支持的平台上直接显示专辑封面。
-       */
-      /**
-       * 只在实际开始播放时提示：页面加载时把上次曲目 cue 成暂停态、或用户手动暂停，
-       * 都不该弹通知。'play' 事件里 state.playing 已经为 true，换曲/自动下一首也会
-       * 走到同一处，所以一个判据覆盖全部路径。
-       */
-      const NOTIFY_ALWAYS = true;
-      let lastNoticeId = null;
-      const notifyTrack = (track, view, artwork, playing) => {
-        if (!DESKTOP || track === undefined) return;
-        if (lastNoticeId === track.id) return;
-        if (playing !== true) return;
-        // 焦点策略：默认每次换曲都提示（静音横幅），窗口失焦时当然也提示。
-        // 想安静一点就把 NOTIFY_ALWAYS 改成 false，只在窗口失焦时提示。
-        if (!NOTIFY_ALWAYS && document.visibilityState === "visible" && document.hasFocus()) return;
-        lastNoticeId = track.id;
-        if (typeof Notification !== "function") return;
-        try {
-          if (Notification.permission === "denied") return;
-          // Electron 里默认就是 granted；'default' 时补一次授权请求（首次会走系统弹窗）。
-          if (Notification.permission === "default" && typeof Notification.requestPermission === "function") {
-            Notification.requestPermission().catch(() => undefined);
-          }
-          const body = [view?.artist, view?.album].filter((value) => typeof value === "string" && value.length > 0).join(" · ");
-          const notification = new Notification(view?.title ?? track.title, {
-            body,
-            icon: typeof artwork === "string" ? artwork : undefined,
-            silent: true, // 音乐本身在响，不该再叠一层提示音
-            tag: "dsh-music-now-playing",
-          });
-          notification.onclick = () => {
-            try {
-              window.focus();
-            } catch {
-              // 无窗口句柄：忽略。
-            }
-            notification.close();
-          };
-        } catch {
-          // 通知是增强项：任何平台差异都不影响播放。
-        }
-      };
-
-      /** System media keys / OS now-playing integration (macOS Control Center…). */
-      const updateMediaSession = () => {
-        if (!("mediaSession" in navigator)) return;
-        try {
-          const raw = state.current >= 0 ? state.tracks[state.current] : undefined;
-          if (raw !== undefined) probeCover(raw);
-          const track = effective(raw);
-          // 补全的远端封面优先；没有补全才回退内嵌封面 / Apple Music 图标。
-          const meta = raw === undefined ? undefined : state.meta[raw.id];
-          /**
-           * `track === undefined` 与 `raw === undefined` 等价（effective 对
-           * undefined 原样返回 undefined），但类型系统看不见这层等价。下面用
-           * 一个收窄过的 id 供 artwork 分支使用 —— 那两个分支里 track 必然存在，
-           * 所以 raw 也必然存在，运行结果与 `raw.id` 完全一致。
-           */
-          const rawId = raw === undefined ? "" : raw.id;
-          const metaCover = meta !== undefined && typeof meta.cover === "string" && meta.cover.length > 0
-            ? systemMediaUrl("/art", "u=" + encodeURIComponent(meta.cover))
-            : null;
-          // While a cover is still being probed, keep the cover URL (tracks
-          // usually have one); swap in the Apple Music icon once a 404 proves
-          // there is none, so the widget never shows a blank square.
-          const fallback = track === undefined ? null : mediaArtworkFallback();
-          // 真实封面不写 sizes：MediaRemote 会按需缩放，写错尺寸反而会被跳过；
-          // canvas 兜底图尺寸是我们自己定的，才标注。
-          const artwork = track === undefined
-            ? []
-            : metaCover !== null
-              ? [{ src: absoluteUrl(metaCover) }]
-              : coverKnown.get(rawId) === false && fallback !== null
-                // canvas 兜底图本身就是 data: URL，Chromium 明确允许。
-                ? [{ src: fallback, sizes: "256x256", type: "image/png" }]
-                : [{ src: systemMediaUrl("/cover", "p=" + encodeURIComponent(rawId) + "&v=" + (state.scannedAt ?? 0)) }];
-          navigator.mediaSession.metadata = track === undefined ? null : new MediaMetadata({
-            title: track.title,
-            artist: track.artist ?? "",
-            album: typeof track.album === "string" && track.album.length > 0
-              ? track.album
-              : (typeof state.dir === "string" ? state.dir.split(/[\\/]/).pop() : ""),
-            artwork,
-          });
-          navigator.mediaSession.playbackState = state.current < 0 ? "none" : state.playing ? "playing" : "paused";
-          if (track === undefined && typeof navigator.mediaSession.setPositionState === "function") {
-            // 没有当前曲目时必须清掉上一首的进度，否则系统控件停在旧位置。
-            try {
-              navigator.mediaSession.setPositionState();
-            } catch {
-              // 部分引擎不接受空参数：忽略。
-            }
-          } else {
-            updatePositionState();
-          }
-          notifyTrack(raw, track, artwork.length > 0 ? artwork[0].src : undefined, state.playing);
-        } catch {
-          // Older engines: metadata is cosmetic, never break playback over it.
-        }
-      };
+      const mediaSession = createMediaSession({
+        get state() { return state; },
+        get audio() { return audio; },
+        get endpointBase() { return endpointBase; },
+        get systemArtBase() { return systemArtBase; },
+        effective,
+        coverUrl,
+      });
+      const { coverKnown, updatePositionState, updateMediaSession } = mediaSession;
       if ("mediaSession" in navigator) {
         try {
           navigator.mediaSession.setActionHandler("play", () => api0.toggle());

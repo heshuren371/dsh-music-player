@@ -266,6 +266,19 @@ check('setDirectory awaits ready before touching currentDir (else loadState() cl
 // 用它的索引判断先后会错位（本断言前两版就栽在这里）。另外逐行剥注释——说明文字里
 // 也会出现 `mvEscalated`。
 const clientSrcLines = readFileSync(new URL('../src/client.ts', import.meta.url), 'utf8').split('\n');
+
+// ── createPlayer 体积棘轮：拆分阶段只许变小，防止单体再长回去 ────────────
+const createPlayerStart = clientSrcLines.findIndex((line) => /^\s{4}function createPlayer\(/.test(line));
+let createPlayerEnd = createPlayerStart;
+if (createPlayerStart >= 0) {
+  let braceDepth = 0;
+  for (let i = createPlayerStart; i < clientSrcLines.length; i += 1) {
+    braceDepth += (clientSrcLines[i].match(/\{/g) ?? []).length - (clientSrcLines[i].match(/\}/g) ?? []).length;
+    if (i > createPlayerStart && braceDepth === 0) { createPlayerEnd = i; break; }
+  }
+}
+const createPlayerLines = createPlayerStart < 0 ? 0 : createPlayerEnd - createPlayerStart + 1;
+check('createPlayer stays within its size ratchet', createPlayerStart >= 0 && createPlayerLines <= 2490, createPlayerLines + ' lines');
 const mvViewLine = clientSrcLines.findIndex((line) => /function MusicView\(|const MusicView\s*=/.test(line));
 const mvRefAfterView = clientSrcLines
   .map((text, i) => ({ i, code: codeOf(text) }))
