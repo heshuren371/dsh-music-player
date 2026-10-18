@@ -1,8 +1,10 @@
 # dsh-music-player
 
+![dsh-music-player](assets/icon-180.png)
+
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）的本地音乐播放器插件。
 
-它在会话视图的标签环里加一个「音乐」标签页，交互与视觉参考 macOS 的 Music 应用，Web 与 DSH Desktop 共用同一份包。宿主侧由 `facets.host.entry` 激活，通过 `ctx.connection.fetch` 注册一组精确的 `/api/dsh-music/*` 路由；客户端通过 `ctx.slots.register` 注册会话视图。
+它在会话视图的标签环里加一个「音乐」标签页，交互参考 macOS Music，Web 与 DSH Desktop 共用同一份包。宿主侧由 `facets.host.entry` 激活，通过 `ctx.connection.fetch` 注册一组精确的 `/api/dsh-music/*` 路由；客户端通过 `ctx.slots.register` 注册会话视图。
 
 源码用 TypeScript 编写，`lib/` 是 `tsc` 产物并提交进仓库（`dsh plugin add` 不执行构建）。
 
