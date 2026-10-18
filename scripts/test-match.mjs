@@ -32,6 +32,8 @@ await fs.writeFile(path.join(music, 'Mystery.wav'), wav());
 await fs.writeFile(path.join(music, 'Unknown.wav'), wav());
 await fs.writeFile(path.join(music, 'Great Artist - Strong Match.wav'), wav());
 await fs.writeFile(path.join(music, 'Solo Song.wav'), wav());
+await fs.writeFile(path.join(music, 'Green Day - Boulevard of Broken Dreams (Live).wav'), wav());
+await fs.writeFile(path.join(music, 'Nobody - Rare Live Session.wav'), wav());
 
 const realFetch = globalThis.fetch;
 const qqQueries = [];
@@ -39,6 +41,7 @@ const mbQueries = [];
 const neteaseCalls = [];
 let neteaseDown = false;
 const upstreamHosts = [];
+const itunesParams = [];
 const jpeg = [0xff, 0xd8, 0xff, 0xe0, 1, 2, 3];
 const image = () => new Response(new Uint8Array(jpeg), { status: 200, headers: { 'content-type': 'image/jpeg' } });
 
@@ -57,6 +60,14 @@ globalThis.fetch = async (input, init) => {
     if (term.toLowerCase().includes('21 guns')) {
       list.push({ songname: '21 Guns', singer: [{ name: 'Green Day' }], albumname: '21st Century Breakdown', interval: 1, albummid: 'MID3', songmid: 'S3' });
     }
+    if (term.toLowerCase().includes('boulevard')) {
+      list.push({ songname: 'Boulevard of Broken Dreams', singer: [{ name: 'Green Day' }], albumname: 'American Idiot', interval: 1, albummid: 'MID6', songmid: 'S6' });
+      list.push({ songname: 'Boulevard of Broken Dreams (Live)', singer: [{ name: 'Green Day' }], albumname: 'Bullet in a Bible (Live)', interval: 3, albummid: 'MID7', songmid: 'S7' });
+    }
+    if (term.toLowerCase().includes('rare live session')) {
+      // 没有 albummid → 无封面；封面只能靠专辑搜索兜底。
+      list.push({ songname: 'Rare Live Session', singer: [{ name: 'Nobody' }], albumname: 'Live Sessions', interval: 1, albummid: '', songmid: 'S8' });
+    }
     if (term.toLowerCase().includes('strong match')) {
       // 时长与本地差得远：只有标题/歌手都强匹配时才允许自动写入。
       list.push({ songname: 'Strong Match', singer: [{ name: 'Great Artist' }], albumname: 'Album', interval: 300, albummid: 'MID4', songmid: 'S4' });
@@ -68,8 +79,18 @@ globalThis.fetch = async (input, init) => {
     return new Response(JSON.stringify({ code: 0, data: { song: { list } } }), { status: 200, headers: { 'content-type': 'application/json' } });
   }
   if (url.startsWith('https://itunes.apple.com/')) {
-    const term = new URL(url).searchParams.get('term') ?? '';
+    const params = new URL(url).searchParams;
+    const term = params.get('term') ?? '';
+    const entity = params.get('entity') ?? 'song';
+    const country = params.get('country') ?? '';
+    itunesParams.push({ term, entity, country });
     const results = [];
+    if (entity === 'album' && term.toLowerCase().includes('rare live session') && country === 'US') {
+      results.push({ collectionId: 77, collectionName: 'Live Sessions (Live)', artistName: 'Nobody', artworkUrl100: 'https://is1-ssl.mzstatic.com/image/thumb/AlbumCover/100x100bb.jpg' });
+    }
+    if (entity === 'song' && term.toLowerCase().includes('boulevard')) {
+      results.push({ trackId: 13, trackName: 'Boulevard of Broken Dreams', artistName: 'Green Day', collectionName: 'American Idiot', trackTimeMillis: 1000, artworkUrl100: 'https://is1-ssl.mzstatic.com/image/thumb/Music3/100x100bb.jpg' });
+    }
     if (term.includes('晴天')) {
       results.push({ trackId: 11, trackName: '晴天', artistName: '周杰倫', collectionName: '葉惠美', trackTimeMillis: 1000, artworkUrl100: 'https://is1-ssl.mzstatic.com/image/thumb/Music/100x100bb.jpg' });
     }
@@ -127,10 +148,10 @@ await json(base + '/api/dir', { method: 'POST', headers: { 'content-type': 'appl
 let library = null;
 for (let i = 0; i < 80; i += 1) {
   const r = await json(base + '/api/library');
-  if (r.body.scanning !== true && (r.body.tracks ?? []).length === 6) { library = r.body; break; }
+  if (r.body.scanning !== true && (r.body.tracks ?? []).length === 8) { library = r.body; break; }
   await new Promise((resolve) => setTimeout(resolve, 100));
 }
-check('scan finds six tracks', library !== null, 'tracks=' + (library?.tracks?.length ?? 'none'));
+check('scan finds eight tracks', library !== null, 'tracks=' + (library?.tracks?.length ?? 'none'));
 
 // Covered track: QQ + iTunes agree (fuzzy traditional/simplified merge), NetEase cover loses.
 const qing = await json(base + '/api/match?p=' + encodeURIComponent('周杰伦 - 晴天.wav'));
@@ -148,6 +169,20 @@ check('晴天: MusicBrainz is not called when primaries are confident', mbQuerie
 const guns = await json(base + '/api/match?p=' + encodeURIComponent('Green Day - 21 Guns.wav'));
 check('21 Guns: title keeps its number', guns.body.best?.title === '21 Guns' && guns.body.best?.artist === 'Green Day', JSON.stringify(guns.body.best && { t: guns.body.best.title, a: guns.body.best.artist }));
 check('21 Guns: query sent is "21 guns ...", never "guns"', qqQueries.some((q) => q.toLowerCase().includes('21 guns')) && !qqQueries.some((q) => /^guns/.test(q.toLowerCase())), JSON.stringify(qqQueries));
+
+// Live 版本：查询必须保留版本标记；现场候选必须压过录音室候选。
+const liveTrack = await json(base + '/api/match?p=' + encodeURIComponent('Green Day - Boulevard of Broken Dreams (Live).wav'));
+const liveBest = liveTrack.body.best;
+check('live: the raw title (with the Live marker) is used as a query', (liveTrack.body.terms ?? []).some((q) => /boulevard/i.test(q) && /\(live\)/i.test(q)), JSON.stringify(liveTrack.body.terms));
+check('live: a live-keyword query is generated', (liveTrack.body.terms ?? []).some((q) => /boulevard/i.test(q) && /live$/i.test(q)), JSON.stringify(liveTrack.body.terms));
+check('live: the live candidate outranks the studio one', liveBest !== null && (/live/i.test(liveBest.title) || /live/i.test(liveBest.album)), JSON.stringify({ title: liveBest?.title, album: liveBest?.album, score: liveBest?.score }));
+check('live: high confidence stays auto-applicable', liveBest?.auto === true, 'score=' + liveBest?.score);
+
+// 无封面兜底：歌曲结果没有封面时，用专辑搜索补图（TW 空 → US 命中）。
+const rare = await json(base + '/api/match?p=' + encodeURIComponent('Nobody - Rare Live Session.wav'));
+check('cover fallback: album artwork fills the missing song cover', /600x600bb/.test(rare.body.best?.cover ?? ''), 'cover=' + rare.body.best?.cover);
+check('cover fallback: the album entity is queried with a US fallback', itunesParams.some((p) => p.entity === 'album' && p.country === 'TW') && itunesParams.some((p) => p.entity === 'album' && p.country === 'US'), JSON.stringify(itunesParams.filter((p) => p.entity === 'album')));
+check('cover fallback: the matched candidate keeps its own title', rare.body.best?.title === 'Rare Live Session', 'title=' + rare.body.best?.title);
 
 // MusicBrainz fallback when primaries return nothing.
 const mystery = await json(base + '/api/match?p=Mystery.wav');
