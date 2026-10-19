@@ -560,6 +560,8 @@ window.__ModuleLoader__.load({
       "action.match.tip": "在线补全原名 / 歌手 / 封面",
       "action.matching": "正在匹配…",
       "action.search": "搜索",
+      "action.closeSearch": "收起搜索",
+      "search.active": "筛选中",
       "match.title": "在线补全元数据",
       "match.none": "没有找到匹配结果，换个关键词或手动填写标签",
       "match.clear": "清除已补全信息",
@@ -652,6 +654,8 @@ window.__ModuleLoader__.load({
       "action.match.tip": "Fetch title / artist / cover online",
       "action.matching": "Matching…",
       "action.search": "Search",
+      "action.closeSearch": "Close search",
+      "search.active": "Filtering",
       "match.title": "Online metadata",
       "match.none": "No matches found — try another keyword",
       "match.clear": "Clear fetched info",
@@ -759,6 +763,20 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-search{border:1px solid var(--dsw-alias-border-l2);height:24px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border-radius:6px;flex:0 1 180px;min-width:80px;padding:0 8px;font:inherit;font-size:12px;outline:none}
 .dshm-search:focus{border-color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-bg-layer-1)}
 .dshm-search::placeholder{color:var(--dsw-alias-label-caption)}
+.dshm-searchBox{flex:0 0 auto;align-items:center;gap:6px;display:flex;position:relative}
+.dshm-searchToggle{border-radius:6px;justify-content:center;align-items:center;width:26px;height:26px;color:var(--dsw-alias-label-tertiary);background:transparent;border:0;padding:0;cursor:pointer;display:inline-flex;position:relative}
+.dshm-searchToggle:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.dshm-searchToggle--active{color:var(--dsw-alias-state-business-primary)}
+.dshm-searchToggle:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
+.dshm-searchBox--open .dshm-searchToggle{color:var(--dsw-alias-label-primary)}
+.dshm-searchBadge{background:var(--dsw-alias-state-business-primary);border-radius:50%;width:6px;height:6px;position:absolute;top:3px;right:2px;pointer-events:none}
+.dshm-searchField{align-items:center;gap:4px;display:flex;animation:dshm-searchIn .16s var(--ds-ease-in-out)}
+.dshm-searchField .dshm-search{flex:0 1 190px;min-width:120px}
+.dshm-searchField .dshm-searchWrap{flex:0 1 200px;min-width:120px}
+.dshm-searchClear{color:var(--dsw-alias-label-caption);background:transparent;border:0;border-radius:4px;cursor:pointer;width:18px;height:18px;padding:0;font-size:12px;line-height:1}
+.dshm-searchClear:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+@keyframes dshm-searchIn{from{opacity:0;transform:translateX(4px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.dshm-searchField{animation:none}}
 .dshm-btn{cursor:pointer;height:26px;color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-fill-l1);border-radius:7px;flex:none;align-items:center;gap:5px;padding:0 10px;font:inherit;font-size:12px;display:inline-flex}
 .dshm-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .dshm-btn{transition:background-color .12s var(--ds-ease-in-out),border-color .12s var(--ds-ease-in-out)}
@@ -4905,6 +4923,11 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       const [queryDraft, setQueryDraft] = useState(state.query);
       const queryDraftRef = useRef(state.query);
       const queryTimerRef = useRef(null);
+      // 搜索框收在放大镜按钮里：点击展开、Esc/失焦收起；关闭时保留筛选结果并点亮小圆点。
+      const [searchOpen, setSearchOpen] = useState(false);
+      const searchBoxRef = useRef(null);
+      const searchToggleRef = useRef(null);
+      const searchWasOpen = useRef(false);
       useEffect(() => {
         setQueryDraft(state.query);
         queryDraftRef.current = state.query;
@@ -4930,6 +4953,23 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           player.setQuery(queryDraftRef.current);
         }, SEARCH_DEBOUNCE_MS);
       };
+
+      // 展开后聚焦输入框；关闭时把焦点还给放大镜按钮。
+      // 通过 DOM 查询而不是组件 ref：官方 Input 与原生 input 两条渲染路径共用同一套行为。
+      useEffect(() => {
+        if (searchOpen) {
+          searchWasOpen.current = true;
+          const input = searchBoxRef.current?.querySelector?.("input");
+          if (input !== null && input !== undefined && typeof input.focus === "function") input.focus();
+          return undefined;
+        }
+        if (searchWasOpen.current) {
+          searchWasOpen.current = false;
+          const toggle = searchToggleRef.current;
+          if (toggle !== null && typeof toggle.focus === "function") toggle.focus();
+        }
+        return undefined;
+      }, [searchOpen]);
 
       // 是否把补全结果写回文件（写标签 + 重命名），默认开启
       const [writeFile, setWriteFile] = useState(true);
@@ -4987,14 +5027,51 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         withTip(h("span", { className: "dshm-dir" }, state.dir ?? t("empty.title")), state.dir ?? "", "bottom"),
         // 搜索框用官方 Input 组件（与 DSH 自己的搜索框同源）：组件自带 32px wrap、
         // 前置图标位、focus-within 主题色描边。取不到官方组件时退回原输入框。
-        state.tracks.length > 0 && searchField({
-          placeholder: t("action.search.placeholder"),
-          value: queryDraft,
-          // onInput 直接映射原生 input 事件；受控输入上只挂 onChange 时，React 的 value
-          // tracker 会吞掉「原生 setter + input 事件」这条测试与 IME 路径。
-          onChange: (event) => applyQuerySoon(event.target.value),
-          onInput: (event) => applyQuerySoon(event.target.value),
-        }),
+        state.tracks.length > 0 && h("div", {
+          className: "dshm-searchBox" + (searchOpen ? " dshm-searchBox--open" : ""),
+          ref: searchBoxRef,
+          // 焦点移出整个搜索区才收起；点“清除”或再次点放大镜都不会先被 blur 打断。
+          onBlur: (event) => {
+            if (!event.currentTarget.contains(event.relatedTarget)) setSearchOpen(false);
+          },
+          onKeyDown: (event) => {
+            if (event.key !== "Escape" || !searchOpen) return;
+            event.preventDefault();
+            event.stopPropagation();
+            setSearchOpen(false);
+          },
+        },
+          withTipWrapped(h("button", {
+            type: "button",
+            className: "dshm-searchToggle" + (queryDraft.length > 0 ? " dshm-searchToggle--active" : ""),
+            ref: searchToggleRef,
+            "aria-label": searchOpen ? t("action.closeSearch") : t("action.search"),
+            "aria-expanded": searchOpen,
+            "aria-controls": searchOpen ? "music-search-input" : undefined,
+            onClick: () => setSearchOpen((open) => !open),
+          },
+            h("svg", { width: 16, height: 16, viewBox: "0 0 16 16", fill: "none", "aria-hidden": "true" },
+              h("circle", { cx: "7.1", cy: "7.1", r: "4.7", stroke: "currentColor", strokeWidth: 1.4 }),
+              h("path", { d: "M10.6 10.6 14 14", stroke: "currentColor", strokeWidth: 1.4, strokeLinecap: "round" })),
+            !searchOpen && queryDraft.length > 0 && h("span", { className: "dshm-searchBadge", "aria-hidden": "true" })),
+            searchOpen ? t("action.closeSearch") : (queryDraft.length > 0 ? t("action.search") + " · " + t("search.active") : t("action.search")), "bottom"),
+          searchOpen && h("div", { className: "dshm-searchField" },
+            searchField({
+              id: "music-search-input",
+              autoFocus: true,
+              placeholder: t("action.search.placeholder"),
+              value: queryDraft,
+              // onInput 直接映射原生 input 事件；受控输入上只挂 onChange 时，React 的 value
+              // tracker 会吞掉「原生 setter + input 事件」这条测试与 IME 路径。
+              onChange: (event) => applyQuerySoon(event.target.value),
+              onInput: (event) => applyQuerySoon(event.target.value),
+            }),
+            queryDraft.length > 0 && h("button", {
+              type: "button",
+              className: "dshm-searchClear",
+              "aria-label": t("action.clearSearch"),
+              onClick: () => clearQuery(),
+            }, "✕"))),
         state.completing
           ? h("span", { className: "dshm-stats" }, t("complete.progress")(state.completeDone, state.completeTotal, state.completeFailed, state.completeSkipped))
           : state.scanning

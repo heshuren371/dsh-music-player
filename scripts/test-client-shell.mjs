@@ -235,7 +235,10 @@ check('disabled-capable buttons wrap their anchor so hover still fires', contain
 check('tooltip bubbles are portalled (backdrop-filter ancestors would clip them)', tooltipAnchors.length > 0 && tooltipAnchors.every((entry) => entry.portal === true), JSON.stringify(tooltipAnchors[0] ?? null));
 
 // ── 官方搜索框（Input 组件） ───────────────────────────────────────────────
-check('search field renders through the official Input primitive', container.querySelector('.dshm-searchWrap input') !== null && container.querySelector('[data-icon="IconSearchOutlineRegular"]') !== null, container.querySelector('.dshm-searchWrap')?.outerHTML?.slice(0, 120) ?? 'missing');
+const shellSearchToggle = container.querySelector('.dshm-searchToggle');
+await act(async () => { shellSearchToggle?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(40);
+check('search field opens through the official Input primitive', container.querySelector('.dshm-searchWrap input') !== null && container.querySelector('[data-icon="IconSearchOutlineRegular"]') !== null, container.querySelector('.dshm-searchWrap')?.outerHTML?.slice(0, 120) ?? 'missing');
 
 // ── 歌曲信息跑马灯（溢出才滚） ─────────────────────────────────────────────
 const nowTitle = container.querySelector('.dshm-nowTitle.dshm-marquee');

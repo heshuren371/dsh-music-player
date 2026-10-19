@@ -56,7 +56,7 @@ endpoints ←→ `Track`→`PayloadTrack` 白名单投影 ←→ 客户端 `Musi
 
 封面写入。宿主只在请求显式带 `replaceCover: true` 时才替换已有内嵌封面（缺省只补缺失）；客户端必须如实传达意图：逐首应用默认替换（可取消勾选），一键补全默认不替换、勾选后才替换，且勾选后不得再把「标签与文件名都已正确」当作无需处理。**写入必须原子**：复制副本 → 写入 → 回读校验 → rename 替换；任何一步失败（含校验不符）都报 `tagged:false` 且原件不动。
 
-客户端交互契约。媒体监听器绑在**每个**媒体元素上（`bindMedia(el)`）；过渡窗口内 seek/pause 先 `commitPendingCrossfade()`，起播前用 `pauseEpoch` 挡暂停；弹层要有 dialog 语义/焦点锁/滚动锁/Escape；全屏键盘：空格、←/→、↑/↓；搜索防抖。
+客户端交互契约。媒体监听器绑在**每个**媒体元素上（`bindMedia(el)`）；过渡窗口内 seek/pause 先 `commitPendingCrossfade()`，起播前用 `pauseEpoch` 挡暂停；弹层要有 dialog 语义/焦点锁/滚动锁/Escape；全屏键盘：空格、←/→、↑/↓；搜索防抖；放大镜展开检索，关闭保留筛选。
 → [细则](docs/rules-detail.md#客户端交互契约)
 
 错误面与降级。404 在本插件是正常语义，**不得**用它当「宿主是不是新入口」的唯一判据（平台

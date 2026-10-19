@@ -114,15 +114,25 @@ const titleOf = (row) => row.querySelector('.dshm-cellTitle').textContent;
 const meta = () => JSON.parse(localStorage.getItem('dsh-music:meta') ?? '{}');
 
 check('five rows rendered with a cover cell', rows().length === 5 && rows()[0].querySelector('.dshm-colCover') !== null, 'rows=' + rows().length);
-// ── 搜索防抖：输入即时回显，过滤按 140ms 防抖（逐键全量过滤会让大库卡顿）────────
+// ── 搜索：放大镜展开 / 防抖 / Esc 收起但保留筛选 ────────────────────────────
 {
-  const search = container.querySelector('.dshm-search');
-  check('header search input renders (fallback without official Input)', search !== null, 'search=' + (search === null ? 'missing' : 'ok'));
-  if (search !== null) {
+  const toggle = container.querySelector('.dshm-searchToggle');
+  check('search stays collapsed behind the magnifier by default',
+    toggle !== null && container.querySelector('.dshm-search') === null,
+    'toggle=' + (toggle !== null) + ' input=' + (container.querySelector('.dshm-search') !== null));
+  if (toggle !== null) {
+    await act(async () => { toggle.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    await settle(40);
+    const search = container.querySelector('.dshm-search');
+    check('clicking the magnifier opens and focuses the search input',
+      search !== null && toggle.getAttribute('aria-expanded') === 'true' && document.activeElement === search,
+      'input=' + (search !== null) + ' expanded=' + toggle.getAttribute('aria-expanded') + ' focused=' + (document.activeElement === search));
     const type = async (value) => act(async () => {
+      const input = container.querySelector('.dshm-search');
+      if (input === null) return;
       const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set;
-      setter.call(search, value);
-      search.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      setter.call(input, value);
+      input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
     });
     await type('gam');
     await settle(20);
@@ -131,18 +141,41 @@ check('five rows rendered with a cover cell', rows().length === 5 && rows()[0].q
     const filtered = rows().length;
     check('typing filters after the debounce window (not on every keystroke)',
       immediate === 5 && filtered === 1, 'immediate=' + immediate + ' filtered=' + filtered);
+    await act(async () => {
+      const input = container.querySelector('.dshm-search');
+      if (input !== null) input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    await settle(40);
+    check('Escape collapses the search but keeps the filter and shows the active dot',
+      container.querySelector('.dshm-search') === null && container.querySelector('.dshm-searchBadge') !== null && rows().length === 1
+        && container.querySelector('.dshm-searchToggle')?.getAttribute('aria-expanded') === 'false',
+      'input=' + (container.querySelector('.dshm-search') !== null) + ' badge=' + (container.querySelector('.dshm-searchBadge') !== null) + ' rows=' + rows().length);
+    const toggleAgain = container.querySelector('.dshm-searchToggle');
+    if (toggleAgain !== null) {
+      await act(async () => { toggleAgain.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+      await settle(40);
+    }
+    const reopened = container.querySelector('.dshm-search');
+    check('reopening the search keeps the typed term', reopened !== null && reopened.value === 'gam', 'value=' + (reopened?.value ?? 'missing'));
     await type('zzz');
     await settle(260);
     const emptyState = container.querySelector('.dshm-empty');
-    const clearButton = container.querySelector('.dshm-clearSearch');
+    const emptyClear = container.querySelector('.dshm-clearSearch');
+    const inlineClear = container.querySelector('.dshm-searchClear');
     check('a no-match search shows an empty state with a clear button',
-      rows().length === 0 && emptyState !== null && clearButton !== null,
-      'rows=' + rows().length + ' empty=' + (emptyState !== null) + ' clear=' + (clearButton !== null));
-    if (clearButton !== null) {
-      await act(async () => { clearButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+      rows().length === 0 && emptyState !== null && emptyClear !== null,
+      'rows=' + rows().length + ' empty=' + (emptyState !== null) + ' clear=' + (emptyClear !== null));
+    check('the expanded search offers an inline clear button', inlineClear !== null, 'clear=' + (inlineClear !== null));
+    if (emptyClear !== null) {
+      await act(async () => { emptyClear.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
       await settle(60);
     }
     check('clearing from the empty state restores all rows', rows().length === 5, 'rows=' + rows().length);
+    const finalToggle = container.querySelector('.dshm-searchToggle');
+    if (finalToggle !== null) {
+      await act(async () => { finalToggle.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+      await settle(30);
+    }
   }
 }
 
