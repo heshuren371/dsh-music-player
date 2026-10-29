@@ -532,3 +532,9 @@ Storage（`storage.zh.md`）。`LocalStorage` 通过 protocol requirement 声明
 ## 客户端交互契约
 
 客户端交互契约。媒体监听器绑在**每个**媒体元素上（`bindMedia(el)`）：交叉淡化交换活动元素后，只绑初始元素会让 `timeupdate`/`ended`/`error` 静默失效。过渡窗口（切歌后 ~320ms）内 seek/pause 必须先 `commitPendingCrossfade()`，并在 `startNow()` 前用 `pauseEpoch` 挡住被暂停的起播。弹层要有 `role=dialog`/`aria-modal`、焦点锁、滚动锁、Escape 关闭；确认条 Escape 取消。全屏键盘：空格、←/→ 5 秒、↑/↓ 音量（输入框/按钮内不抢键）。搜索即时回显 + 140ms 防抖；层级用 `--dshm-z-*` token。
+
+## 链接导入
+
+只接受 `https`、无凭据、标准端口与平台白名单（YouTube / Bilibili / Vimeo / SoundCloud）的公开链接；不读取浏览器 cookie、不提供登录/付费墙/DRM 绕过。任务只写当前音乐目录，所有路径过 `authorize('fs.write', …, [currentDir])`；临时前缀 `.dshm-import-` 在成功/失败/取消后清理。
+
+`yt-dlp` 以 `--ignore-config --no-playlist` 启动，参数数组直传、不经 shell；单文件上限 2 GiB、单任务 20 分钟、同一时间一个任务。下载后按 `作者 - 标题` 重命名并走原子标签/封面写入；标签失败保留文件并报告 warning。停用/热重载必须杀掉在飞子进程并清理临时文件。下发给页面的任务快照只含展示字段，不含本地绝对路径；错误文本移除目录。

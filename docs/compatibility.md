@@ -89,13 +89,13 @@
 | `transport.api` | `connection.fetch` 上的精确 `/api/dsh-music/*` 路由 | 插件激活时注册，供 Web 与 Desktop 共用 |
 | `storage.local` | `$DSH_HOME/storages/dsh-music-player.json`（兼容旧的包内 `lib/state.json`）+ `localStorage`（`dsh-music:*` 前缀） | 记住目录、最后播放曲目与进度、音量/循环/排序偏好 |
 
-关于 `node:child_process`：`lib/host.js` 确实 `import { spawn, spawnSync } from 'node:child_process'`，但没有 shell 执行能力——只用来调 `ffmpeg` / `ffprobe`。可执行文件按 `DSH_MUSIC_FFMPEG` → Homebrew / MacPorts → `PATH` 的顺序探测，参数由插件拼成数组直传（不经过 shell），输入是本地已扫描到的媒体文件路径，MV 转码产物写到 `os.tmpdir()/dsh-music-mv`。没有 ffmpeg 也能用：直出格式照常播，需要换壳/转码的给安装提示。
+关于 `node:child_process`：`lib/host.js` 确实 `import { spawn, spawnSync } from 'node:child_process'`，但没有 shell 执行能力——只用来调 `ffmpeg` / `ffprobe` / `yt-dlp`。可执行文件按 `DSH_MUSIC_FFMPEG` → Homebrew / MacPorts → `PATH` 的顺序探测，参数由插件拼成数组直传（不经过 shell），输入是本地已扫描到的媒体文件路径，MV 转码产物写到 `os.tmpdir()/dsh-music-mv`。没有 ffmpeg 也能用：直出格式照常播，需要换壳/转码的给安装提示。
 
 副作用位置的授权检查：`lib/host.js` 的 `authorize(action, targetPath, scopes)` 在每个 `fs.unlink` / `fs.rename` / `fs.rm` 调用点校验目标落在已声明 scope 内（音乐目录 / 状态目录 / MV 缓存 / 回收站），不依赖上游栅栏。`scripts/test-audit.mjs` 强制「每个 mutation 都必须过 `authorize`」。
 
 > ⚠️ 这是插件自建的授权面。DSH 目前没有向插件暴露 permission grant 查询 API，因此 `dsh-plugin.json` 的 `permissions` 是对外声明，运行时由上述自建检查兜底。上游一旦提供标准 grant API，这里应改为查询该 API。
 
-读取的环境变量：`DSH_HOME`、`DSH_MUSIC_FFMPEG`、`DSH_MUSIC_ITUNES_COUNTRY`、`PATH`。不读 shell 配置、不读 keychain、不读浏览器 profile。
+读取的环境变量：`DSH_HOME`、`DSH_MUSIC_FFMPEG`、`DSH_MUSIC_YTDLP`、`DSH_MUSIC_ITUNES_COUNTRY`、`PATH`。不读 shell 配置、不读 keychain、不读浏览器 profile。
 
 ## 7. 外部服务
 
@@ -124,7 +124,7 @@
 
 ## 9. 端点面
 
-宿主把每个端点注册为 `ctx.connection.fetch` 上的精确 `/api` Fetch 路由（Web 与 Desktop 共用同一条接缝）。共 18 个端点，与 `lib/host.js` 的分派表、`lib/index.js` 的 `FETCH_ROUTES`、`dsh-plugin.json` 的登记表由 `scripts/test-route-consistency.mjs` 强制三向集合相等。
+宿主把每个端点注册为 `ctx.connection.fetch` 上的精确 `/api` Fetch 路由（Web 与 Desktop 共用同一条接缝）。共 20 个端点，与 `lib/host.js` 的分派表、`lib/index.js` 的 `FETCH_ROUTES`、`dsh-plugin.json` 的登记表由 `scripts/test-route-consistency.mjs` 强制三向集合相等。
 
 | 路由 | 方法 | 说明 |
 | --- | --- | --- |
@@ -140,6 +140,8 @@
 | `/caps` | POST | 上报客户端视频解码能力 |
 | `/mv?id=<id>` | GET | MV 播放计划（direct / remux / transcode） |
 | `/mvconvert`、`/mvlib`、`/mvfile` | — | 触发转换 / MV 库视图 / MV 文件流（Range） |
+| `/import` | GET/POST | 能力探测 + 最近任务 / 启动链接导入（音频/视频，经 yt-dlp） |
+| `/import-cancel` | POST | 取消正在运行的链接导入 |
 | `/system-art?t=<token>`、`/system-stream?t=<token>` | GET | 仅旧前缀可达：Chromium 内部取封面 / 取媒体 |
 
 ### 9.1 为什么最后两个不在 `connection.fetch` 上

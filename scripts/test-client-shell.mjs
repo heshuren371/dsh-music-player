@@ -151,9 +151,10 @@ const tracks = [
 ];
 const library = { dir: '/music', tracks, scanning: false, scanParsed: tracks.length, scanTotal: tracks.length, truncated: false, skippedPackages: 0, scannedAt: 1 };
 const calls = [];
+const importPosts = [];
 /** 模拟「宿主进程仍是旧版入口」：/api/dsh-music/* 一律 404，只有旧前缀会回话。 */
 let legacyOnly = false;
-const mockFetch = async (url) => {
+const mockFetch = async (url, init) => {
   const target = String(url);
   calls.push(target);
   if (legacyOnly && target.startsWith('/api/dsh-music/')) return new dom.window.Response('not found', { status: 404 });
@@ -161,6 +162,17 @@ const mockFetch = async (url) => {
   if (suffix.includes('/api/dsh-music/session')) return new dom.window.Response(JSON.stringify({ systemArtBase: SYSTEM_ART_BASE }), { headers: { 'content-type': 'application/json' } });
   if (suffix.includes('/api/dsh-music/library') || suffix.includes('/api/dsh-music/refresh')) return new dom.window.Response(JSON.stringify(library), { headers: { 'content-type': 'application/json' } });
   if (suffix.includes('/api/dsh-music/cover')) return new dom.window.Response('', { status: 404 });
+  if (suffix.includes('/api/dsh-music/import')) {
+    const method = (init?.method ?? 'GET').toUpperCase();
+    if (method === 'POST') {
+      importPosts.push(JSON.parse(String(init?.body ?? '{}')));
+      return new dom.window.Response(JSON.stringify({
+        available: true, ytdlp: 'test', ffmpeg: true, hosts: ['youtube.com'],
+        job: { id: 'j1', kind: 'audio', phase: 'download', progress: 12, title: 'UI Song', artist: 'UI Artist', file: null, trackId: null, tagged: false, warning: null, error: null, speed: '1x', eta: '00:01', startedAt: 1, finishedAt: null },
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    return new dom.window.Response(JSON.stringify({ available: true, ytdlp: 'test', ffmpeg: true, hosts: ['youtube.com'], job: null }), { headers: { 'content-type': 'application/json' } });
+  }
   // MV 出画方式：直出（视频轨会先问这里）
   if (suffix.includes('/api/dsh-music/mv')) return new dom.window.Response(JSON.stringify({ mode: 'direct', state: 'ready', progress: 1, url: '/api/dsh-music/stream?p=v.mp4' }), { headers: { 'content-type': 'application/json' } });
   return new dom.window.Response('{}', { headers: { 'content-type': 'application/json' } });
@@ -453,6 +465,59 @@ await settle(150);
 const fallbackCalls = calls.slice(beforeFallback);
 check('a 404 on /api/dsh-music/* falls back to the legacy /dsh-music prefix once', fallbackCalls.some((u) => u.startsWith('/dsh-music/api/refresh')), fallbackCalls.join(','));
 check('the fallback keeps the UI alive (no error bar)', container.querySelector('.dshm-error') === null);
+
+// ── 链接导入弹层（不依赖真实网络：只验证入口、字段、合规提示与关闭契约）────
+{
+  const importButton = container.querySelector('button[aria-label="action.import"]');
+  check('toolbar exposes the link-import entry', importButton !== null && importButton.getAttribute('title') === null, importButton?.outerHTML?.slice(0, 80) ?? 'missing');
+  if (importButton !== null) {
+    await act(async () => { importButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    await settle(120);
+    const dialog = container.querySelector('.dshm-importDialog');
+    check('import dialog opens with URL, format and legal notice',
+      dialog !== null && dialog.querySelector('.dshm-importInput') !== null
+      && dialog.querySelectorAll('.dshm-importKind').length === 2
+      && String(dialog.textContent).includes('import.notice')
+      && String(dialog.textContent).includes('import.unsupported'),
+      dialog?.textContent?.slice(0, 120) ?? 'missing');
+    const input = dialog?.querySelector('.dshm-importInput');
+    check('import dialog focuses the URL input', input !== null && dom.window.document.activeElement === input, String(dom.window.document.activeElement?.id ?? ''));
+    await act(async () => { dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+    await settle(80);
+    check('Escape closes the import dialog', container.querySelector('.dshm-importDialog') === null);
+    if (importButton !== null) {
+      await act(async () => { importButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+      await settle(80);
+      const close = container.querySelector('.dshm-importDialog .dshm-dialogFoot .dshm-btn');
+      if (close !== null) await act(async () => { close.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+      await settle(60);
+      check('the footer closes the import dialog', container.querySelector('.dshm-importDialog') === null);
+      // 重新打开，输入链接并点“开始导入”：验证 POST body 与进度 UI 真的接上。
+      await act(async () => { importButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+      await settle(100);
+      const dialog2 = container.querySelector('.dshm-importDialog');
+      const input2 = dialog2?.querySelector('.dshm-importInput');
+      if (input2 !== null && input2 !== undefined) {
+        await act(async () => {
+          const props = reactProps(input2);
+          if (props !== null && typeof props.onChange === 'function') {
+            props.onChange({ target: { value: 'https://www.youtube.com/watch?v=ui' } });
+          }
+        });
+        await settle(30);
+        const startButton = Array.from(dialog2.querySelectorAll('.dshm-dialogFoot .dshm-btn')).at(-1);
+        await act(async () => { startButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+        await settle(120);
+        check('start posts url and kind to the import endpoint', importPosts.length === 1 && importPosts[0].url === 'https://www.youtube.com/watch?v=ui' && importPosts[0].kind === 'audio', JSON.stringify(importPosts));
+        check('running job renders progress and metadata in the dialog', dialog2.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow') === '12' && String(dialog2.textContent).includes('UI Song'), String(dialog2.textContent).slice(0, 160));
+      } else {
+        check('start posts url and kind to the import endpoint', false, 'input missing');
+      }
+      await act(async () => { dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+      await settle(80);
+    }
+  }
+}
 
 // ── 旧命名体系（0.1.6 的 IconXxx16）同样要命中 ─────────────────────────────
 {

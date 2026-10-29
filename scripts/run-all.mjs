@@ -24,6 +24,7 @@ const suites = [
   { name: 'MV seek (absolute token source)', file: 'scripts/test-mv-seek.mjs', node: [] },
   { name: 'MV teardown (in-flight ffmpeg child)', file: 'scripts/test-mv-teardown.mjs', node: [] },
   { name: 'delete flow', file: 'scripts/test-delete.mjs', node: [] },
+  { name: 'link import (yt-dlp / tags / cover / cancel)', file: 'scripts/test-import.mjs', node: [] },
   { name: 'online metadata match (host)', file: 'scripts/test-match.mjs', node: [] },
   { name: 'apply tags + rename (host)', file: 'scripts/test-apply.mjs', node: [] },
   { name: 'online metadata match (client)', file: 'scripts/test-match-client.mjs', node: [] },

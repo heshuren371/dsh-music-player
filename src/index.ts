@@ -69,6 +69,8 @@ const FETCH_ROUTES = [
   ['/api/dsh-music/library', ['GET', 'HEAD']],
   ['/api/dsh-music/session', ['GET', 'HEAD']],
   ['/api/dsh-music/refresh', ['POST']],
+  ['/api/dsh-music/import', ['GET', 'POST']],
+  ['/api/dsh-music/import-cancel', ['POST']],
   ['/api/dsh-music/measure', ['GET', 'POST']],
   ['/api/dsh-music/waveform', ['GET']],
   ['/api/dsh-music/dir', ['POST']],
