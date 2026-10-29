@@ -973,11 +973,13 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-sidebar{width:196px;flex:none;border-right:1px solid var(--dsw-alias-border-l1);background:color-mix(in srgb, var(--dsw-alias-bg-layer-2) 72%, transparent);flex-direction:column;gap:2px;padding:10px 8px;display:flex;overflow:auto;transition:width .16s var(--ds-ease-in-out),padding .16s var(--ds-ease-in-out)}
 .dshm-sidebar--collapsed{width:56px;padding:6px 4px}
 .dshm-sidebar--collapsed .dshm-sideBrand{padding:2px 2px 8px;gap:6px}
-.dshm-sidebar--collapsed .dshm-sideBrandName,.dshm-sidebar--collapsed .dshm-sideHeading,.dshm-sidebar--collapsed .dshm-navLabel,.dshm-sidebar--collapsed .dshm-navCount{display:none}
+.dshm-sidebar--collapsed .dshm-sideBrandName,.dshm-sidebar--collapsed .dshm-sideHeading,.dshm-sidebar--collapsed .dshm-navLabel,.dshm-sidebar--collapsed .dshm-navCount,.dshm-sidebar--collapsed .dshm-sideToggle{display:none}
 .dshm-sidebar--collapsed .dshm-navItem{width:48px;height:32px;flex:none;justify-content:center;padding:0}
 .dshm-sideBrand{color:var(--dsw-alias-label-primary);align-items:center;gap:8px;padding:2px 8px 12px;font-size:13px;font-weight:600;display:flex}
 .dshm-sideBrandName{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dshm-sideLogo{color:var(--dsw-alias-state-business-primary);align-items:center;display:inline-flex}
+.dshm-sideLogoBtn{border:0;background:transparent;border-radius:6px;width:28px;height:28px;color:inherit;align-items:center;justify-content:center;display:inline-flex;padding:0;cursor:pointer}
+.dshm-sideLogoBtn:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .dshm-sideHeading{color:var(--dsw-alias-label-caption);padding:10px 8px 4px;font-size:10px;font-weight:600}
 .dshm-navItem{border:0;width:100%;height:28px;color:var(--dsw-alias-label-secondary);background:transparent;border-radius:7px;align-items:center;gap:8px;padding:0 8px;font:inherit;font-size:12px;display:flex;cursor:pointer;text-align:left}
 .dshm-navItem:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
@@ -1005,7 +1007,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-rowMenuItem:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .dshm-rowMenuItem--danger{color:var(--dsw-alias-state-error-primary)}
 .dshm-menuFav,.dshm-menuMatch,.dshm-menuDelete{width:100%}
-@media (max-width: 760px){.dshm-shell{flex-direction:column}.dshm-sidebar{width:auto;border-right:0;border-bottom:1px solid var(--dsw-alias-border-l1);flex-direction:row;align-items:center;padding:6px 8px;overflow-x:auto}.dshm-sideBrand,.dshm-sideHeading{display:none}.dshm-navItem{width:auto;flex:none}.dshm-sidebar--collapsed{width:auto;height:40px;padding:4px 8px}.dshm-sidebar--collapsed .dshm-sideBrand{padding:0}.dshm-sidebar--collapsed .dshm-sideLogo{display:none}}
+@media (max-width: 760px){.dshm-shell{flex-direction:column}.dshm-sidebar{width:auto;border-right:0;border-bottom:1px solid var(--dsw-alias-border-l1);flex-direction:row;align-items:center;padding:6px 8px;overflow-x:auto}.dshm-sideHeading{display:none}.dshm-navItem{width:auto;flex:none}.dshm-sidebar--collapsed{width:auto;height:40px;padding:4px 8px}.dshm-sidebar--collapsed .dshm-sideBrand{display:flex;padding:0}}
 @media (prefers-reduced-motion:reduce){.dshm-sidebar{transition:none}}
 .dshm-colArtist{width:26%}
 .dshm-row{cursor:default;transition:background-color .12s var(--ds-ease-in-out)}
@@ -5978,17 +5980,27 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         "aria-label": t("nav.library"),
       },
         h("div", { className: "dshm-sideBrand" },
-          h("span", { className: "dshm-sideLogo" }, ICONS.note),
-          h("span", { className: "dshm-sideBrandName" }, t("view.music")),
-          withTipWrapped(h("button", {
+          // 收起态：插件图标就是展开按钮（DSH 的 brand mark 行为）；展开态图标只做标识。
+          state.sidebarOpen
+            ? h("span", { className: "dshm-sideLogo" }, ICONS.note)
+            : withTipWrapped(h("button", {
+              type: "button",
+              className: "dshm-sideLogoBtn",
+              "aria-label": t("sidebar.expand"),
+              "aria-expanded": false,
+              "aria-controls": "dshm-sidebar",
+              onClick: () => player.toggleSidebar(),
+            }, h("span", { className: "dshm-sideLogo" }, ICONS.note)), t("sidebar.expand")),
+          state.sidebarOpen && h("span", { className: "dshm-sideBrandName" }, t("view.music")),
+          state.sidebarOpen && withTipWrapped(h("button", {
             type: "button",
             className: "dshm-sideToggle",
-            "aria-label": state.sidebarOpen ? t("sidebar.collapse") : t("sidebar.expand"),
-            "aria-expanded": state.sidebarOpen,
+            "aria-label": t("sidebar.collapse"),
+            "aria-expanded": true,
             "aria-controls": "dshm-sidebar",
             onClick: () => player.toggleSidebar(),
-          }, h("span", { className: "dshm-sideToggleGlyph", "aria-hidden": "true" }, state.sidebarOpen ? "‹" : "☰")),
-            state.sidebarOpen ? t("sidebar.collapse") : t("sidebar.expand"))),
+          }, h("span", { className: "dshm-sideToggleGlyph", "aria-hidden": "true" }, "‹")),
+            t("sidebar.collapse"))),
         h("div", { className: "dshm-sideHeading" }, t("nav.library")),
         navItem("all", t("view.allSongs"), counts.all, ICONS.note),
         navItem("audio", t("view.audio"), counts.audio, ICONS.note),

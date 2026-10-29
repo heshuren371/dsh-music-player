@@ -587,13 +587,14 @@ check('the fallback keeps the UI alive (no error bar)', container.querySelector(
   await settle(40);
   const sideToggle = container.querySelector('.dshm-sideToggle');
   const sidebarElement = container.querySelector('.dshm-sidebar');
-  check('the collapse control lives inside the sidebar', sideToggle !== null && sideToggle.closest('.dshm-sidebar') === sidebarElement && sideToggle.getAttribute('aria-expanded') === 'true');
+  check('the collapse control lives inside the sidebar', sideToggle !== null && sideToggle.closest('.dshm-sidebar') === sidebarElement && sideToggle.getAttribute('aria-expanded') === 'true' && container.querySelector('.dshm-sideLogoBtn') === null);
   await act(async () => { sideToggle.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   await settle(40);
-  check('collapsing turns the sidebar into an icon rail with the control still inside', sidebarElement.classList.contains('dshm-sidebar--collapsed') && sideToggle.closest('.dshm-sidebar') === sidebarElement && sideToggle.getAttribute('aria-expanded') === 'false');
-  await act(async () => { sideToggle.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  const logoButton = container.querySelector('.dshm-sideLogoBtn');
+  check('collapsing turns the brand mark into the expand control', sidebarElement.classList.contains('dshm-sidebar--collapsed') && logoButton !== null && logoButton.closest('.dshm-sidebar') === sidebarElement && logoButton.getAttribute('aria-expanded') === 'false' && container.querySelector('.dshm-sideToggle') === null);
+  await act(async () => { logoButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   await settle(40);
-  check('expanding restores the full sidebar', !sidebarElement.classList.contains('dshm-sidebar--collapsed') && sideToggle.getAttribute('aria-expanded') === 'true');
+  check('clicking the brand mark expands the full sidebar', !sidebarElement.classList.contains('dshm-sidebar--collapsed') && container.querySelector('.dshm-sideToggle') !== null && container.querySelector('.dshm-sideLogoBtn') === null);
   const nav = (label) => Array.from(container.querySelectorAll('.dshm-navItem')).find((button) => button.textContent.includes(label));
   check('sidebar navigation exposes library, favorites and recent with counts',
     container.querySelectorAll('.dshm-navItem').length === 5
