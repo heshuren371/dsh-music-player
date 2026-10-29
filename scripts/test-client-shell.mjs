@@ -255,7 +255,7 @@ check('request URL base moved under /api (desktop only forwards /api/*)', calls.
 const iconNames = new Set(Array.from(container.querySelectorAll('[data-icon]')).map((el) => el.getAttribute('data-icon')));
 const R = ICON_SCHEMES.regular;
 check('official 0.1.7 Regular icons render in the toolbar', iconNames.has(R.refresh) && iconNames.has(R.folder) && iconNames.has(R.edit), Array.from(iconNames).join(','));
-check('the row delete button uses the official trash icon', iconNames.has(R.trash), Array.from(iconNames).join(','));
+check('rows expose one overflow action', container.querySelector('.dshm-row .dshm-rowMenuBtn') !== null && container.querySelector('.dshm-row .dshm-match') === null && container.querySelector('.dshm-row .dshm-del') === null, Array.from(iconNames).join(','));
 check('play/pause use the macOS-native glyph, not the DSH circled icon', container.querySelector('.dshm-tbtn--play svg path[d^="M5.6 3.05"]') !== null && !iconNames.has(R.play) && !iconNames.has(R.pause), container.querySelector('.dshm-tbtn--play svg path')?.getAttribute('d')?.slice(0, 30) ?? 'missing');
 check('an icon with no official counterpart keeps the drawn SVG', container.querySelectorAll('svg').length > 0);
 
@@ -580,25 +580,37 @@ check('the fallback keeps the UI alive (no error bar)', container.querySelector(
   check('closing the import dialog after a queued video request still works', container.querySelector('.dshm-importDialog') === null);
 }
 
-// ── 智能视图 / 收藏 / 最近添加排序 ──────────────────────────────────────────
+// ── 侧边栏视图 / 收藏 / 最近添加 / 行菜单 ──────────────────────────────────
 {
   const api = window.__dshMusicPlayer;
   for (const id of [...api.getState().favorites]) api.toggleFavorite(id);
   await settle(40);
-  const chips = () => Array.from(container.querySelectorAll('.dshm-viewChip'));
-  const chip = (label) => chips().find((button) => button.textContent.includes(label));
-  check('library view chips expose counts', chips().length === 4 && chip('view.all')?.textContent.includes('3') && chip('view.audio')?.textContent.includes('2') && chip('view.mv')?.textContent.includes('1'), chips().map((button) => button.textContent).join(' | '));
-  await act(async () => { chip('view.mv').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  const nav = (label) => Array.from(container.querySelectorAll('.dshm-navItem')).find((button) => button.textContent.includes(label));
+  check('sidebar navigation exposes library, favorites and recent with counts',
+    container.querySelectorAll('.dshm-navItem').length === 5
+    && nav('view.allSongs')?.textContent.includes('3') && nav('view.audio')?.textContent.includes('2')
+    && nav('view.mv')?.textContent.includes('1') && nav('view.favorites')?.textContent.includes('0'),
+    Array.from(container.querySelectorAll('.dshm-navItem')).map((button) => button.textContent).join(' | '));
+  await act(async () => { nav('view.mv').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   await settle(50);
-  check('MV view shows only video tracks', container.querySelectorAll('.dshm-row').length === 1 && String(container.querySelector('.dshm-row')?.textContent).includes('Movie Song'), container.querySelectorAll('.dshm-row').length + ' rows');
-  check('list rows no longer carry per-row favorite buttons', container.querySelector('.dshm-row .dshm-fav') === null);
+  check('MV destination renders a poster grid',
+    container.querySelectorAll('.dshm-mvCard').length === 1 && container.querySelectorAll('.dshm-row').length === 0
+    && String(container.querySelector('.dshm-mvCard')?.textContent).includes('Movie Song'),
+    container.querySelectorAll('.dshm-mvCard').length + ' cards');
+  check('list rows carry no per-row favorite button', container.querySelector('.dshm-row .dshm-fav') === null);
   api.toggleFavorite('v.mp4');
   await settle(40);
-  check('favorites can still be set from the full player API', api.getState().favorites.has('v.mp4'), JSON.stringify([...api.getState().favorites]));
-  await act(async () => { chip('view.favorites').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
-  await settle(40);
-  check('favorites view shows the starred track', container.querySelectorAll('.dshm-row').length === 1 && String(container.querySelector('.dshm-row')?.textContent).includes('Movie Song'));
-  await act(async () => { chip('view.all').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  check('the full player API sets favorites', api.getState().favorites.has('v.mp4'), JSON.stringify([...api.getState().favorites]));
+  await act(async () => { nav('view.favorites').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(50);
+  check('favorites destination shows a type filter and the starred track',
+    container.querySelector('.dshm-typeBar') !== null && container.querySelectorAll('.dshm-row').length === 1
+    && String(container.querySelector('.dshm-row')?.textContent).includes('Movie Song'),
+    container.querySelector('.dshm-typeBar')?.textContent?.slice(0, 100) ?? 'missing');
+  await act(async () => { Array.from(container.querySelectorAll('.dshm-typeBar .dshm-viewChip')).find((b) => b.textContent.includes('view.mv')).dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(50);
+  check('favorites can be filtered to MV as a poster grid', container.querySelectorAll('.dshm-mvCard').length === 1 && container.querySelectorAll('.dshm-row').length === 0);
+  await act(async () => { nav('view.allSongs').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   await settle(40);
   const addedHeader = Array.from(container.querySelectorAll('th')).find((th) => th.textContent.includes('col.added'));
   check('recently-added column is sortable and displays dates', addedHeader !== undefined && String(container.querySelector('.dshm-row .dshm-colAdded')?.textContent).includes('1970'), addedHeader?.textContent ?? 'missing');
@@ -608,12 +620,24 @@ check('the fallback keeps the UI alive (no error bar)', container.querySelector(
   api.toggleSort('added');
   await settle(50);
   check('added descending puts the newest file first', String(container.querySelector('.dshm-row')?.textContent).includes('Movie Song') && api.getState().sortDir === 'desc', String(container.querySelector('.dshm-row')?.textContent).slice(0, 40) + ' dir=' + api.getState().sortDir);
+
+  // 行尾 ⋯：收藏/补全/删除都在菜单里；列表行不挂 match/delete 按钮。
+  const menuRow = Array.from(container.querySelectorAll('.dshm-row')).find((row) => String(row.textContent).includes('Alpha'));
+  await act(async () => { menuRow.querySelector('.dshm-rowMenuBtn').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(40);
+  const rowMenu = container.querySelector('.dshm-rowMenu');
+  check('row overflow menu exposes favorite, match and delete', rowMenu !== null && rowMenu.querySelectorAll('.dshm-rowMenuItem').length === 3, rowMenu?.textContent ?? 'missing');
+  check('row actions render only in the overflow menu', container.querySelector('.dshm-row .dshm-match') === null && container.querySelector('.dshm-row .dshm-del') === null);
+  await act(async () => { rowMenu.querySelector('.dshm-menuFav').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(40);
+  check('the menu favorites a track', api.getState().favorites.has('a.mp3'), JSON.stringify([...api.getState().favorites]));
   api.toggleFavorite('v.mp4');
+  api.toggleFavorite('a.mp3');
   await settle(40);
-  await act(async () => { chip('view.favorites').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
-  await settle(40);
-  check('an empty favorites view explains itself and offers a way back', container.querySelectorAll('.dshm-row').length === 0 && String(container.querySelector('.dshm-empty')?.textContent).includes('empty.view') && container.querySelector('.dshm-empty .dshm-btn') !== null);
-  await act(async () => { chip('view.all').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await act(async () => { nav('view.favorites').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(50);
+  check('an empty favorites destination explains itself and offers a way back', container.querySelectorAll('.dshm-row').length === 0 && String(container.querySelector('.dshm-empty')?.textContent).includes('empty.view') && container.querySelector('.dshm-empty .dshm-btn') !== null);
+  await act(async () => { nav('view.allSongs').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   await settle(40);
 }
 
@@ -639,7 +663,7 @@ check('the fallback keeps the UI alive (no error bar)', container.querySelector(
   const legacyIcons = new Set(Array.from(legacyContainer.querySelectorAll('[data-icon]')).map((el) => el.getAttribute('data-icon')));
   const L = ICON_SCHEMES.legacy;
   const legacyRows = legacyContainer.querySelectorAll('.dshm-row').length;
-  check('0.1.6 IconXxx16 names also resolve (candidate probing is version-tolerant)', legacyIcons.has(L.refresh) && legacyIcons.has(L.folder) && legacyIcons.has(L.trash), 'rows=' + legacyRows + ' icons=' + Array.from(legacyIcons).join(','));
+  check('0.1.6 IconXxx16 names also resolve (candidate probing is version-tolerant)', legacyIcons.has(L.refresh) && legacyIcons.has(L.folder) && legacyContainer.querySelector('.dshm-rowMenuBtn') !== null, 'rows=' + legacyRows + ' icons=' + Array.from(legacyIcons).join(','));
   await act(async () => { legacyRoot.unmount(); });
 }
 

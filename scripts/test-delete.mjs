@@ -78,6 +78,16 @@ await settle(300);
 let failures = 0;
 const check = (label, ok, detail) => { if (!ok) failures += 1; console.log((ok ? 'PASS ' : 'FAIL ') + label + (detail === undefined ? '' : ' | ' + detail)); };
 const rows = () => container.querySelectorAll('.dshm-row');
+const openDeleteMenu = async (row) => {
+  await act(async () => { row.querySelector('.dshm-rowMenuBtn').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(40);
+  const item = container.querySelector('.dshm-menuDelete');
+  if (item !== null) {
+    await act(async () => { item.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    await settle(50);
+  }
+  return item !== null;
+};
 const audio = audioInstances[0];
 
 check('two rows rendered', rows().length === 2, 'rows=' + rows().length);
@@ -85,8 +95,7 @@ await act(async () => { rows()[0].dispatchEvent(new dom.window.MouseEvent('click
 check('row click plays Alpha', audio.src.includes('a.mp3'), 'src=' + audio.src);
 
 // Cancel path first: it must not call the host.
-await act(async () => { rows()[0].querySelector('.dshm-del').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
-await settle(50);
+await openDeleteMenu(rows()[0]);
 check('confirm bar appears for the right track', container.querySelector('.dshm-confirmBar') !== null && container.querySelector('.dshm-confirmBar').textContent.includes('delete Alpha?'), 'bar=' + container.querySelector('.dshm-confirmBar')?.textContent);
 check('delete is not sent before confirmation', deleteCalls.length === 0, 'calls=' + deleteCalls.length);
 await act(async () => { container.querySelector('.dshm-confirmBar .dshm-btn:not(.dshm-btn--danger)').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
@@ -94,8 +103,7 @@ await settle(50);
 check('cancel closes the bar without deleting', container.querySelector('.dshm-confirmBar') === null && deleteCalls.length === 0, 'bar=' + container.querySelector('.dshm-confirmBar') + ' calls=' + deleteCalls.length);
 
 // Confirm path: stable id must be sent, playing track stops.
-await act(async () => { rows()[0].querySelector('.dshm-del').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
-await settle(50);
+await openDeleteMenu(rows()[0]);
 await act(async () => { container.querySelector('.dshm-confirmBar .dshm-btn--danger').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
 await settle(100);
 check('confirm sends the stable id', deleteCalls.length === 1 && deleteCalls[0].id === 'a.mp3', JSON.stringify(deleteCalls));

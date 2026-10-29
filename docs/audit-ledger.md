@@ -2663,3 +2663,16 @@ VideoToolbox `h264_videotoolbox` 在 720P/1080P/4K 均慢于软件 ultrafast（0
 用户反馈：本地歌曲都是喜欢的，行尾每首多一颗星让操作列拥挤；收藏入口只保留全屏播放器。
 改动：删除 TrackTable 的 `dshm-fav` 按钮与相关参数/CSS，操作列 84px 恢复 60px；收藏状态、
 收藏视图、重命名迁移和全屏星标都不动。测试改为验证“行内无星标 + API/全屏仍可收藏”。
+
+## 5.66 第 56 轮 —— 侧边栏布局 / MV 海报墙 / 行尾 ⋯（独立分支）
+
+分支 `feat/library-sidebar-layout`，未合并 main。目标：目的地（资料库/收藏/最近添加）与
+类型（全部/音频/MV）拆成两轴，替掉四颗并列 chip；MV 从表格改成海报墙；行尾操作收进一个 ⋯。
+
+改动：PlayerState 由单一 `view` 拆成 `section` + `mediaFilter`，visibleRows/next/prev 同源；
+左栏资料库/我的；收藏与最近添加保留顶部类型过滤；MV 走封面网格；TrackTable 行尾只留
+`.dshm-rowMenuBtn`，菜单含收藏/补全/删除；行菜单回调 useCallback 稳定，避免播放进度把整表重渲染。
+README 同步布局描述。
+
+门禁：36 套全绿；client-shell 覆盖侧栏/网格/类型过滤/行菜单；match/delete/cover 测试改为菜单路径；
+view-persistence A5 仍通过。对照：去掉 mediaFilter 过滤 → MV 网格断言红；恢复全绿。

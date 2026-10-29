@@ -110,6 +110,17 @@ await settle(300);
 let failures = 0;
 const check = (label, ok, detail) => { if (!ok) failures += 1; console.log((ok ? 'PASS ' : 'FAIL ') + label + (detail === undefined ? '' : ' | ' + detail)); };
 const rows = () => container.querySelectorAll('.dshm-row');
+const chooseRowAction = async (row, selector) => {
+  await act(async () => { row.querySelector('.dshm-rowMenuBtn').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(40);
+  const menu = container.querySelector('.dshm-rowMenu');
+  const item = menu === null ? null : menu.querySelector(selector);
+  if (item !== null) {
+    await act(async () => { item.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    await settle(80);
+  }
+  return item !== null;
+};
 const titleOf = (row) => row.querySelector('.dshm-cellTitle').textContent;
 const meta = () => JSON.parse(localStorage.getItem('dsh-music:meta') ?? '{}');
 
@@ -210,8 +221,7 @@ check('list rows no longer carry per-row favorite buttons', container.querySelec
 window.__dshMusicPlayer.toggleFavorite('a.mp3');
 await settle(40);
 check('favorites can still be set while applying', window.__dshMusicPlayer.getState().favorites.has('a.mp3'), JSON.stringify([...window.__dshMusicPlayer.getState().favorites]));
-await act(async () => { rows()[0].querySelector('.dshm-match').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
-await settle(80);
+await chooseRowAction(rows()[0], '.dshm-menuMatch');
 check('match request fired with the stable id', matchCalls.length === 1 && matchCalls[0].includes('p=a.mp3'), matchCalls[0]);
 check('search box shows the term the host used', container.querySelector('.dshm-matchInput')?.value === 'Alpha Real', container.querySelector('.dshm-matchInput')?.value);
 check('write-file box is checked by default', container.querySelector('.dshm-check input')?.checked === true);
@@ -232,7 +242,7 @@ check('no local override is kept once tags were written', meta()['a.mp3'] === un
 
 // ── 弹层：dialog 语义 / 背景滚动锁 / Escape 关闭 / 焦点进入 ────────────────────
 {
-  await act(async () => { rows()[1].querySelector('.dshm-match').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await chooseRowAction(rows()[1], '.dshm-menuMatch');
   await settle(90);
   const overlay = container.querySelector('.dshm-modal');
   const input = container.querySelector('.dshm-matchInput');
@@ -268,8 +278,7 @@ check('no local override is kept once tags were written', meta()['a.mp3'] === un
 }
 
 // ── Display-only fallback (unchecked box) ────────────────────────────────────
-await act(async () => { rows()[1].querySelector('.dshm-match').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
-await settle(80);
+await chooseRowAction(rows()[1], '.dshm-menuMatch');
 await act(async () => { container.querySelector('.dshm-check input').click(); });
 await settle(20);
 check('unchecking write-file is reflected', container.querySelector('.dshm-check input')?.checked === false);
@@ -279,8 +288,7 @@ check('display-only apply sends no /api/apply', applyCalls.length === 1, 'calls=
 check('display-only apply keeps a local override', meta()['b.mp3']?.title === 'Beta Real' && titleOf(rows()[1]) === 'Beta Real', JSON.stringify(meta()));
 check('row cover falls back to the proxied artwork', String(rows()[1].querySelector('.dshm-rowCover')?.getAttribute('src')).startsWith('/api/dsh-music/art?u='), String(rows()[1].querySelector('.dshm-rowCover')?.getAttribute('src')));
 
-await act(async () => { rows()[1].querySelector('.dshm-match').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
-await settle(80);
+await chooseRowAction(rows()[1], '.dshm-menuMatch');
 // 弹层里的按钮同样不能是装饰品：读了 React 挂在 DOM 上的 props 才能判断。
 const dialogButtonWired = (b) => {
   const key = Object.keys(b).find((k) => k.startsWith('__reactProps$'));

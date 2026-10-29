@@ -111,8 +111,14 @@ const check = (label, ok, detail) => { if (!ok) failures += 1; console.log((ok ?
 const rows = () => container.querySelectorAll('.dshm-row');
 const rowOf = (id) => Array.from(rows()).find((row) => row.title === id);
 const openDialog = async (id) => {
-  await act(async () => { rowOf(id).querySelector('.dshm-match').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
-  await settle(80);
+  const row = rowOf(id);
+  await act(async () => { row.querySelector('.dshm-rowMenuBtn').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(40);
+  const item = container.querySelector('.dshm-menuMatch');
+  if (item !== null) {
+    await act(async () => { item.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    await settle(80);
+  }
 };
 const applyFirstCandidate = async () => {
   await act(async () => { container.querySelector('.dshm-cand').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
