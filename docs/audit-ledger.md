@@ -2605,3 +2605,23 @@ YouTube CC 测试视频的元数据；B 站 extractor 存在但未下载未知�
 代码：下载/元数据失败若命中 403/Forbidden，错误改为可行动说明（确认公开与授权、升级 yt-dlp、
 需要登录/会员/地区权限时本功能不绕过），不再只抛 yt-dlp 原文。新增 1 条断言（36 条）。
 诚实说明：未拿到用户的具体 MV 链接，无法确认该视频是版本问题还是权限/地区限制；升级后需重试。
+
+## 5.62 第 52 轮 —— 清晰度选择 + B 站扫码登录
+
+基线：视频导入固定 `bv*+ba/b`；B 站未登录最高常见 720P，1080P 需要账号。
+
+改动：新增 `POST /import-probe`（yt-dlp `-J` 归纳每高度最佳格式 + 推荐 1080P + 体积）
+与 `GET/POST /import-auth`（官方 QR 生成/轮询/退出）。登录成功后 cookie 写
+`$DSH_HOME/storages/dsh-music-bilibili.cookies`（0600、原子写、不返回页面、不日志），
+yt-dlp 对 B 站加 `--cookies`。下载按 `height` 生成
+`bestvideo[height<=H]+bestaudio/best[height<=H]`；默认推荐 1080P，仍可选手动最佳/更高档。
+客户端加清晰度下拉、体积/推荐标签、扫码面板（qrcode-generator 本地生成 SVG data URL）、登录状态/退出。
+
+安全：不处理密码/短信；不绕过会员、付费墙或 DRM；二维码走官方端点，不交给第三方图床；
+cookie 文件权限 0600，退出即删；错误与响应均不含 cookie。
+
+门禁：`test-import.mjs` 51 条（新增探测/height/cookie/QR 登录 mock/0600/退出）；
+`test-client-shell` 覆盖清晰度下拉、推荐 1080、二维码入口与 start 带 height；36 套通过。
+对照：去 height 过滤 → 「format honours the chosen height」红；cookie 不落盘 → 「QR poll stores
+the login」红（登录校验失败）。真实扫码未做（需要用户自己的 B 站账号/手机）；B 站 generate
+端点已实网验证，登录链路用 mock 覆盖。

@@ -76,7 +76,8 @@
     "libavjs-webcodecs-polyfill": "^0.5.5",
     "mediabunny": "^1.59.1",
     "music-metadata": "^11.9.2",
-    "node-taglib-sharp": "^6.0.3"
+    "node-taglib-sharp": "^6.0.3",
+    "qrcode-generator": "^2.0.4"
   },
   "devDependencies": {
     "@types/node": "^26.6.2",

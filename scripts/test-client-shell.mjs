@@ -162,6 +162,26 @@ const mockFetch = async (url, init) => {
   if (suffix.includes('/api/dsh-music/session')) return new dom.window.Response(JSON.stringify({ systemArtBase: SYSTEM_ART_BASE }), { headers: { 'content-type': 'application/json' } });
   if (suffix.includes('/api/dsh-music/library') || suffix.includes('/api/dsh-music/refresh')) return new dom.window.Response(JSON.stringify(library), { headers: { 'content-type': 'application/json' } });
   if (suffix.includes('/api/dsh-music/cover')) return new dom.window.Response('', { status: 404 });
+  if (suffix.includes('/api/dsh-music/import-probe')) {
+    return new dom.window.Response(JSON.stringify({
+      title: 'UI Song', artist: 'UI Artist', duration: 61,
+      heights: [
+        { height: 1080, fps: 60, ext: 'mp4', filesize: 12000000, note: '1080P' },
+        { height: 720, fps: 30, ext: 'mp4', filesize: 6000000, note: '720P' },
+      ],
+      recommended: 1080, loggedIn: false, needsLogin: true,
+    }), { headers: { 'content-type': 'application/json' } });
+  }
+  if (suffix.includes('/api/dsh-music/import-auth')) {
+    const method = (init?.method ?? 'GET').toUpperCase();
+    if (method === 'POST') {
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      if (body.action === 'qr') return new dom.window.Response(JSON.stringify({ action: 'qr', key: 'ui-key', qr: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=', expiresIn: 180 }), { headers: { 'content-type': 'application/json' } });
+      if (body.action === 'poll') return new dom.window.Response(JSON.stringify({ action: 'poll', status: 'waiting' }), { headers: { 'content-type': 'application/json' } });
+      if (body.action === 'logout') return new dom.window.Response(JSON.stringify({ action: 'logout', loggedIn: false }), { headers: { 'content-type': 'application/json' } });
+    }
+    return new dom.window.Response(JSON.stringify({ bilibili: { loggedIn: false } }), { headers: { 'content-type': 'application/json' } });
+  }
   if (suffix.includes('/api/dsh-music/import')) {
     const method = (init?.method ?? 'GET').toUpperCase();
     if (method === 'POST') {
@@ -517,6 +537,47 @@ check('the fallback keeps the UI alive (no error bar)', container.querySelector(
       await settle(80);
     }
   }
+}
+
+// ── 清晰度选择 + B 站扫码登录入口 ──────────────────────────────────────────
+{
+  const importButton = container.querySelector('button[aria-label="action.import"]');
+  await act(async () => { importButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(80);
+  const dialog = container.querySelector('.dshm-importDialog');
+  const videoButton = Array.from(dialog.querySelectorAll('.dshm-importKind')).at(-1);
+  await act(async () => { videoButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  const input = dialog.querySelector('.dshm-importInput');
+  await act(async () => {
+    const props = reactProps(input);
+    props.onChange({ target: { value: 'https://www.bilibili.com/video/BV1ui' } });
+  });
+  await settle(900);
+  const select = dialog.querySelector('.dshm-importSelect');
+  const optionValues = select === null ? [] : Array.from(select.options).map((option) => option.value);
+  check('quality select appears for video and recommends 1080', select !== null && optionValues.includes('best') && optionValues.includes('1080') && optionValues.includes('720') && select.value === '1080', optionValues.join(',') + ' value=' + (select?.value ?? 'missing'));
+  check('probe metadata is shown before download', String(dialog.textContent).includes('UI Song') && String(dialog.textContent).includes('UI Artist'), String(dialog.textContent).slice(0, 120));
+  const loginButton = Array.from(dialog.querySelectorAll('.dshm-importLinkBtn')).find((button) => button.textContent === 'import.loginButton');
+  check('Bilibili URL exposes the QR sign-in action', loginButton !== undefined, dialog.querySelector('.dshm-importLogin')?.textContent?.slice(0, 100) ?? 'missing');
+  if (loginButton !== undefined) {
+    await act(async () => { loginButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+    await settle(100);
+    const qr = dialog.querySelector('.dshm-importQr');
+    check('sign-in renders a local QR image', qr !== null && String(qr.getAttribute('src')).startsWith('data:image/svg+xml;base64,'), qr?.getAttribute('src')?.slice(0, 48) ?? 'missing');
+  }
+  await act(async () => {
+    const props = reactProps(input);
+    props.onChange({ target: { value: 'https://www.bilibili.com/video/BV1ui' } });
+  });
+  await settle(30);
+  const start = Array.from(dialog.querySelectorAll('.dshm-dialogFoot .dshm-btn')).at(-1);
+  await act(async () => { start.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(120);
+  const lastPost = importPosts.at(-1);
+  check('start sends the selected height for video', lastPost !== undefined && lastPost.kind === 'video' && lastPost.height === 1080, JSON.stringify(lastPost));
+  await act(async () => { dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+  await settle(80);
+  check('closing the import dialog after a queued video request still works', container.querySelector('.dshm-importDialog') === null);
 }
 
 // ── 旧命名体系（0.1.6 的 IconXxx16）同样要命中 ─────────────────────────────

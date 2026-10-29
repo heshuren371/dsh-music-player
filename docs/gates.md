@@ -54,4 +54,4 @@ D0b 断言「`?crossfade=0` 仍可回到旧路径」；RG / 均衡器 / CORS 等
 | `音频常驻输出流 + 媒体 CORS` | （`test-audio-graph.mjs`）：起播建一个常驻 AudioContext 且换歌不重建；元素音量置中性、增益在图里；同源不设 crossOrigin / 跨源必须带；未确认 CORS 前不建图；建图失败与 `?musicGraph=0` 均回退；`halt()` 只 suspend。宿主侧：窄名单回显 ACAO（非名单一个头都不给）、媒体端点应答 `OPTIONS` 预检、平台路由拒绝跨源预检 | 19 | §2.19 |
 | `客户端 activation 归属（设备页级 / 租约 / 释放面）` | `test-client-activation.mjs`（21 条）：`halt()` 摘 window 键、撤监听、移自建 DOM、只 suspend 设备；二次 activation 与热重载后**起播必须出声**；`toggle()` 唤醒被挂起的设备；换歌不跳满幅。负向对照与失败细节见台账对应小节 | 32 | AGENTS「客户端 activation 归属」 |
 | `MV 音轨判定与任务生命周期` | `test-mv-jobs.mjs`（8 条 + 无 ffmpeg 时显式 skipped）+ `test-mv-client.mjs`（7 条）：mkv 不豁免音轨判定（真 `h264+mp2` 夹具）、档位从 `audio` 起、失败记录 10 分钟粘住且 `retry=1` 真重跑、音轨看门狗正反向、direct 档挂 token 绝对地址、WASM 旁路的音轨前提（静态） | 32 | AGENTS「错误面与降级」 |
-| `链接导入` | `test-import.mjs`（36 条）：白名单/命名/参数、假 yt-dlp 音视频+标签+封面、忙/取消/缺工具 | 30 | docs/import.md |
+| `链接导入` | `test-import.mjs`（51 条）：白名单/参数/清晰度、假 yt-dlp 音视频+标签+封面、B 站扫码 cookie、忙/取消/缺工具 | 51 | docs/import.md |

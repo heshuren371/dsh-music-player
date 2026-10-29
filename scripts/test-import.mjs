@@ -8,8 +8,8 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-  buildYtdlpArgs, importErrorText, importFailureMessage, importFileName, parseImportProgress, parseYtdlpInfo,
-  sanitizeImportName, validateImportUrl,
+  biliCookieFileContent, biliCookieHeader, biliQrDataUrl, buildYtdlpArgs, importErrorText,
+  importFailureMessage, importFileName, importFormatHeights, parseBiliSetCookie, parseImportProgress, parseYtdlpInfo, recommendedImportHeight, sanitizeImportName, validateImportUrl,
 } from '../lib/host.js';
 
 let failures = 0;
@@ -61,6 +61,21 @@ check('args pin config/playlist/thumbnail/ffmpeg and end with the URL',
 check('error text strips the local directory', !importErrorText('ERROR: failed in /tmp/music/x\n', '/tmp/music').includes('/tmp/music'), importErrorText('ERROR: failed in /tmp/music/x', '/tmp/music'));
 check('403 becomes an actionable message (no login bypass claim)', /403/u.test(importFailureMessage('ERROR: unable to download video data: HTTP Error 403: Forbidden', '/tmp/music')) && /yt-dlp/u.test(importFailureMessage('HTTP Error 403: Forbidden', '/tmp/music')) && /不提供/u.test(importFailureMessage('HTTP Error 403: Forbidden', '/tmp/music')), importFailureMessage('HTTP Error 403: Forbidden', '/tmp/music'));
 
+// ── B 站 cookie / 二维码纯函数 ───────────────────────────────────────────────
+const cookieHeaders = [
+  'SESSDATA=abc%2C123; Path=/; Domain=.bilibili.com; Expires=Wed, 21 Oct 2026 07:28:00 GMT; HttpOnly',
+  'bili_jct=csrf; Path=/; Domain=.bilibili.com',
+  'other=no; Path=/; Domain=example.com',
+];
+const parsedCookies = parseBiliSetCookie(cookieHeaders);
+check('Bilibili Set-Cookie parsing keeps only bilibili domains', parsedCookies.length === 2 && parsedCookies.every((c) => c.domain.endsWith('bilibili.com')), JSON.stringify(parsedCookies));
+const cookieFile = biliCookieFileContent(parsedCookies);
+check('cookie file is Netscape format and keeps SESSDATA', cookieFile.startsWith('# Netscape HTTP Cookie File') && cookieFile.includes('SESSDATA\tabc%2C123') && cookieFile.includes('\tTRUE\t'), cookieFile);
+const cookieHeader = biliCookieHeader(cookieFile);
+check('cookie header can be rebuilt for nav verification', cookieHeader.includes('SESSDATA=abc%2C123') && cookieHeader.includes('bili_jct=csrf'), cookieHeader);
+const qrData = biliQrDataUrl('https://account.bilibili.com/scan?qrcode_key=test');
+check('QR is rendered locally as an SVG data URL', qrData.startsWith('data:image/svg+xml;base64,') && qrData.length > 500, String(qrData.length));
+
 // ── 端到端：假 yt-dlp + 真 ffmpeg + 真 tag writer ───────────────────────────
 const FFMPEG = ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/opt/local/bin/ffmpeg', '/usr/bin/ffmpeg'].find((p) => existsSync(p)) ?? null;
 if (FFMPEG === null) {
@@ -89,9 +104,16 @@ const fs=require('fs'), path=require('path');
 const args=process.argv.slice(2);
 if (args.includes('--version')) { console.log('2026.07.04-fake'); process.exit(0); }
 if (args.includes('-J')) {
-  console.log(JSON.stringify({ id:'fake1', title:process.env.FAKE_TITLE || '测试曲目', uploader:process.env.FAKE_ARTIST || '测试作者', duration:1, webpage_url:args[args.length-1] }));
+  console.log(JSON.stringify({ id:'fake1', title:process.env.FAKE_TITLE || '测试曲目', uploader:process.env.FAKE_ARTIST || '测试作者', duration:61, webpage_url:args[args.length-1],
+    formats: [
+      { height: 2160, vcodec: 'avc1', ext: 'mp4', fps: 60, tbr: 8000, filesize: 24000000, format_note: '2160P' },
+      { height: 1080, vcodec: 'avc1', ext: 'mp4', fps: 60, tbr: 4000, filesize: 12000000, format_note: '1080P' },
+      { height: 720, vcodec: 'avc1', ext: 'mp4', fps: 30, tbr: 2000, filesize: 6000000, format_note: '720P' },
+      { vcodec: 'none', acodec: 'mp4a', ext: 'm4a', abr: 128 },
+    ] }));
   process.exit(0);
 }
+if (process.env.FAKE_ARGS_FILE) fs.appendFileSync(process.env.FAKE_ARGS_FILE, JSON.stringify(args)+'\\n');
 const out=args[args.indexOf('-o')+1]; const base=out.replace('.%(ext)s','');
 const audio=args.includes('-x');
 const delay=Number(process.env.FAKE_SLOW_MS || 0);
@@ -104,6 +126,7 @@ console.log('download: 100.0%|1.0MiB/s|00:00');
     process.env.DSH_HOME = home;
     process.env.DSH_MUSIC_YTDLP = fake;
     process.env.FAKE_FIXTURES = fixtures;
+    process.env.FAKE_ARGS_FILE = path.join(fixtures, 'args.jsonl');
 
     let handler = null;
     const ctx = { effect: (fn) => fn(), get: () => undefined, webServer: { register: (route) => { handler = route.handler; return () => {}; } } };
@@ -139,6 +162,13 @@ console.log('download: 100.0%|1.0MiB/s|00:00');
     check('capabilities report yt-dlp and ffmpeg', caps.body?.available === true && caps.body?.ytdlp === '2026.07.04-fake', JSON.stringify(caps.body));
     check('capabilities publish the host allowlist', Array.isArray(caps.body?.hosts) && caps.body.hosts.includes('bilibili.com'));
 
+    const probe = await json(base + '/api/import-probe', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url: 'https://www.youtube.com/watch?v=audio1' }) });
+    check('probe lists heights and recommends 1080', probe.status === 200 && JSON.stringify(probe.body?.heights?.map((h) => h.height)) === '[2160,1080,720]' && probe.body?.recommended === 1080, JSON.stringify(probe.body));
+    const biliProbe = await json(base + '/api/import-probe', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ url: 'https://www.bilibili.com/video/BV1xx411c7mD' }) });
+    check('Bilibili probe flags login requirement without cookies', biliProbe.status === 200 && biliProbe.body?.needsLogin === true && biliProbe.body?.loggedIn === false, JSON.stringify(biliProbe.body));
+    const auth = await json(base + '/api/import-auth');
+    check('auth status starts logged out', auth.status === 200 && auth.body?.bilibili?.loggedIn === false, JSON.stringify(auth.body));
+
     const started = await post({ url: 'https://www.youtube.com/watch?v=audio1', kind: 'audio' });
     check('start returns a running job', started.status === 200 && started.body?.job?.phase !== 'error', JSON.stringify(started.body?.job));
     const audioJob = await waitJob(started.body.job.id);
@@ -153,10 +183,14 @@ console.log('download: 100.0%|1.0MiB/s|00:00');
     check('no temp files left after success', (await fs.readdir(music)).every((name) => !name.startsWith('.dshm-import-')), (await fs.readdir(music)).join(', '));
 
     if (media.video) {
-      const videoStarted = await post({ url: 'https://www.bilibili.com/video/BV1xx', kind: 'video' });
+      const videoStarted = await post({ url: 'https://www.bilibili.com/video/BV1xx', kind: 'video', height: 720 });
       const videoJob = await waitJob(videoStarted.body.job.id);
       check('video import finishes', videoJob?.phase === 'done', JSON.stringify(videoJob));
       check('video is a video track in the playlist', videoJob?.tagged === true && (await waitTrack(videoJob.file))?.kind === 'video', JSON.stringify(videoJob));
+      check('video job records the chosen height', videoJob?.height === 720, JSON.stringify(videoJob));
+      const argLines = (await fs.readFile(process.env.FAKE_ARGS_FILE, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+      const lastArgs = argLines.at(-1) ?? [];
+      check('the download format honours the chosen height', lastArgs.includes('bestvideo[height<=720]+bestaudio/best[height<=720]'), lastArgs.join(' '));
     } else {
       skip('video import (libx264 fixture unavailable)');
     }
@@ -172,6 +206,44 @@ console.log('download: 100.0%|1.0MiB/s|00:00');
     process.env.FAKE_SLOW_MS = '0';
     await new Promise((resolve) => setTimeout(resolve, 200));
     check('cancelled import leaves no temp files', (await fs.readdir(music)).every((name) => !name.startsWith('.dshm-import-')), (await fs.readdir(music)).join(', '));
+
+    // ── B 站扫码登录：mock 官方接口，绝不登录真实账号 ─────────────────────────
+    {
+      const realFetch = globalThis.fetch;
+      let polls = 0;
+      globalThis.fetch = async (input, init) => {
+        const target = String(input);
+        if (target.includes('/x/passport-login/web/qrcode/generate')) {
+          return new Response(JSON.stringify({ code: 0, data: { url: 'https://account.bilibili.com/test-scan', qrcode_key: 'test-key' } }), { headers: { 'content-type': 'application/json' } });
+        }
+        if (target.includes('/x/passport-login/web/qrcode/poll')) {
+          polls += 1;
+          if (polls === 1) return new Response(JSON.stringify({ data: { code: 86101 } }), { headers: { 'content-type': 'application/json' } });
+          return new Response(JSON.stringify({ data: { code: 0 } }), { headers: { 'content-type': 'application/json', 'set-cookie': 'SESSDATA=test-auth; Path=/; Domain=.bilibili.com; HttpOnly' } });
+        }
+        if (target.includes('/x/web-interface/nav')) {
+          return new Response(JSON.stringify({ code: 0, data: { isLogin: true, uname: '测试账号', mid: 42, vipStatus: 1 } }), { headers: { 'content-type': 'application/json' } });
+        }
+        return realFetch(input, init);
+      };
+      try {
+        const qr = await json(base + '/api/import-auth', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'qr' }) });
+        check('QR login generates a local SVG data URL', qr.status === 200 && qr.body?.key === 'test-key' && String(qr.body?.qr).startsWith('data:image/svg+xml;base64,'), JSON.stringify({ key: qr.body?.key, qr: String(qr.body?.qr).slice(0, 40) }));
+        const waiting = await json(base + '/api/import-auth', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'poll', key: 'test-key' }) });
+        check('QR poll reports waiting before a scan', waiting.status === 200 && waiting.body?.status === 'waiting', JSON.stringify(waiting.body));
+        const ok = await json(base + '/api/import-auth', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'poll', key: 'test-key' }) });
+        check('QR poll stores the login and reports the account', ok.status === 200 && ok.body?.status === 'ok' && ok.body?.auth?.uname === '测试账号' && ok.body?.auth?.vip === true, JSON.stringify(ok.body));
+        const cookiePath = path.join(home, 'storages', 'dsh-music-bilibili.cookies');
+        const cookieStat = await fs.stat(cookiePath);
+        check('Bilibili cookie file is private (0600)', (cookieStat.mode & 0o777) === 0o600, String(cookieStat.mode & 0o777));
+        const logged = await json(base + '/api/import-auth');
+        check('auth status reports the logged-in account', logged.body?.bilibili?.loggedIn === true && logged.body?.bilibili?.uname === '测试账号', JSON.stringify(logged.body));
+        const logout = await json(base + '/api/import-auth', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'logout' }) });
+        check('logout removes the cookie file', logout.status === 200 && logout.body?.loggedIn === false && !existsSync(cookiePath), JSON.stringify(logout.body));
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    }
 
     const badUrl = await post({ url: 'https://example.com/video', kind: 'audio' });
     check('endpoint rejects a non-allowlisted host', badUrl.status === 400, JSON.stringify(badUrl.body));

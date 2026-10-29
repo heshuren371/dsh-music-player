@@ -31,8 +31,8 @@
     },
     {
       "name": "net.fetch",
-      "scope": "c.y.qq.com / itunes.apple.com / music.163.com / musicbrainz.org（搜索），mzstatic.com / *.gtimg.cn / *.music.126.net / coverartarchive.org（封面），以及 youtube.com / bilibili.com / vimeo.com / soundcloud.com 等公开视频页与媒体流（经 yt-dlp 子进程）",
-      "reason": "多源在线补全歌曲信息/封面，以及从用户粘贴的公开视频链接导入音频或视频"
+      "scope": "c.y.qq.com / itunes.apple.com / music.163.com / musicbrainz.org（搜索），mzstatic.com / *.gtimg.cn / *.music.126.net / coverartarchive.org（封面），passport.bilibili.com / api.bilibili.com（扫码登录与状态校验），以及 youtube.com / bilibili.com / vimeo.com / soundcloud.com 等公开视频页与媒体流（经 yt-dlp 子进程）",
+      "reason": "多源在线补全歌曲信息/封面，以及从用户粘贴的公开视频链接导入音频或视频；B 站扫码登录只在本地保存 cookie"
     },
     {
       "name": "transport.api",
@@ -41,8 +41,8 @@
     },
     {
       "name": "storage.local",
-      "scope": "$DSH_HOME/storages/dsh-music-player.json + 浏览器 localStorage（dsh-music:* 前缀）",
-      "reason": "记住音乐目录、最后播放曲目与进度、音量/循环/排序偏好"
+      "scope": "$DSH_HOME/storages/dsh-music-player.json、dsh-music-bilibili.cookies（0600）与浏览器 localStorage（dsh-music:* 前缀）",
+      "reason": "记住音乐目录、最后播放曲目与进度、音量/循环/排序偏好；B 站扫码登录 cookie（0600，仅本机、可退出删除）"
     },
     {
       "name": "process.spawn",
@@ -79,6 +79,8 @@
         "GET|HEAD /mvfile",
         "GET|POST /import",
         "POST /import-cancel",
+        "GET|POST /import-auth",
+        "POST /import-probe",
         "POST /caps",
         "GET|HEAD /system-art",
         "GET|HEAD /system-stream"

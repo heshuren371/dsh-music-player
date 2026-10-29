@@ -535,6 +535,8 @@ Storage（`storage.zh.md`）。`LocalStorage` 通过 protocol requirement 声明
 
 ## 链接导入
 
-只接受 `https`、无凭据、标准端口与平台白名单（YouTube / Bilibili / Vimeo / SoundCloud）的公开链接；不读取浏览器 cookie、不提供登录/付费墙/DRM 绕过。任务只写当前音乐目录，所有路径过 `authorize('fs.write', …, [currentDir])`；临时前缀 `.dshm-import-` 在成功/失败/取消后清理。
+只接受 `https`、无凭据、标准端口与平台白名单（YouTube / Bilibili / Vimeo / SoundCloud）的公开链接；不读取浏览器 cookie、不通过密码/浏览器 cookie 登录；B 站可选官方扫码登录（cookie 0600 存本机并只交给 B 站 yt-dlp），不提供付费墙/DRM 绕过。任务只写当前音乐目录，所有路径过 `authorize('fs.write', …, [currentDir])`；临时前缀 `.dshm-import-` 在成功/失败/取消后清理。
 
 `yt-dlp` 以 `--ignore-config --no-playlist` 启动，参数数组直传、不经 shell；单文件上限 2 GiB、单任务 20 分钟、同一时间一个任务。下载后按 `作者 - 标题` 重命名并走原子标签/封面写入；标签失败保留文件并报告 warning。停用/热重载必须杀掉在飞子进程并清理临时文件。下发给页面的任务快照只含展示字段，不含本地绝对路径；错误文本移除目录。
+
+B 站扫码登录只走官方 QR 端点：生成二维码、轮询扫码状态、成功后写 0600 cookie 文件并调用 nav 校验；cookie 只用于用户自己账号可见的清晰度，不返回页面、不写日志、不保存密码。退出登录删除文件。清晰度探测用 `yt-dlp -J` 归纳每个高度最好的一条；下载用 `bestvideo[height<=H]+bestaudio`，默认推荐 1080P，用户可选自动/更高档位。登录、探测、下载都受同一 URL 白名单约束。

@@ -124,7 +124,7 @@
 
 ## 9. 端点面
 
-宿主把每个端点注册为 `ctx.connection.fetch` 上的精确 `/api` Fetch 路由（Web 与 Desktop 共用同一条接缝）。共 20 个端点，与 `lib/host.js` 的分派表、`lib/index.js` 的 `FETCH_ROUTES`、`dsh-plugin.json` 的登记表由 `scripts/test-route-consistency.mjs` 强制三向集合相等。
+宿主把每个端点注册为 `ctx.connection.fetch` 上的精确 `/api` Fetch 路由（Web 与 Desktop 共用同一条接缝）。共 22 个端点，与 `lib/host.js` 的分派表、`lib/index.js` 的 `FETCH_ROUTES`、`dsh-plugin.json` 的登记表由 `scripts/test-route-consistency.mjs` 强制三向集合相等。
 
 | 路由 | 方法 | 说明 |
 | --- | --- | --- |
@@ -142,6 +142,8 @@
 | `/mvconvert`、`/mvlib`、`/mvfile` | — | 触发转换 / MV 库视图 / MV 文件流（Range） |
 | `/import` | GET/POST | 能力探测 + 最近任务 / 启动链接导入（音频/视频，经 yt-dlp） |
 | `/import-cancel` | POST | 取消正在运行的链接导入 |
+| `/import-probe` | POST | 解析可用清晰度（yt-dlp `-J`；B 站登录后可见更高档位） |
+| `/import-auth` | GET/POST | B 站扫码登录状态 / 生成二维码 / 轮询 / 退出 |
 | `/system-art?t=<token>`、`/system-stream?t=<token>` | GET | 仅旧前缀可达：Chromium 内部取封面 / 取媒体 |
 
 ### 9.1 为什么最后两个不在 `connection.fetch` 上

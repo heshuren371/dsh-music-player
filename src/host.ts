@@ -8,6 +8,7 @@ import { parseFile } from 'music-metadata';
 import { File as TagFile, Picture as TagPicture, ByteVector } from 'node-taglib-sharp';
 import { Worker } from 'node:worker_threads';
 import { randomUUID } from 'node:crypto';
+import qrcode from 'qrcode-generator';
 import { fetchFromNodeHandler } from './http-bridge.js';
 
 // ── 就地声明的数据结构 ───────────────────────────────────────────────────────
@@ -177,6 +178,8 @@ interface ImportInfo {
 interface ImportJob {
   id: string;
   kind: ImportKind;
+  /** 用户选择的视频高度上限；null = 自动最佳。 */
+  height: number | null;
   url: string;
   phase: ImportPhase;
   progress: number;
@@ -198,10 +201,39 @@ interface ImportJob {
   tmpBase: string;
 }
 
+/** B 站扫码登录后的展示状态；cookie 本身只留在宿主文件里。 */
+interface BiliAuth {
+  loggedIn: boolean;
+  uname?: string;
+  mid?: number | null;
+  vip?: boolean;
+}
+
+/** 一种可用清晰度（同一 height 只保留评分最高的一条格式）。 */
+interface ImportFormat {
+  height: number;
+  fps: number | null;
+  ext: string;
+  filesize: number | null;
+  note: string;
+}
+
+/** 清晰度探测的下发形状。 */
+interface ImportProbe {
+  title: string;
+  artist: string;
+  duration: number | null;
+  heights: ImportFormat[];
+  recommended: number | null;
+  loggedIn: boolean;
+  needsLogin: boolean;
+}
+
 /** 下发给页面的任务快照（白名单投影，不含本地路径）。 */
 interface ImportSnapshot {
   id: string;
   kind: ImportKind;
+  height: number | null;
   phase: ImportPhase;
   progress: number;
   title: string | null;
@@ -555,7 +587,7 @@ export function parseImportProgress(line) {
 }
 
 /** yt-dlp 参数：固定输出模板在临时前缀上，下载完再按标签重命名。 */
-export function buildYtdlpArgs(url, kind, tmpBase, ffmpegPath) {
+export function buildYtdlpArgs(url, kind, tmpBase, ffmpegPath, height: number | null = null, cookiesPath: string | null = null) {
   const args = [
     '--ignore-config',
     '--no-playlist',
@@ -568,8 +600,14 @@ export function buildYtdlpArgs(url, kind, tmpBase, ffmpegPath) {
     '-o', tmpBase + '.%(ext)s',
   ];
   if (typeof ffmpegPath === 'string' && ffmpegPath.length > 0) args.push('--ffmpeg-location', ffmpegPath);
+  if (typeof cookiesPath === 'string' && cookiesPath.length > 0) args.push('--cookies', cookiesPath);
   if (kind === 'audio') args.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
-  else args.push('-f', 'bv*+ba/b', '--merge-output-format', 'mp4');
+  else {
+    const format = typeof height === 'number'
+      ? `bestvideo[height<=${Math.round(height)}]+bestaudio/best[height<=${Math.round(height)}]`
+      : 'bv*+ba/b';
+    args.push('-f', format, '--merge-output-format', 'mp4');
+  }
   args.push(url);
   return args;
 }
@@ -583,10 +621,8 @@ export function importErrorText(stderr, dir) {
     .filter((line) => line.length > 0);
   const errors = lines.filter((line) => /^ERROR:/i.test(line));
   const picked = (errors.length > 0 ? errors : lines).slice(-3).join(' · ');
-  return picked
-    .split(dir).join('<音乐目录>')
-    .slice(0, 240)
-    .trim() || '下载失败';
+  const redacted = typeof dir === 'string' && dir.length > 0 ? picked.split(dir).join('<音乐目录>') : picked;
+  return redacted.slice(0, 240).trim() || '下载失败';
 }
 
 /**
@@ -1766,6 +1802,144 @@ const WAVEFORM_CACHE_MAX = 512;
 const WAVEFORM_CACHE_PERSIST_MAX = 200;
 const LEGACY_STATE_FILE = fileURLToPath(new URL('./state.json', import.meta.url));
 
+// ── B 站扫码登录 ────────────────────────────────────────────────────────────
+// 只使用官方 QR 登录端点；cookie 写进 $DSH_HOME/storages 下的 0600 文件，
+// 不返回给页面、不写日志。它只用于用户自己的 B 站账号能访问的清晰度，
+// 不处理密码、短信、会员/DRM 绕过。
+const BILI_QR_GENERATE = 'https://passport.bilibili.com/x/passport-login/web/qrcode/generate';
+const BILI_QR_POLL = 'https://passport.bilibili.com/x/passport-login/web/qrcode/poll';
+const BILI_NAV = 'https://api.bilibili.com/x/web-interface/nav';
+const BILI_HEADERS = {
+  'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+  referer: 'https://www.bilibili.com/',
+  accept: 'application/json, text/plain, */*',
+};
+
+interface BiliCookie {
+  name: string;
+  value: string;
+  domain: string;
+  expires: number;
+}
+
+function biliCookieFile() {
+  return path.join(STATE_DIR, 'dsh-music-bilibili.cookies');
+}
+
+function isBilibiliUrl(url: string) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === 'b23.tv' || host === 'bilibili.com' || host.endsWith('.bilibili.com');
+  } catch {
+    return false;
+  }
+}
+
+/** 从 Set-Cookie 头里提取登录 cookie；只保留 bilibili.com 域。 */
+export function parseBiliSetCookie(headers: string[]): BiliCookie[] {
+  const out = new Map<string, BiliCookie>();
+  for (const raw of headers) {
+    const first = String(raw).split(';')[0];
+    const at = first.indexOf('=');
+    if (at <= 0) continue;
+    const name = first.slice(0, at).trim();
+    const value = first.slice(at + 1).trim();
+    if (name.length === 0) continue;
+    const domainMatch = /(?:^|;)\s*domain=([^;]+)/iu.exec(String(raw));
+    const rawDomain = (domainMatch?.[1] ?? 'bilibili.com').trim().toLowerCase();
+    if (rawDomain !== 'bilibili.com' && !rawDomain.endsWith('.bilibili.com')) continue;
+    const domain = rawDomain.startsWith('.') ? rawDomain : '.' + rawDomain;
+    let expires = 0;
+    const expiresMatch = /(?:^|;)\s*expires=([^;]+)/iu.exec(String(raw));
+    if (expiresMatch !== null) {
+      const atDate = Date.parse(expiresMatch[1]);
+      if (Number.isFinite(atDate)) expires = Math.floor(atDate / 1000);
+    }
+    const maxAge = /(?:^|;)\s*max-age=(\d+)/iu.exec(String(raw));
+    if (maxAge !== null) expires = Math.floor(Date.now() / 1000) + Number(maxAge[1]);
+    out.set(name, { name, value, domain, expires });
+  }
+  return [...out.values()];
+}
+
+/** 生成 yt-dlp 能读的 Netscape cookie 文件内容。 */
+export function biliCookieFileContent(cookies: BiliCookie[]): string {
+  const lines = [
+    '# Netscape HTTP Cookie File',
+    '# Generated by dsh-music-player; keep this file private.',
+  ];
+  for (const cookie of cookies) {
+    lines.push([cookie.domain, 'TRUE', '/', 'TRUE', String(cookie.expires || 0), cookie.name, cookie.value].join('\t'));
+  }
+  return lines.join('\n') + '\n';
+}
+
+/** 从 Netscape 文件里还原 Cookie 请求头（只给宿主内部校验用）。 */
+export function biliCookieHeader(fileText: string): string {
+  const pairs: string[] = [];
+  for (const line of String(fileText).split(/\r?\n/)) {
+    if (line.length === 0 || line.startsWith('#')) continue;
+    const parts = line.split('\t');
+    if (parts.length < 7) continue;
+    const name = parts[5].trim();
+    const value = parts.slice(6).join('\t').trim();
+    if (name.length > 0) pairs.push(name + '=' + value);
+  }
+  return pairs.join('; ');
+}
+
+/** 把二维码内容画成 SVG data URL（不把登录 URL 交给第三方图床）。 */
+export function biliQrDataUrl(payload: string): string {
+  const qr = qrcode(0, 'M');
+  qr.addData(payload);
+  qr.make();
+  const svg = qr.createSvgTag({ cellSize: 5, margin: 3, scalable: true });
+  return 'data:image/svg+xml;base64,' + Buffer.from(svg, 'utf8').toString('base64');
+}
+
+/** 从 yt-dlp 的 formats 归纳「每个高度最好的一条」，用于清晰度下拉。 */
+export function importFormatHeights(value: unknown): ImportFormat[] {
+  const formats = value !== null && typeof value === 'object' && Array.isArray((value as { formats?: unknown }).formats)
+    ? (value as { formats: unknown[] }).formats : [];
+  const byHeight = new Map<number, ImportFormat & { score: number }>();
+  for (const rawItem of formats) {
+    if (rawItem === null || typeof rawItem !== 'object') continue;
+    const item = rawItem as Record<string, unknown>;
+    if (item.vcodec === 'none') continue;
+    const height = Number(item.height);
+    if (!Number.isFinite(height) || height < 144) continue;
+    const ext = typeof item.ext === 'string' ? item.ext : '';
+    const fps = Number(item.fps);
+    const tbr = Number(item.tbr);
+    const rawSize = Number(item.filesize ?? item.filesize_approx);
+    const size = Number.isFinite(rawSize) && rawSize > 0 ? rawSize : null;
+    const score = (Number.isFinite(tbr) ? tbr : 0) * 1000 + (Number.isFinite(fps) ? fps : 0) + (ext === 'mp4' ? 1 : 0);
+    const candidate = {
+      height: Math.round(height),
+      fps: Number.isFinite(fps) ? fps : null,
+      ext,
+      filesize: size,
+      note: typeof item.format_note === 'string' ? item.format_note.slice(0, 40) : '',
+      score,
+    };
+    const previous = byHeight.get(candidate.height);
+    if (previous === undefined || candidate.score > previous.score) byHeight.set(candidate.height, candidate);
+  }
+  return [...byHeight.values()]
+    .sort((a, b) => b.height - a.height)
+    .slice(0, 12)
+    .map(({ score: _score, ...rest }) => rest);
+}
+
+/** 推荐默认清晰度：有 1080 选 1080，否则不高于 1080 的最高，再否则最高。 */
+export function recommendedImportHeight(heights: ImportFormat[]): number | null {
+  if (heights.length === 0) return null;
+  if (heights.some((item) => item.height === 1080)) return 1080;
+  const under = heights.find((item) => item.height <= 1080);
+  return (under ?? heights[0]).height;
+}
+
+
 function statusError(statusCode: number, message: string): StatusError {
   return Object.assign(new Error(message), { statusCode });
 }
@@ -2587,6 +2761,12 @@ function createHost(ctx) {
   let importJob: ImportJob | null = null;
   /** yt-dlp 的 --version 结果按二进制路径缓存（轮询端点不能每次起子进程）。 */
   const ytdlpVersionCache = new Map<string, string | null>();
+  /** 扫码登录的待确认二维码（key → 创建时间）；只在宿主内存里。 */
+  const biliQrPending = new Map<string, number>();
+  /** 登录状态缓存，避免弹层每次渲染都打 B 站 nav。 */
+  let biliAuthCache: { at: number; value: BiliAuth } | null = null;
+  /** 清晰度探测缓存：同一 URL + 登录状态 5 分钟内复用，避免下拉抖动重复解析。 */
+  const importProbeCache = new Map<string, { at: number; value: ImportProbe }>();
   let scanning: Promise<LibraryResult | null> | null = null;
   /** Directory the in-flight scan belongs to (scan reuse key). */
   let scanningDir: string | null = null;
@@ -3247,6 +3427,7 @@ function createHost(ctx) {
     return {
       id: job.id,
       kind: job.kind,
+      height: job.height,
       phase: job.phase,
       progress: Math.max(0, Math.min(100, Math.round(job.progress))),
       title: job.title,
@@ -3348,7 +3529,7 @@ function createHost(ctx) {
   }
 
   function runImportProcess(
-    job: ImportJob,
+    job: ImportJob | null,
     bin: string,
     args: string[],
     timeoutMs: number,
@@ -3362,7 +3543,7 @@ function createHost(ctx) {
         resolve({ code: null, stdout: '', stderr: '', timedOut: false, spawnError: reasonOf(error) });
         return;
       }
-      job.child = child;
+      if (job !== null) job.child = child;
       let stdout = '';
       let stderr = '';
       let pending = '';
@@ -3373,12 +3554,12 @@ function createHost(ctx) {
         if (settled) return;
         settled = true;
         if (timer !== null) clearTimeout(timer);
-        job.child = null;
+        if (job !== null) job.child = null;
         resolve({ code, stdout, stderr, timedOut, spawnError: null });
       };
       timer = setTimeout(() => {
         timedOut = true;
-        job.timedOut = true;
+        if (job !== null) job.timedOut = true;
         try {
           child.kill('SIGKILL');
         } catch {
@@ -3404,41 +3585,201 @@ function createHost(ctx) {
         resolve({ code: null, stdout, stderr, timedOut, spawnError: reasonOf(error) });
         settled = true;
         if (timer !== null) clearTimeout(timer);
-        job.child = null;
+        if (job !== null) job.child = null;
       });
       child.on('close', (code) => finish(code));
     });
+  }
+
+
+  // ── B 站扫码登录（官方 QR 端点；cookie 只在宿主本地）────────────────────────
+  async function biliFetch(url: string, options: any = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+      return await fetch(url, {
+        ...options,
+        headers: { ...BILI_HEADERS, ...(options.headers ?? {}) },
+        signal: controller.signal,
+      });
+    } catch {
+      throw statusError(502, 'B 站服务连接失败，请稍后重试');
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function biliAuthStatus(force = false): Promise<BiliAuth> {
+    if (!force && biliAuthCache !== null && Date.now() - biliAuthCache.at < 30_000) return biliAuthCache.value;
+    let value: BiliAuth = { loggedIn: false };
+    if (existsSync(biliCookieFile())) {
+      try {
+        const header = biliCookieHeader(await fs.readFile(biliCookieFile(), 'utf8'));
+        if (header.length > 0) {
+          const response = await biliFetch(BILI_NAV, { headers: { cookie: header } });
+          const body: any = await response.json();
+          if (body?.code === 0 && body.data?.isLogin === true) {
+            value = {
+              loggedIn: true,
+              uname: typeof body.data.uname === 'string' ? body.data.uname.slice(0, 80) : '',
+              mid: Number.isFinite(Number(body.data.mid)) ? Number(body.data.mid) : null,
+              vip: body.data.vipStatus === 1,
+            };
+          }
+        }
+      } catch {
+        value = { loggedIn: false };
+      }
+    }
+    biliAuthCache = { at: Date.now(), value };
+    return value;
+  }
+
+  async function clearBiliCookies() {
+    try {
+      await fs.rm(authorize('storage.local.write', biliCookieFile(), [STATE_DIR]), { force: true });
+    } catch {
+      // 不存在 / 权限失败都不影响退出登录的语义：状态按未登录返回。
+    }
+    biliAuthCache = { at: Date.now(), value: { loggedIn: false } };
+    importProbeCache.clear();
+    console.info('[dsh-music-player] B 站登录已退出');
+  }
+
+  async function writeBiliCookies(cookies: BiliCookie[]) {
+    await fs.mkdir(STATE_DIR, { recursive: true });
+    const target = authorize('storage.local.write', biliCookieFile(), [STATE_DIR]);
+    const tmp = target + '.tmp';
+    await fs.writeFile(tmp, biliCookieFileContent(cookies), { encoding: 'utf8', mode: 0o600 });
+    try {
+      await fs.chmod(tmp, 0o600);
+    } catch {
+      // Windows 没有 POSIX 权限位；文件仍写在用户数据区。
+    }
+    await fs.rename(tmp, target);
+    importProbeCache.clear();
+  }
+
+  async function biliQrStart() {
+    const now = Date.now();
+    for (const [key, at] of biliQrPending) if (now - at > 5 * 60_000) biliQrPending.delete(key);
+    const response = await biliFetch(BILI_QR_GENERATE);
+    const body: any = await response.json();
+    const key = typeof body?.data?.qrcode_key === 'string' ? body.data.qrcode_key : '';
+    const url = typeof body?.data?.url === 'string' ? body.data.url : '';
+    if (body?.code !== 0 || key.length === 0 || url.length === 0) throw statusError(502, 'B 站登录服务返回异常');
+    biliQrPending.set(key, now);
+    return { key, qr: biliQrDataUrl(url), expiresIn: 180 };
+  }
+
+  async function biliQrPoll(key: string) {
+    const started = biliQrPending.get(key);
+    if (started === undefined) throw statusError(400, '二维码已过期，请刷新');
+    if (Date.now() - started > 5 * 60_000) {
+      biliQrPending.delete(key);
+      return { status: 'expired' as const };
+    }
+    const response = await biliFetch(BILI_QR_POLL + '?qrcode_key=' + encodeURIComponent(key) + '&source=main-fe-header');
+    const body: any = await response.json();
+    const code = Number(body?.data?.code);
+    if (code === 86101) return { status: 'waiting' as const };
+    if (code === 86090) return { status: 'scanned' as const };
+    if (code === 86038) {
+      biliQrPending.delete(key);
+      return { status: 'expired' as const };
+    }
+    if (code !== 0) throw statusError(502, 'B 站登录失败：' + String(body?.message ?? '未知错误').slice(0, 80));
+    const headers = response.headers as unknown as { getSetCookie?: () => string[] };
+    const setCookies = typeof headers.getSetCookie === 'function'
+      ? headers.getSetCookie()
+      : [response.headers.get('set-cookie') ?? ''].filter((value) => value.length > 0);
+    const cookies = parseBiliSetCookie(setCookies);
+    if (!cookies.some((cookie) => cookie.name === 'SESSDATA') && typeof body?.data?.url === 'string') {
+      try {
+        const redirect = new URL(body.data.url);
+        for (const name of ['SESSDATA', 'bili_jct', 'DedeUserID', 'DedeUserID__ckMd5', 'sid']) {
+          const value = redirect.searchParams.get(name);
+          if (value !== null && !cookies.some((cookie) => cookie.name === name)) {
+            cookies.push({ name, value, domain: '.bilibili.com', expires: 0 });
+          }
+        }
+      } catch {
+        // 没有回退 URL 也不影响上报失败。
+      }
+    }
+    if (!cookies.some((cookie) => cookie.name === 'SESSDATA')) throw statusError(502, '登录成功但没有拿到 B 站凭证');
+    await writeBiliCookies(cookies);
+    const auth = await biliAuthStatus(true);
+    if (!auth.loggedIn) {
+      await clearBiliCookies();
+      throw statusError(502, 'B 站登录校验失败，请重试');
+    }
+    biliQrPending.delete(key);
+    console.info('[dsh-music-player] B 站扫码登录成功');
+    return { status: 'ok' as const, auth };
+  }
+
+  /** 读一次 yt-dlp 的 -J；可带 job 以便取消时杀掉子进程。 */
+  async function readYtdlpInfo(url: string, job: ImportJob | null = null): Promise<{ info: ImportInfo; raw: unknown }> {
+    const yt = ytdlpCapability();
+    if (yt.bin === null) throw statusError(503, 'yt-dlp 未安装：请先安装 yt-dlp（例如 brew install yt-dlp）');
+    const cookies = isBilibiliUrl(url) && existsSync(biliCookieFile()) ? biliCookieFile() : null;
+    const args = ['--ignore-config', '--no-playlist', '--no-warnings', '--skip-download', '-J'];
+    if (cookies !== null) args.push('--cookies', cookies);
+    args.push(url);
+    const run = await runImportProcess(job, yt.bin, args, IMPORT_METADATA_TIMEOUT_MS, null);
+    if (run.spawnError !== null) throw statusError(502, '无法启动 yt-dlp：' + run.spawnError);
+    if (run.timedOut) throw statusError(504, '读取链接信息超时');
+    if (run.code !== 0) throw statusError(502, importFailureMessage(run.stderr, job?.dir ?? ''));
+    let raw: unknown;
+    try {
+      raw = JSON.parse(run.stdout);
+    } catch {
+      throw statusError(502, '链接信息解析失败');
+    }
+    const info = parseYtdlpInfo(raw);
+    if (info === null) throw statusError(422, '无法识别该链接的内容');
+    return { info, raw };
+  }
+
+  async function probeImport(rawUrl: unknown): Promise<ImportProbe> {
+    const url = validateImportUrl(rawUrl);
+    const bili = isBilibiliUrl(url);
+    const loggedIn = bili && existsSync(biliCookieFile());
+    const key = url + '|' + (loggedIn ? 'auth' : 'anon');
+    const cached = importProbeCache.get(key);
+    if (cached !== undefined && Date.now() - cached.at < 5 * 60_000) return cached.value;
+    const { info, raw } = await readYtdlpInfo(url);
+    const heights = importFormatHeights(raw);
+    const value: ImportProbe = {
+      title: info.title,
+      artist: info.artist,
+      duration: info.duration,
+      heights,
+      recommended: recommendedImportHeight(heights),
+      loggedIn,
+      needsLogin: bili && !loggedIn,
+    };
+    if (importProbeCache.size >= 8) importProbeCache.delete(importProbeCache.keys().next().value as string);
+    importProbeCache.set(key, { at: Date.now(), value });
+    return value;
   }
 
   async function runImport(job: ImportJob, bin: string, ffmpeg: string) {
     try {
       job.phase = 'metadata';
       job.progress = 3;
-      const meta = await runImportProcess(
-        job, bin,
-        ['--ignore-config', '--no-playlist', '--no-warnings', '--skip-download', '-J', job.url],
-        IMPORT_METADATA_TIMEOUT_MS, null,
-      );
+      const { info } = await readYtdlpInfo(job.url, job);
       if (job.cancelled) return;
-      if (meta.spawnError !== null) throw new Error('无法启动 yt-dlp：' + meta.spawnError);
-      if (meta.timedOut) throw new Error('读取链接信息超时');
-      if (meta.code !== 0) throw new Error(importFailureMessage(meta.stderr, job.dir));
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(meta.stdout);
-      } catch {
-        throw new Error('链接信息解析失败');
-      }
-      const info: ImportInfo | null = parseYtdlpInfo(parsed);
-      if (info === null) throw new Error('无法识别该链接的内容');
       job.title = info.title;
       job.artist = info.artist;
 
       job.phase = 'download';
       job.progress = 5;
+      const cookiesPath = isBilibiliUrl(job.url) && existsSync(biliCookieFile()) ? biliCookieFile() : null;
       const download = await runImportProcess(
         job, bin,
-        buildYtdlpArgs(job.url, job.kind, job.tmpBase, ffmpeg),
+        buildYtdlpArgs(job.url, job.kind, job.tmpBase, ffmpeg, job.height, cookiesPath),
         IMPORT_TIMEOUT_MS,
         (line) => {
           const progress = parseImportProgress(line);
@@ -3477,6 +3818,7 @@ function createHost(ctx) {
       job.phase = 'done';
       job.progress = 100;
       job.finishedAt = Date.now();
+      console.info('[dsh-music-player] 导入完成：' + job.id + ' · ' + (job.tagged ? 'tags' : 'no-tags'));
       library = null;
       clearCoverCache();
       startScan(job.dir).catch(() => {});
@@ -3494,10 +3836,16 @@ function createHost(ctx) {
     }
   }
 
-  function startImport(rawUrl: unknown, rawKind: unknown): ImportJob {
+  function startImport(rawUrl: unknown, rawKind: unknown, rawHeight: unknown = null): ImportJob {
     const url = validateImportUrl(rawUrl);
     const kind: ImportKind | null = rawKind === 'audio' ? 'audio' : rawKind === 'video' ? 'video' : null;
     if (kind === null) throw statusError(400, '下载类型必须是 audio 或 video');
+    let height: number | null = null;
+    if (rawHeight !== undefined && rawHeight !== null && rawHeight !== '') {
+      const parsed = Number(rawHeight);
+      if (!Number.isInteger(parsed) || parsed < 144 || parsed > 4320) throw statusError(400, '清晰度必须是 144–4320 之间的整数');
+      height = parsed;
+    }
     if (currentDir === null) throw statusError(409, '尚未选择音乐目录');
     const yt = ytdlpCapability();
     if (yt.bin === null) throw statusError(503, 'yt-dlp 未安装：请先安装 yt-dlp（例如 brew install yt-dlp）');
@@ -3507,6 +3855,7 @@ function createHost(ctx) {
     const job: ImportJob = {
       id: randomUUID(),
       kind,
+      height,
       url,
       phase: 'starting',
       progress: 1,
@@ -3528,12 +3877,13 @@ function createHost(ctx) {
       tmpBase: path.join(currentDir, IMPORT_TMP_PREFIX + randomUUID()),
     };
     importJob = job;
+    try { console.info('[dsh-music-player] 导入开始：' + kind + ' · ' + new URL(url).hostname + ' · ' + job.id); } catch { /* 日志不能影响导入 */ }
     void runImport(job, yt.bin, ffmpeg).catch((error: unknown) => {
       if (job.cancelled) {
         job.phase = 'cancelled';
       } else {
         job.phase = 'error';
-        job.error = importErrorText(reasonOf(error), job.dir);
+        job.error = importFailureMessage(reasonOf(error), job.dir);
       }
       job.finishedAt = Date.now();
     });
@@ -3636,7 +3986,7 @@ function createHost(ctx) {
         return;
       }
       const body = await readJson(req);
-      const job = startImport(body.url, body.kind);
+      const job = startImport(body.url, body.kind, body.height);
       sendJson(res, 200, importStatusPayload(job.id));
       return;
     }
@@ -3647,6 +3997,37 @@ function createHost(ctx) {
       const job = cancelImportJob(body.id);
       sendJson(res, 200, importStatusPayload(job.id));
       return;
+    }
+
+    if (pathname === '/api/dsh-music/import-probe' && req.method === 'POST') {
+      await ready;
+      const body = await readJson(req);
+      sendJson(res, 200, await probeImport(body.url));
+      return;
+    }
+
+    if (pathname === '/api/dsh-music/import-auth' && (req.method === 'GET' || req.method === 'POST')) {
+      await ready;
+      if (req.method === 'GET') {
+        sendJson(res, 200, { bilibili: await biliAuthStatus() });
+        return;
+      }
+      const body = await readJson(req);
+      if (body.action === 'qr') {
+        sendJson(res, 200, { action: 'qr', ...(await biliQrStart()) });
+        return;
+      }
+      if (body.action === 'poll') {
+        const result = await biliQrPoll(typeof body.key === 'string' ? body.key : '');
+        sendJson(res, 200, { action: 'poll', ...result });
+        return;
+      }
+      if (body.action === 'logout') {
+        await clearBiliCookies();
+        sendJson(res, 200, { action: 'logout', loggedIn: false });
+        return;
+      }
+      throw statusError(400, '登录操作必须是 qr、poll 或 logout');
     }
 
     if (pathname === '/api/dsh-music/dir' && req.method === 'POST') {
