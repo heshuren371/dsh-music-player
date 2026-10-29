@@ -71,6 +71,7 @@ for (let i = 0; i < 60; i += 1) {
 const tracks = library?.tracks ?? [];
 const byName = (name) => tracks.find((t) => t.name === name);
 check('library scan finds audio + video files', tracks.length >= 3, tracks.map((t) => t.name).join(', '));
+check('library payload exposes addedAt for recently-added sorting', tracks.every((t) => typeof t.addedAt === 'number' && t.addedAt > 0), JSON.stringify(tracks.map((t) => [t.name, t.addedAt])));
 check('audio track is kind=audio', byName('song.wav')?.kind === 'audio', JSON.stringify(byName('song.wav') ?? null));
 check('video tracks are kind=video', byName('clip.mp4')?.kind === 'video' && byName('clip.mkv')?.kind === 'video', JSON.stringify(tracks.filter((t) => t.kind === 'video').map((t) => t.name)));
 check('video codec is detected from the container', generated ? byName('clip.mp4')?.videoCodec === 'h264' && byName('clip.mkv')?.videoCodec === 'h264' : byName('clip.mp4')?.videoCodec === null, 'mp4=' + byName('clip.mp4')?.videoCodec + ' mkv=' + byName('clip.mkv')?.videoCodec);

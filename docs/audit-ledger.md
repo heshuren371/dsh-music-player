@@ -2625,3 +2625,17 @@ cookie 文件权限 0600，退出即删；错误与响应均不含 cookie。
 对照：去 height 过滤 → 「format honours the chosen height」红；cookie 不落盘 → 「QR poll stores
 the login」红（登录校验失败）。真实扫码未做（需要用户自己的 B 站账号/手机）；B 站 generate
 端点已实网验证，登录链路用 mock 覆盖。
+
+## 5.63 第 53 轮 —— 库视图 / 收藏 / 最近添加
+
+基线：列表只有搜索与标题/歌手/时长排序；MV 与音频混排；收藏只存在全屏播放器且没有入口。
+
+改动：`PlayerState` 增加 `view`（all/audio/video/favorites）与 `favorites`（Set），`visibleRows`
+统一做视图+搜索过滤，因此 `next/prev/预取` 与可见列表一致；视图与收藏都持久化到本机
+localStorage。列表上方增加带数量的视图 chips；行内增加星标；收藏视图空态给「查看全部」。
+新增 `addedAt`（优先 birthtime、否则 mtime）下发与「添加」可排序列。重命名成功后迁移收藏
+oldId→newId，删除成功移除收藏，避免收藏视图凭空少歌。
+
+门禁：client-shell 覆盖视图计数/MV 过滤/行星标/收藏视图/空态/添加排序；match-client 覆盖
+星标与重命名迁移；test-mv 覆盖 `addedAt` 下发。36 套全绿；对照：去掉视图过滤 → MV 视图红；
+去掉收藏迁移 → 重命名断言红；把 added 排序映射去掉 → 排序断言红。

@@ -28,12 +28,16 @@ interface Window {
 type RuntimeComponent = (props: unknown) => unknown;
 
 /** /api/library 的曲目（宿主 payloadTracksFor 产出的字段，见 src/host.ts）。 */
+type LibraryView = "all" | "audio" | "video" | "favorites";
+
 interface MusicTrack {
   id: string;
   name: string;
   title: string;
   artist?: string | null;
   duration?: number | null;
+  /** 文件 mtime（毫秒）；仅用于「最近添加」排序。 */
+  addedAt?: number | null;
   /** 是否已同时具备标题与歌手标签（“一键补全”据此挑选待补全曲目）。 */
   tagged?: boolean;
   /** 'audio' | 'video'：MV 只有在视频轨上才显示画面。 */
@@ -153,6 +157,10 @@ interface PlayerState {
   scannedAt: number | null;
   loading: boolean;
   picking: boolean;
+  /** 列表视图：全部 / 音频 / MV / 收藏。过滤在 store 内完成，next/prev 也遵守。 */
+  view: LibraryView;
+  /** 收藏 id 集合（相对路径 id）；只存本机 localStorage。 */
+  favorites: Set<string>;
   scanning: boolean;
   /**
    * 宿主入口：`api`（经连接层 /api 栅栏 + 浏览器会话）或 `legacy`（降级到插件
@@ -253,6 +261,8 @@ interface RowsCache {
   query: string;
   sortKey: string;
   sortDir: string;
+  view: LibraryView;
+  favorites: Set<string>;
   meta: Record<string, MetaEntry>;
   rows: TrackRow[];
 }
@@ -287,6 +297,8 @@ interface DshTranslator {
  * 隐式 any，任何拼写错误都要等运行时才发现）。`t` 由 apply() 注入，故可选。
  */
 interface MusicPlayerApi {
+  setView(view: LibraryView): void;
+  toggleFavorite(id: string): void;
   t?: DshTranslator;
   getState(): PlayerState;
   subscribe(listener: () => void): () => void;
@@ -548,6 +560,15 @@ window.__ModuleLoader__.load({
       && window.dshDesktop !== null;
     const zh = {
       "view.music": "音乐",
+      "view.all": "全部",
+      "view.audio": "音频",
+      "view.mv": "MV",
+      "view.favorites": "收藏",
+      "view.filter": "列表视图",
+      "view.showAll": "查看全部",
+      "col.added": "添加",
+      "empty.view": "这个视图还没有内容",
+      "empty.viewHint": "切换视图，或在行内点星标收藏",
       "action.chooseDir": "选择目录",
       "action.inputDir": "手动输入路径",
       "action.inputDir.placeholder": "粘贴本地目录路径，如 D:\\Music 或 ~/Music",
@@ -692,6 +713,15 @@ window.__ModuleLoader__.load({
     };
     const en = {
       "view.music": "Music",
+      "view.all": "All",
+      "view.audio": "Audio",
+      "view.mv": "MV",
+      "view.favorites": "Favorites",
+      "view.filter": "Library view",
+      "view.showAll": "Show all",
+      "col.added": "Added",
+      "empty.view": "Nothing in this view yet",
+      "empty.viewHint": "Switch views, or star tracks from the list",
       "action.chooseDir": "Choose Folder",
       "action.inputDir": "Enter path manually",
       "action.inputDir.placeholder": "Paste a local folder path, e.g. D:\\Music or ~/Music",
@@ -906,6 +936,15 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-del{cursor:pointer;width:22px;height:22px;color:var(--dsw-alias-label-tertiary);border:0;background:transparent;border-radius:6px;justify-content:center;align-items:center;padding:0;display:inline-flex;font-size:15px;line-height:1;font-weight:600}
 .dshm-del:hover{color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-tertiary)}
 .dshm-table td.dshm-colDuration,.dshm-table th.dshm-colDuration{width:64px;text-align:right;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.dshm-table td.dshm-colAdded,.dshm-table th.dshm-colAdded{width:84px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums}
+.dshm-viewBar{align-items:center;gap:4px;padding:6px 10px;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);flex:none;display:flex;overflow-x:auto}
+.dshm-viewChip{border:1px solid transparent;height:24px;color:var(--dsw-alias-label-tertiary);background:transparent;border-radius:999px;align-items:center;gap:5px;padding:0 9px;font:inherit;font-size:11px;display:inline-flex;cursor:pointer;white-space:nowrap}
+.dshm-viewChip:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.dshm-viewChip--active{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-state-business-primary)}
+.dshm-viewCount{opacity:.65;font-size:10px;font-variant-numeric:tabular-nums}
+.dshm-fav{cursor:pointer;width:22px;height:22px;color:var(--dsw-alias-label-tertiary);background:transparent;border:0;border-radius:6px;justify-content:center;align-items:center;display:inline-flex}
+.dshm-fav:hover{color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.dshm-fav--on{color:var(--dsw-alias-state-business-primary)}
 .dshm-colArtist{width:26%}
 .dshm-row{cursor:default;transition:background-color .12s var(--ds-ease-in-out)}
 .dshm-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
@@ -1133,7 +1172,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-root button:focus-visible,.dshm-root input:focus-visible,.dshm-root [role="button"]:focus-visible{outline:none;box-shadow:0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-business-primary) 55%, transparent)}
 .dshm-rowCover{width:28px;height:28px;border:1px solid var(--dsw-alias-border-l2);border-radius:5px;object-fit:cover;background:var(--dsw-alias-bg-layer-2);vertical-align:middle}
 .dshm-rowNote{width:28px;height:28px;color:var(--dsw-alias-label-caption);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:5px;justify-content:center;align-items:center;vertical-align:middle;display:inline-flex}
-.dshm-table td.dshm-colActions,.dshm-table th.dshm-colActions{width:60px;text-align:center;padding:0;text-overflow:clip}
+.dshm-table td.dshm-colActions,.dshm-table th.dshm-colActions{width:84px;text-align:center;padding:0;text-overflow:clip}
 .dshm-match{cursor:pointer;width:22px;height:22px;color:var(--dsw-alias-label-tertiary);border:0;background:transparent;border-radius:6px;justify-content:center;align-items:center;padding:0;display:inline-flex;font-size:12px;line-height:1}
 .dshm-match:hover{color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-interactive-bg-hover)}
 .dshm-match--done{color:var(--dsw-alias-state-business-primary)}
@@ -1293,7 +1332,20 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 
     /** 收藏：DSH 没有这个能力，插件用 localStorage 记一份（dsh-music:fav）。 */
     const FAV_KEY = "dsh-music:fav";
-    function loadFavorites() {
+    const VIEW_KEY = "dsh-music:view";
+    const LIBRARY_VIEWS = ["all", "audio", "video", "favorites"];
+    function loadView(): LibraryView {
+      try {
+        const value = localStorage.getItem(VIEW_KEY) ?? "";
+        return LIBRARY_VIEWS.includes(value) ? value as LibraryView : "all";
+      } catch {
+        return "all";
+      }
+    }
+    function saveView(view: LibraryView) {
+      try { localStorage.setItem(VIEW_KEY, view); } catch { /* 隐私模式 */ }
+    }
+    function loadFavorites(): Set<string> {
       try {
         const raw = JSON.parse(localStorage.getItem(FAV_KEY) ?? "[]");
         return new Set(Array.isArray(raw) ? raw.filter((value) => typeof value === "string") : []);
@@ -1311,6 +1363,13 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 
     /** Locale translator for module-scope code; bound in apply() after locale registers. */
     let translate = (key) => key;
+
+    function formatAddedAt(value) {
+      if (typeof value !== "number" || !Number.isFinite(value)) return "";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return "";
+      return date.getFullYear() + "-" + String(date.getMonth() + 1).padStart(2, "0") + "-" + String(date.getDate()).padStart(2, "0");
+    }
 
     function formatTime(value) {
       if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "--:--";
@@ -1701,6 +1760,19 @@ body:has(.dshm-root) [data-width-handle]{display:none}
     function createPlayerApi(core) {
       const api0 = {
         getState: () => core.state,
+        setView: (view) => {
+          if (view !== "all" && view !== "audio" && view !== "video" && view !== "favorites") return;
+          if (core.state.view === view) return;
+          core.set({ view });
+          saveView(view);
+        },
+        toggleFavorite: (id) => {
+          if (typeof id !== "string" || id.length === 0) return;
+          const next = new Set(core.state.favorites);
+          if (next.has(id)) next.delete(id); else next.add(id);
+          core.set({ favorites: next });
+          saveFavorites(next);
+        },
         subscribe: (listener) => {
           core.listeners.add(listener);
           return () => core.listeners.delete(listener);
@@ -1774,6 +1846,12 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             // 记住的「最后播放」若指向被删曲目，一并清掉
             const last = loadPrefs().last;
             if (last !== undefined && last.id === track.id) savePrefs({ last: undefined });
+            if (core.state.favorites.has(track.id)) {
+              const nextFavorites = new Set(core.state.favorites);
+              nextFavorites.delete(track.id);
+              core.set({ favorites: nextFavorites });
+              saveFavorites(nextFavorites);
+            }
             core.applyLibrary(payload);
           } catch (error) {
             core.set({ error: error instanceof Error ? error.message : String(error) });
@@ -2152,6 +2230,14 @@ body:has(.dshm-root) [data-width-handle]{display:none}
               const last = loadPrefs().last;
               if (last !== undefined && last.id === oldId) savePrefs({ last: { ...last, id: newId } });
               if (core.playingId === oldId) core.playingId = newId;
+              // 收藏按路径 id 存；重命名必须迁移，否则“收藏”视图会凭空少一首。
+              if (core.state.favorites.has(oldId)) {
+                const nextFavorites = new Set(core.state.favorites);
+                nextFavorites.delete(oldId);
+                nextFavorites.add(newId);
+                core.set({ favorites: nextFavorites });
+                saveFavorites(nextFavorites);
+              }
             }
             if (payload.library !== undefined) core.applyLibrary(payload.library);
             // 被重命名的文件旧流地址已失效：重新指向新 id 并恢复播放位置。
@@ -3382,27 +3468,34 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       const cache = core.rowsCache;
       if (cache !== null && cache.tracks === core.state.tracks && cache.query === core.state.query
         && cache.sortKey === core.state.sortKey && cache.sortDir === core.state.sortDir
+        && cache.view === core.state.view && cache.favorites === core.state.favorites
         && cache.meta === core.state.meta) {
         return cache.rows;
       }
       const query = core.state.query.trim().toLowerCase();
-      let rows;
-      if (query.length === 0) {
-        rows = core.state.tracks.map((track, index) => ({ track, index }));
-      } else {
-        rows = [];
-        for (let index = 0; index < core.state.tracks.length; index += 1) {
-          const track = core.state.tracks[index];
-          const item = effective(track);
+      const view = core.state.view;
+      const favorites = core.state.favorites;
+      const inView = (track) => view === "all"
+        || (view === "audio" && track.kind !== "video")
+        || (view === "video" && track.kind === "video")
+        || (view === "favorites" && favorites.has(track.id));
+      let rows: TrackRow[] = [];
+      for (let index = 0; index < core.state.tracks.length; index += 1) {
+        const track = core.state.tracks[index];
+        if (!inView(track)) continue;
+        const item = effective(track);
+        if (query.length > 0) {
           const haystack = (item.title + " " + (item.artist ?? "") + " " + track.name).toLowerCase();
-          if (haystack.includes(query)) rows.push({ track, index });
+          if (!haystack.includes(query)) continue;
         }
+        rows.push({ track, index });
       }
       if (core.state.sortKey !== "none") {
         rows = [...rows].sort((a, b) => {
           const dir = core.state.sortDir === "asc" ? 1 : -1;
-          const va = effective(a.track)[core.state.sortKey];
-          const vb = effective(b.track)[core.state.sortKey];
+          const valueOf = (track) => core.state.sortKey === "added" ? track.addedAt : effective(track)[core.state.sortKey];
+          const va = valueOf(a.track);
+          const vb = valueOf(b.track);
           if (va == null && vb == null) return a.index - b.index;
           if (va == null) return 1;
           if (vb == null) return -1;
@@ -3412,7 +3505,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           return dir * (order || (a.index - b.index));
         });
       }
-      core.rowsCache = { tracks: core.state.tracks, query: core.state.query, sortKey: core.state.sortKey, sortDir: core.state.sortDir, meta: core.state.meta, rows };
+      core.rowsCache = { tracks: core.state.tracks, query: core.state.query, sortKey: core.state.sortKey, sortDir: core.state.sortDir, view: core.state.view, favorites: core.state.favorites, meta: core.state.meta, rows };
       return rows;
     };
     const next = () => {
@@ -3734,9 +3827,11 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         completeDone: 0,
         completeFailed: 0,
         completeSkipped: 0,
-        sortKey: typeof prefs.sortKey === "string" && ["title", "artist", "duration"].includes(prefs.sortKey)
+        sortKey: typeof prefs.sortKey === "string" && ["title", "artist", "duration", "added"].includes(prefs.sortKey)
           ? prefs.sortKey : "none",
         sortDir: prefs.sortDir === "desc" ? "desc" : "asc",
+        view: loadView(),
+        favorites: loadFavorites(),
         /** 待确认删除的曲目下标（-1 = 无）。替代 window.confirm 的应用内确认。 */
         pendingDelete: -1,
         /**
@@ -4786,7 +4881,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
     });
 
     /** Track list. Memoised so the playback clock never re-renders the rows. */
-    const TrackTable = React.memo(function TrackTable({ rows, current, sortKey, sortDir, player, t, meta, effective, coverFor, activeRowRef, playing }) {
+    const TrackTable = React.memo(function TrackTable({ rows, current, sortKey, sortDir, player, t, meta, effective, coverFor, activeRowRef, playing, favorites }) {
       const sortHeader = (key, labelKey, className?: string) => h("th", {
         className: (className ?? "") + " dshm-sortable" + (sortKey === key ? " dshm-sorted" : ""),
         onClick: () => player.toggleSort(key),
@@ -4797,6 +4892,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             h("th", { className: "dshm-colCover" }, ""),
             sortHeader("title", "col.title"),
             sortHeader("artist", "col.artist", "dshm-colArtist"),
+            sortHeader("added", "col.added", "dshm-colAdded"),
             sortHeader("duration", "col.duration", "dshm-colDuration"),
             h("th", { className: "dshm-colActions" }, ""),
           )),
@@ -4827,8 +4923,20 @@ body:has(.dshm-root) [data-width-handle]{display:none}
               })),
               h("td", { className: "dshm-cellTitle" }, item.title, track.kind === "video" ? h("span", { className: "dshm-mvTag" }, "MV") : null),
               h("td", { className: "dshm-cellArtist" }, item.artist ?? ""),
+              h("td", { className: "dshm-colAdded" }, formatAddedAt(track.addedAt)),
               h("td", { className: "dshm-colDuration" }, formatTime(track.duration)),
               h("td", { className: "dshm-colActions" },
+                withTipWrapped(h("button", {
+                  type: "button",
+                  className: "dshm-fav" + (favorites.has(track.id) ? " dshm-fav--on" : ""),
+                  "aria-label": favorites.has(track.id) ? t("player.unfavorite") : t("player.favorite"),
+                  "aria-pressed": favorites.has(track.id),
+                  onClick: (event) => {
+                    event.stopPropagation();
+                    player.toggleFavorite(track.id);
+                  },
+                }, favorites.has(track.id) ? ICONS.starFill : ICONS.star),
+                  favorites.has(track.id) ? t("player.unfavorite") : t("player.favorite")),
                 withTipWrapped(h("button", {
                   type: "button",
                   className: "dshm-match" + (matched ? " dshm-match--done" : ""),
@@ -5345,8 +5453,8 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       // 同理归 player（见 closePlayer），否则视图卸载会清掉它、卡在 closing。
       const playerPhase = state.playerPhase;
       const playerOpen = playerPhase !== "closed";
-      // 收藏（DSH 无此能力，插件自带一份本地记录）
-      const [favorites, setFavorites] = useState(loadFavorites);
+      // 收藏与列表视图都在 player store：视图卸载/重挂后仍保留，且 next/prev 与行过滤同源。
+      const favorites = state.favorites;
       // 队列行的「⋯」菜单当前展开在哪首歌上
 
       const [queueMenu, setQueueMenu] = useState(null);
@@ -5383,14 +5491,6 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         const poster = isVideo && currentTrack !== undefined && !coverFailed ? player.coverFor(currentTrack) : "";
         if (media.poster !== poster) media.poster = poster;
       }, [isVideo, currentTrack?.id, coverFailed]);
-      const toggleFavorite = (id) => {
-        setFavorites((previous) => {
-          const next = new Set(previous);
-          if (next.has(id)) next.delete(id); else next.add(id);
-          saveFavorites(next);
-          return next;
-        });
-      };
       useEffect(() => {
         if (!playerOpen) return undefined;
         const onKeyDown = (event) => {
@@ -5713,6 +5813,22 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         }, t("action.confirm")),
       );
 
+      const viewCounts = {
+        all: state.tracks.length,
+        audio: state.tracks.filter((track) => track.kind !== "video").length,
+        video: state.tracks.filter((track) => track.kind === "video").length,
+        favorites: state.tracks.filter((track) => favorites.has(track.id)).length,
+      };
+      const viewBar = state.tracks.length > 0 && h("div", { className: "dshm-viewBar", role: "group", "aria-label": t("view.filter") },
+        ([["all", "view.all"], ["audio", "view.audio"], ["video", "view.mv"], ["favorites", "view.favorites"]] as [LibraryView, string][]).map(([id, label]) =>
+          h("button", {
+            key: id,
+            type: "button",
+            className: "dshm-viewChip" + (state.view === id ? " dshm-viewChip--active" : ""),
+            "aria-pressed": state.view === id,
+            onClick: () => player.setView(id),
+          }, t(label), h("span", { className: "dshm-viewCount" }, String(viewCounts[id])))));
+
       let body;
       if (state.dir === null) {
         body = h("div", { className: "dshm-empty" },
@@ -5732,12 +5848,15 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           h("div", null, t("empty.tracks")),
         );
       } else if (visibleTracks.length === 0) {
-        // 有歌但筛选空了：明确告诉用户，并给一键清除（否则只剩表头，像页面坏了）。
+        // 查询与视图是两种空态：查询空给“清除搜索”，视图空给“查看全部”。
+        const viewEmpty = state.query.trim().length === 0 && state.view !== "all";
         body = h("div", { className: "dshm-empty" },
-          h("div", { className: "dshm-emptyIcon" }, "🔍"),
-          h("div", null, t("empty.search")),
-          h("div", { className: "dshm-emptyHint" }, t("empty.searchHint")),
-          h("button", { type: "button", className: "dshm-btn dshm-clearSearch", onClick: () => clearQuery() }, t("action.clearSearch")),
+          h("div", { className: "dshm-emptyIcon" }, viewEmpty ? (state.view === "favorites" ? "★" : "🎬") : "🔍"),
+          h("div", null, viewEmpty ? t("empty.view") : t("empty.search")),
+          h("div", { className: "dshm-emptyHint" }, viewEmpty ? t("empty.viewHint") : t("empty.searchHint")),
+          viewEmpty
+            ? h("button", { type: "button", className: "dshm-btn", onClick: () => player.setView("all") }, t("view.showAll"))
+            : h("button", { type: "button", className: "dshm-btn dshm-clearSearch", onClick: () => clearQuery() }, t("action.clearSearch")),
         );
       } else {
         body = h(TrackTable, {
@@ -5752,6 +5871,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           coverFor: player.coverFor,
           activeRowRef,
           playing: state.playing,
+          favorites,
         });
       }
 
@@ -5900,7 +6020,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
                 "aria-label": favoriteOn ? t("player.unfavorite") : t("player.favorite"),
                 onClick: (event) => {
                   event.stopPropagation();
-                  if (currentTrack !== undefined) toggleFavorite(currentTrack.id);
+                  if (currentTrack !== undefined) player.toggleFavorite(currentTrack.id);
                 },
               }, favoriteOn ? ICONS.starFill : ICONS.star), favoriteOn ? t("player.unfavorite") : t("player.favorite")),
               // ⋯：对齐 macOS Music 的「⭐ + ⋯」两枚圆形按钮（这里是当前曲目的在线补全）
@@ -6250,6 +6370,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         h("div", { className: "dshm-mvPark", ref: mvParkRef, "aria-hidden": "true" }),
         header,
         dirEditor,
+        viewBar,
         completeBar,
         confirmBar,
         state.hostEntry === "legacy" && h("div", { className: "dshm-notice" }, t("error.legacyEntry")),

@@ -144,10 +144,10 @@ const primitives = makePrimitives('regular');
 
 // ── 宿主响应桩件 ────────────────────────────────────────────────────────────
 const tracks = [
-  { id: 'a.mp3', name: 'a.mp3', title: 'Alpha', artist: 'Artist X', duration: 120, tagged: true, kind: 'audio', videoCodec: null },
-  { id: 'b.mp3', name: 'b.mp3', title: 'Beta', artist: 'Artist Y', duration: 90, tagged: true, kind: 'audio', videoCodec: null },
+  { id: 'a.mp3', name: 'a.mp3', title: 'Alpha', artist: 'Artist X', duration: 120, addedAt: 1000, tagged: true, kind: 'audio', videoCodec: null },
+  { id: 'b.mp3', name: 'b.mp3', title: 'Beta', artist: 'Artist Y', duration: 90, addedAt: 2000, tagged: true, kind: 'audio', videoCodec: null },
   // 视频轨：MV 标识 / 出画槽位 / /mv 询问都要走到
-  { id: 'v.mp4', name: 'v.mp4', title: 'Movie Song', artist: 'Artist V', duration: 200, tagged: true, kind: 'video', videoCodec: 'h264' },
+  { id: 'v.mp4', name: 'v.mp4', title: 'Movie Song', artist: 'Artist V', duration: 200, addedAt: 3000, tagged: true, kind: 'video', videoCodec: 'h264' },
 ];
 const library = { dir: '/music', tracks, scanning: false, scanParsed: tracks.length, scanTotal: tracks.length, truncated: false, skippedPackages: 0, scannedAt: 1 };
 const calls = [];
@@ -578,6 +578,44 @@ check('the fallback keeps the UI alive (no error bar)', container.querySelector(
   await act(async () => { dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
   await settle(80);
   check('closing the import dialog after a queued video request still works', container.querySelector('.dshm-importDialog') === null);
+}
+
+// ── 智能视图 / 收藏 / 最近添加排序 ──────────────────────────────────────────
+{
+  const api = window.__dshMusicPlayer;
+  for (const id of [...api.getState().favorites]) api.toggleFavorite(id);
+  await settle(40);
+  const chips = () => Array.from(container.querySelectorAll('.dshm-viewChip'));
+  const chip = (label) => chips().find((button) => button.textContent.includes(label));
+  check('library view chips expose counts', chips().length === 4 && chip('view.all')?.textContent.includes('3') && chip('view.audio')?.textContent.includes('2') && chip('view.mv')?.textContent.includes('1'), chips().map((button) => button.textContent).join(' | '));
+  await act(async () => { chip('view.mv').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(50);
+  check('MV view shows only video tracks', container.querySelectorAll('.dshm-row').length === 1 && String(container.querySelector('.dshm-row')?.textContent).includes('Movie Song'), container.querySelectorAll('.dshm-row').length + ' rows');
+  const star = container.querySelector('.dshm-row .dshm-fav');
+  await act(async () => { star.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(40);
+  check('row star favorites the track without playing it', api.getState().favorites.has('v.mp4') && star.getAttribute('aria-pressed') === 'true', JSON.stringify([...api.getState().favorites]));
+  await act(async () => { chip('view.favorites').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(40);
+  check('favorites view shows the starred track', container.querySelectorAll('.dshm-row').length === 1 && String(container.querySelector('.dshm-row')?.textContent).includes('Movie Song'));
+  await act(async () => { chip('view.all').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(40);
+  const addedHeader = Array.from(container.querySelectorAll('th')).find((th) => th.textContent.includes('col.added'));
+  check('recently-added column is sortable and displays dates', addedHeader !== undefined && String(container.querySelector('.dshm-row .dshm-colAdded')?.textContent).includes('1970'), addedHeader?.textContent ?? 'missing');
+  await act(async () => { addedHeader.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(50);
+  check('added ascending puts the oldest file first', String(container.querySelector('.dshm-row')?.textContent).includes('Alpha'), String(container.querySelector('.dshm-row')?.textContent).slice(0, 40));
+  api.toggleSort('added');
+  await settle(50);
+  check('added descending puts the newest file first', String(container.querySelector('.dshm-row')?.textContent).includes('Movie Song') && api.getState().sortDir === 'desc', String(container.querySelector('.dshm-row')?.textContent).slice(0, 40) + ' dir=' + api.getState().sortDir);
+  const newestStar = container.querySelector('.dshm-row .dshm-fav');
+  await act(async () => { newestStar.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(40);
+  await act(async () => { chip('view.favorites').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(40);
+  check('an empty favorites view explains itself and offers a way back', container.querySelectorAll('.dshm-row').length === 0 && String(container.querySelector('.dshm-empty')?.textContent).includes('empty.view') && container.querySelector('.dshm-empty .dshm-btn') !== null);
+  await act(async () => { chip('view.all').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(40);
 }
 
 // ── 旧命名体系（0.1.6 的 IconXxx16）同样要命中 ─────────────────────────────

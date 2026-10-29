@@ -82,6 +82,8 @@ interface Track {
   title: string;
   artist: string | null;
   duration: number | null;
+  /** 文件 mtime（毫秒）：列表「最近添加/修改」排序用；null = stat 失败。 */
+  addedAt: number | null;
   mime: string | undefined;
   kind: 'audio' | 'video';
   videoCodec: string | null;
@@ -116,6 +118,8 @@ interface PayloadTrack {
   title: string;
   artist: string | null;
   duration: number | null;
+  /** 文件 mtime（毫秒）；仅供客户端排序，不参与播放逻辑。 */
+  addedAt: number | null;
   tagged: boolean;
   kind: 'audio' | 'video';
   videoCodec: string | null;
@@ -2192,6 +2196,7 @@ async function readMetadata(file: ScannedFile): Promise<Track> {
     title: fallbackTitle(file.path),
     artist: fallbackArtist(file.path),
     duration: null,
+    addedAt: null,
     mime: file.mime,
     /** 'audio' | 'video'：MV 只有在视频轨上才显示画面。 */
     kind: file.kind === 'video' ? 'video' : 'audio',
@@ -2210,6 +2215,15 @@ async function readMetadata(file: ScannedFile): Promise<Track> {
     rgAlbumGainDb: null,
     rgAlbumPeak: null,
   };
+  try {
+    const stat = await fs.stat(file.path);
+    // 优先创建时间；文件系统没有 birthtime（部分 Linux）时退回 mtime。
+    // 写标签会改 mtime，所以 birthtime 更接近「加入库」的时间。
+    const addedAt = stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.mtimeMs;
+    if (Number.isFinite(addedAt)) track.addedAt = addedAt;
+  } catch {
+    // stat 失败不影响播放；排序时按缺失处理。
+  }
   try {
     const metadata = await parseFile(file.path, { duration: true, skipCovers: true });
     const common = metadata.common;
@@ -3273,6 +3287,7 @@ function createHost(ctx) {
       title: track.title,
       artist: track.artist,
       duration: track.duration,
+      addedAt: track.addedAt,
       tagged: track.tagged === true,
       // MV 相关：客户端据此显示 MV 标识，并在播放前问 /mv 该怎么出画面。
       kind: track.kind === 'video' ? 'video' : 'audio',

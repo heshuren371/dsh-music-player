@@ -206,6 +206,10 @@ check('five rows rendered with a cover cell', rows().length === 5 && rows()[0].q
 check('DRM-skipped package count is shown', container.querySelector('.dshm-header .dshm-stats')?.textContent.includes('1 drm skipped'), container.querySelector('.dshm-header .dshm-stats')?.textContent);
 
 // ── Per-row apply (writes file) ──────────────────────────────────────────────
+const favoriteBeforeApply = rows()[0].querySelector('.dshm-fav');
+await act(async () => { favoriteBeforeApply.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+await settle(40);
+check('row star adds the track to favorites', window.__dshMusicPlayer.getState().favorites.has('a.mp3'), JSON.stringify([...window.__dshMusicPlayer.getState().favorites]));
 await act(async () => { rows()[0].querySelector('.dshm-match').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
 await settle(80);
 check('match request fired with the stable id', matchCalls.length === 1 && matchCalls[0].includes('p=a.mp3'), matchCalls[0]);
@@ -223,6 +227,7 @@ check('apply posts the candidate + rename to the host', applyCalls.length === 1 
 check('apply asks the host to replace an existing embedded cover', applyCalls[0].replaceCover === true, JSON.stringify(applyCalls[0]));
 check('dialog closes after applying', container.querySelector('.dshm-modal') === null);
 check('row now shows the renamed/host-tagged entry', titleOf(rows()[0]) === 'Alpha Real' && rows()[0].title === 'Real X - Alpha Real.mp3', titleOf(rows()[0]) + ' / ' + rows()[0].title);
+check('renaming migrates the favorite id', window.__dshMusicPlayer.getState().favorites.has('Real X - Alpha Real.mp3') && !window.__dshMusicPlayer.getState().favorites.has('a.mp3'), JSON.stringify([...window.__dshMusicPlayer.getState().favorites]));
 check('no local override is kept once tags were written', meta()['a.mp3'] === undefined);
 
 // ── 弹层：dialog 语义 / 背景滚动锁 / Escape 关闭 / 焦点进入 ────────────────────
