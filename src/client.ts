@@ -603,8 +603,10 @@ window.__ModuleLoader__.load({
       "match.title": "在线补全元数据",
       "action.import": "从链接导入",
       "import.title": "从链接导入",
-      "import.urlLabel": "视频链接",
-      "import.urlPlaceholder": "粘贴 B 站 / YouTube / Vimeo / SoundCloud 链接",
+      "import.urlLabel": "视频链接（每行一个）",
+      "import.urlPlaceholder": "粘贴 B 站 / YouTube / Vimeo / SoundCloud 链接，每行一个",
+      "import.urlHint": "可一次粘贴多个链接；同时下载 3 个，其余自动排队",
+      "import.batchHint": "批量导入使用自动最佳清晰度；单链接可先探测",
       "import.kind": "下载内容",
       "import.audio": "音频",
       "import.video": "视频",
@@ -617,10 +619,15 @@ window.__ModuleLoader__.load({
       "import.close": "关闭",
       "import.cancel": "取消下载",
       "import.cancelling": "正在取消…",
+      "import.cancelAll": "取消全部",
+      "import.emptyUrls": "请先粘贴至少一个链接",
+      "import.backgroundHint": "关闭后继续后台下载",
       "import.done": "已加入播放列表",
       "import.cancelled": "已取消",
       "import.errorPrefix": "导入失败：",
+      "import.phase.queued": "排队中",
       "import.phase.starting": "准备中",
+      "import.phase.error": "失败",
       "import.phase.metadata": "读取链接信息",
       "import.phase.download": "下载中",
       "import.phase.finalize": "写入标签与封面",
@@ -764,8 +771,9 @@ window.__ModuleLoader__.load({
       "match.title": "Online metadata",
       "action.import": "Import from link",
       "import.title": "Import from link",
-      "import.urlLabel": "Video link",
-      "import.urlPlaceholder": "Paste a Bilibili / YouTube / Vimeo / SoundCloud link",
+      "import.urlLabel": "Video links (one per line)",
+      "import.urlPlaceholder": "Paste Bilibili / YouTube / Vimeo / SoundCloud links, one per line",
+      "import.urlHint": "Paste several links at once; three download in parallel, the rest queue",
       "import.kind": "Download",
       "import.audio": "Audio",
       "import.video": "Video",
@@ -778,10 +786,15 @@ window.__ModuleLoader__.load({
       "import.close": "Close",
       "import.cancel": "Cancel download",
       "import.cancelling": "Cancelling…",
+      "import.cancelAll": "Cancel all",
+      "import.emptyUrls": "Paste at least one link first",
+      "import.backgroundHint": "Downloads continue in the background after closing",
       "import.done": "Added to the playlist",
       "import.cancelled": "Cancelled",
       "import.errorPrefix": "Import failed: ",
+      "import.phase.queued": "Queued",
       "import.phase.starting": "Preparing",
+      "import.phase.error": "Failed",
       "import.phase.metadata": "Reading link metadata",
       "import.phase.download": "Downloading",
       "import.phase.finalize": "Writing tags and cover",
@@ -795,6 +808,7 @@ window.__ModuleLoader__.load({
       "import.quality": "Quality",
       "import.qualityBest": "Auto (best available)",
       "import.qualityHint": "Choose a height cap; Bilibili 1080P usually requires sign-in",
+      "import.batchHint": "Batch imports use the best automatic quality; probe a single link first if needed",
       "import.probing": "Checking available formats…",
       "import.probeError": "Could not read formats; auto best will be used",
       "import.recommended": "Recommended",
@@ -1240,6 +1254,13 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-importInput{border:1px solid var(--dsw-alias-border-l2);height:30px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border-radius:7px;padding:0 10px;font:inherit;font-size:12px;outline:none}
 .dshm-importInput:focus{border-color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-bg-layer-1)}
 .dshm-importInput:disabled{cursor:not-allowed;opacity:.55}
+textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:vertical;line-height:1.45;font-family:inherit}
+.dshm-importJobs{max-height:260px;display:flex;flex-direction:column;overflow:auto}
+.dshm-importJobHead{align-items:center;gap:8px;display:flex}
+.dshm-importJobHead .dshm-importStatus{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dshm-importCancel{border:0;color:var(--dsw-alias-label-tertiary);background:transparent;border-radius:5px;flex:none;padding:2px 5px;font:inherit;font-size:11px;cursor:pointer}
+.dshm-importCancel:hover:not(:disabled){color:var(--dsw-alias-state-error-primary);background:var(--dsw-alias-state-error-tertiary)}
+.dshm-importCancel:disabled{cursor:not-allowed;opacity:.55}
 .dshm-importHint{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:1.45}
 .dshm-importKinds{display:flex;gap:6px}
 .dshm-importKind{border:1px solid var(--dsw-alias-border-l2);height:26px;color:var(--dsw-alias-label-secondary);background:var(--dsw-alias-fill-l1);border-radius:7px;padding:0 12px;font:inherit;font-size:12px;cursor:pointer}
@@ -1255,6 +1276,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-importError{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:1.45}
 .dshm-importWarn{color:var(--dsw-alias-state-warning-primary);font-size:11px;line-height:1.45}
 .dshm-importFootHint{color:var(--dsw-alias-label-caption);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:45%}
+.dshm-importBadge{background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-on-color,#fff);border-radius:999px;min-width:14px;height:14px;align-items:center;justify-content:center;padding:0 4px;font-size:9px;font-weight:600;display:inline-flex;line-height:1}
 .dshm-importProbeMeta{color:var(--dsw-alias-label-secondary);font-size:12px}
 .dshm-importQualityRow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .dshm-importSelect{border:1px solid var(--dsw-alias-border-l2);height:28px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border-radius:7px;padding:0 8px;font:inherit;font-size:12px;outline:none;max-width:100%}
@@ -5042,9 +5064,12 @@ body:has(.dshm-root) [data-width-handle]{display:none}
     });
 
 
+    const IMPORT_ACTIVE_PHASES = new Set(["queued", "starting", "metadata", "download", "finalize"]);
+    const importUrlList = (text) => [...new Set(String(text).split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0))];
+
     /**
-     * 链接导入弹层。下载任务归宿主，弹层关闭后仍可通过 /api/import 找回；
-     * 这里只负责输入、进度轮询和取消。Escape/遮罩关闭在任务运行时先取消。
+     * 链接导入弹层。任务归宿主：关掉弹层后继续下载，重新打开能看到任务列表；
+     * 支持一次提交多行链接（宿主 3 并发、其余排队）。
      */
     function useImportDialogA11y(isOpen, onClose) {
       const layerRef = React.useRef(null);
@@ -5061,7 +5086,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         const focusables = (): HTMLElement[] => {
           const root = layerRef.current as unknown as HTMLElement | null;
           if (root === null) return [];
-          return Array.from(root.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'));
+          return Array.from(root.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'));
         };
         const onKeyDown = (event) => {
           if (event.key === "Escape") {
@@ -5095,11 +5120,12 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       return layerRef;
     }
 
-    function ImportDialog({ open, onClose, dir, t, onDone }) {
+    function ImportDialog({ open, onClose, dir, t, onDone, onActiveChange }) {
       const [url, setUrl] = React.useState("");
       const [kind, setKind] = React.useState("audio");
       const [caps, setCaps] = React.useState(null);
-      const [job, setJob] = React.useState(null);
+      const [jobs, setJobs] = React.useState([]);
+      const [cancelling, setCancelling] = React.useState({});
       const [error, setError] = React.useState(null);
       const [starting, setStarting] = React.useState(false);
       const [auth, setAuth] = React.useState(null);
@@ -5110,19 +5136,21 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       const [probeError, setProbeError] = React.useState(null);
       const [height, setHeight] = React.useState("best");
       const [probeNonce, setProbeNonce] = React.useState(0);
-      const doneNotified = React.useRef(false);
-      const active = job !== null && ["starting", "metadata", "download", "finalize"].includes(job.phase);
+      const doneNotified = React.useRef(new Set());
+      const activeJobs = jobs.filter((job) => IMPORT_ACTIVE_PHASES.has(job.phase));
+      const anyActive = activeJobs.length > 0;
+      const urlList = importUrlList(url);
+
+      React.useEffect(() => {
+        // 弹层关着时任务归宿主，由主视图轮询接管；这里只上报可见时的变化。
+        if (!open) return;
+        onActiveChange?.(activeJobs.length);
+      }, [open, activeJobs.length]);
 
       const requestClose = () => {
         setQr(null);
         setAuthError(null);
-        if (active && job !== null) {
-          void api("/api/import-cancel", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ id: job.id }),
-          }).catch(() => {});
-        }
+        // 关闭弹层不取消下载：任务归宿主，重开弹层会重新拉取 jobs。
         onClose();
       };
       const layerRef = useImportDialogA11y(open, requestClose);
@@ -5136,7 +5164,9 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             const status = await api("/api/import");
             if (disposed) return;
             setCaps(status);
-            setJob(status.job ?? null);
+            const loaded = Array.isArray(status.jobs) ? status.jobs : (status.job ? [status.job] : []);
+            setJobs(loaded);
+            doneNotified.current = new Set(loaded.filter((job) => job.phase === "done").map((job) => job.id));
             const authStatus = await api("/api/import-auth").catch(() => null);
             if (!disposed && authStatus !== null) setAuth(authStatus.bilibili ?? null);
           } catch (failure) {
@@ -5153,7 +5183,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           setProbing(false);
           return undefined;
         }
-        const value = url.trim();
+        const value = urlList.length === 1 ? urlList[0] : "";
         if (value.length === 0) {
           setProbe(null);
           setProbeError(null);
@@ -5187,20 +5217,20 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           }
         }, 700);
         return () => { disposed = true; clearTimeout(timer); };
-      }, [open, url, kind, probeNonce]);
+      }, [open, urlList.length === 1 ? urlList[0] : "", kind, probeNonce]);
 
       React.useEffect(() => {
-        if (!open || job === null || !["starting", "metadata", "download", "finalize"].includes(job.phase)) return undefined;
+        if (!open || !anyActive) return undefined;
         let disposed = false;
         let inFlight = false;
         const timer = setInterval(async () => {
           if (inFlight) return;
           inFlight = true;
           try {
-            const status = await api("/api/import?id=" + encodeURIComponent(job.id));
+            const status = await api("/api/import");
             if (!disposed) {
               setCaps(status);
-              setJob(status.job ?? null);
+              if (Array.isArray(status.jobs)) setJobs(status.jobs);
             }
           } catch (failure) {
             if (!disposed) setError(failure instanceof Error ? failure.message : String(failure));
@@ -5209,7 +5239,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           }
         }, 800);
         return () => { disposed = true; clearInterval(timer); };
-      }, [open, job?.id, job?.phase]);
+      }, [open, anyActive]);
 
       React.useEffect(() => {
         if (!open || qr === null || qr.status === "ok" || qr.status === "expired") return undefined;
@@ -5248,45 +5278,72 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       }, [open, qr?.key, qr?.status]);
 
       React.useEffect(() => {
-        if (job?.phase === "done") {
-          if (!doneNotified.current) {
-            doneNotified.current = true;
-            onDone();
-          }
-        } else if (job !== null) {
-          doneNotified.current = false;
-        }
-      }, [job?.phase]);
+        if (!open) return;
+        const fresh = jobs.filter((job) => job.phase === "done" && !doneNotified.current.has(job.id));
+        if (fresh.length === 0) return;
+        for (const job of fresh) doneNotified.current.add(job.id);
+        onDone();
+      }, [open, jobs]);
 
       const start = async () => {
+        const urls = importUrlList(url);
+        if (urls.length === 0) {
+          setError(t("import.emptyUrls"));
+          return;
+        }
         setStarting(true);
         setError(null);
-        doneNotified.current = false;
         try {
           const status = await api("/api/import", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ url: url.trim(), kind, height: kind === "video" && height !== "best" ? Number(height) : null }),
+            body: JSON.stringify({ urls, kind, height: kind === "video" && height !== "best" ? Number(height) : null }),
           });
           setCaps(status);
-          setJob(status.job ?? null);
+          const created = Array.isArray(status.jobs) ? status.jobs : (status.job ? [status.job] : []);
+          setJobs((previous) => {
+            const map = new Map<string, any>();
+            for (const job of previous) map.set(job.id, job);
+            for (const job of created) map.set(job.id, job);
+            return [...map.values()].sort((a: any, b: any) => a.startedAt - b.startedAt);
+          });
+          setUrl("");
         } catch (failure) {
           setError(failure instanceof Error ? failure.message : String(failure));
         } finally {
           setStarting(false);
         }
       };
-      const cancel = async () => {
-        if (job === null) return;
+      const cancel = async (id) => {
+        setCancelling((previous) => ({ ...previous, [id]: true }));
+        try {
+          const status = await api("/api/import-cancel", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ id }),
+          });
+          setCaps(status);
+          if (Array.isArray(status.jobs)) setJobs(status.jobs);
+        } catch (failure) {
+          setError(failure instanceof Error ? failure.message : String(failure));
+        } finally {
+          setCancelling((previous) => {
+            const next = { ...previous };
+            delete next[id];
+            return next;
+          });
+        }
+      };
+      const cancelAll = async () => {
         setStarting(true);
         try {
           const status = await api("/api/import-cancel", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ id: job.id }),
+            body: JSON.stringify({ all: true }),
           });
           setCaps(status);
-          setJob(status.job ?? null);
+          if (Array.isArray(status.jobs)) setJobs(status.jobs);
         } catch (failure) {
           setError(failure instanceof Error ? failure.message : String(failure));
         } finally {
@@ -5322,10 +5379,14 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           setAuthError(failure instanceof Error ? failure.message : String(failure));
         }
       };
-      const host = (() => {
-        try { return new URL(url.trim()).hostname.toLowerCase(); } catch { return ""; }
-      })();
-      const biliUrl = host === "b23.tv" || host === "bilibili.com" || host.endsWith(".bilibili.com");
+      const biliUrl = urlList.some((raw) => {
+        try {
+          const host = new URL(raw).hostname.toLowerCase();
+          return host === "b23.tv" || host === "bilibili.com" || host.endsWith(".bilibili.com");
+        } catch {
+          return false;
+        }
+      });
       const formatOption = (item) => {
         const size = item.filesize !== null ? " · " + t("import.approx") + " " + Math.round(item.filesize / 1048576) + " MB" : "";
         const fps = item.fps !== null ? " · " + item.fps + "fps" : "";
@@ -5335,15 +5396,48 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 
       if (!open) return null;
       const available = caps?.available === true;
-      const canStart = available && url.trim().length > 0 && !starting && !active;
-      const phaseLabel = job === null ? ""
+      const canStart = available && urlList.length > 0 && !starting;
+      const phaseLabel = (job) =>
+        job.phase === "queued" ? t("import.phase.queued")
         : job.phase === "metadata" ? t("import.phase.metadata")
         : job.phase === "download" ? t("import.phase.download")
         : job.phase === "finalize" ? t("import.phase.finalize")
         : job.phase === "done" ? t("import.done")
         : job.phase === "cancelled" ? t("import.cancelled")
         : job.phase === "starting" ? t("import.phase.starting")
+        : job.phase === "error" ? t("import.phase.error")
         : "";
+      const renderJob = (job) => {
+        const running = IMPORT_ACTIVE_PHASES.has(job.phase);
+        const progressText = job.phase === "queued" || job.phase === "done" || job.phase === "cancelled" || job.phase === "error"
+          ? ""
+          : " · " + job.progress + "%";
+        return h("div", { className: "dshm-importJob", key: job.id },
+          h("div", { className: "dshm-importJobHead" },
+            h("span", { className: "dshm-importStatus" }, phaseLabel(job) + progressText),
+            running && h("button", {
+              type: "button",
+              className: "dshm-importCancel",
+              disabled: cancelling[job.id] === true,
+              onClick: () => void cancel(job.id),
+            }, cancelling[job.id] === true ? t("import.cancelling") : t("import.cancel"))),
+          h("div", {
+            className: "dshm-importProgress",
+            role: "progressbar",
+            "aria-valuemin": 0,
+            "aria-valuemax": 100,
+            "aria-valuenow": job.progress,
+          }, h("div", { className: "dshm-importBar", style: { width: job.progress + "%" } })),
+          h("div", { className: "dshm-importMeta" }, job.title !== null ? [job.title, job.artist].filter(Boolean).join(" · ") : job.url),
+          (job.speed !== null || job.eta !== null) && h("div", { className: "dshm-importHint" },
+            [job.speed !== null ? t("import.speed") + " " + job.speed : "", job.eta !== null ? t("import.eta") + " " + job.eta : ""].filter(Boolean).join(" · ")),
+          job.phase === "done" && h("div", { className: "dshm-importDone" },
+            t("import.done") + (job.file !== null ? " · " + t("import.savedAs") + " " + job.file : "")),
+          job.warning !== null && h("div", { className: "dshm-importWarn" }, t("import.warning") + job.warning),
+          job.error !== null && h("div", { className: "dshm-importError" }, t("import.errorPrefix") + job.error),
+        );
+      };
+
       return h("div", {
         ref: layerRef,
         className: "dshm-modal",
@@ -5357,23 +5451,26 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           h("div", { className: "dshm-importBody" },
             caps !== null && caps.available === false && h("div", { className: "dshm-importError" },
               h("div", null, t("import.missing")),
-              h("div", null, t("import.missingHint")),
-            ),
+              h("div", null, t("import.missingHint"))),
             h("label", { className: "dshm-importLabel", htmlFor: "music-import-url" }, t("import.urlLabel")),
-            h("input", {
+            h("textarea", {
               id: "music-import-url",
               className: "dshm-importInput",
-              type: "url",
+              rows: 3,
               value: url,
               autoFocus: true,
-              disabled: active || starting,
+              disabled: starting,
               spellCheck: false,
               placeholder: t("import.urlPlaceholder"),
               onChange: (event) => setUrl(event.target.value),
               onKeyDown: (event) => {
-                if (event.key === "Enter" && canStart) void start();
+                if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && canStart) {
+                  event.preventDefault();
+                  void start();
+                }
               },
             }),
+            h("div", { className: "dshm-importHint" }, t("import.urlHint")),
             h("div", { className: "dshm-importHint" }, t("import.unsupported")),
             h("div", { className: "dshm-importLabel" }, t("import.kind")),
             h("div", { className: "dshm-importKinds", role: "group", "aria-label": t("import.kind") },
@@ -5381,14 +5478,14 @@ body:has(.dshm-root) [data-width-handle]{display:none}
                 type: "button",
                 className: "dshm-importKind" + (kind === "audio" ? " dshm-importKind--active" : ""),
                 "aria-pressed": kind === "audio",
-                disabled: active || starting,
+                disabled: starting,
                 onClick: () => setKind("audio"),
               }, t("import.audio")),
               h("button", {
                 type: "button",
                 className: "dshm-importKind" + (kind === "video" ? " dshm-importKind--active" : ""),
                 "aria-pressed": kind === "video",
-                disabled: active || starting,
+                disabled: starting,
                 onClick: () => setKind("video"),
               }, t("import.video"))),
             h("div", { className: "dshm-importHint" }, kind === "audio" ? t("import.audioHint") : t("import.videoHint")),
@@ -5400,13 +5497,17 @@ body:has(.dshm-root) [data-width-handle]{display:none}
                 id: "music-import-quality",
                 className: "dshm-importSelect",
                 value: height,
-                disabled: active || starting,
+                disabled: starting,
                 onChange: (event) => setHeight(event.target.value),
               },
                 h("option", { value: "best" }, t("import.qualityBest")),
                 (probe?.heights ?? []).map((item) => h("option", { key: String(item.height), value: String(item.height) }, formatOption(item)))),
               h("div", { className: "dshm-importHint" },
-                probing ? t("import.probing") : probeError !== null ? t("import.probeError") : t("import.qualityHint"))),
+                urlList.length > 1 ? t("import.batchHint")
+                  : probing ? t("import.probing")
+                    : probeError !== null ? t("import.probeError")
+                      : t("import.qualityHint"))),
+            urlList.length > 1 && h("div", { className: "dshm-importHint" }, t("import.batchHint")),
             probeError !== null && h("div", { className: "dshm-importHint" }, probeError),
             probe !== null && h("div", { className: "dshm-importProbeMeta" }, [probe.title, probe.artist].filter(Boolean).join(" · ")),
             biliUrl && h("div", { className: "dshm-importLogin" },
@@ -5427,38 +5528,23 @@ body:has(.dshm-root) [data-width-handle]{display:none}
                 h("div", { className: "dshm-importHint" }, t("import.qrHint")),
                 qr.status === "expired" && h("button", { type: "button", className: "dshm-importLinkBtn", onClick: () => void loginQr() }, t("import.qrRefresh"))),
               h("div", { className: "dshm-importHint" }, t("import.loginSaved"))),
-            job !== null && h("div", { className: "dshm-importJob" },
-              h("div", { className: "dshm-importStatus" }, phaseLabel + (job.phase === "done" || job.phase === "cancelled" ? "" : " · " + job.progress + "%")),
-              h("div", {
-                className: "dshm-importProgress",
-                role: "progressbar",
-                "aria-valuemin": 0,
-                "aria-valuemax": 100,
-                "aria-valuenow": job.progress,
-              }, h("div", { className: "dshm-importBar", style: { width: job.progress + "%" } })),
-              job.title !== null && h("div", { className: "dshm-importMeta" }, [job.title, job.artist].filter(Boolean).join(" · ")),
-              (job.speed !== null || job.eta !== null) && h("div", { className: "dshm-importHint" },
-                [job.speed !== null ? t("import.speed") + " " + job.speed : "", job.eta !== null ? t("import.eta") + " " + job.eta : ""].filter(Boolean).join(" · ")),
-              job.phase === "done" && h("div", { className: "dshm-importDone" },
-                t("import.done") + (job.file !== null ? " · " + t("import.savedAs") + " " + job.file : "")),
-              job.warning !== null && h("div", { className: "dshm-importWarn" }, t("import.warning") + job.warning),
-              job.error !== null && h("div", { className: "dshm-importError" }, t("import.errorPrefix") + job.error),
-            ),
+            jobs.length > 0 && h("div", { className: "dshm-importJobs" }, jobs.map(renderJob)),
             error !== null && h("div", { className: "dshm-importError", role: "alert" }, error),
           ),
           h("div", { className: "dshm-dialogFoot" },
-            h("span", { className: "dshm-importFootHint" }, caps?.ytdlp ? "yt-dlp " + caps.ytdlp : ""),
+            h("span", { className: "dshm-importFootHint" }, anyActive ? t("import.backgroundHint") : caps?.ytdlp ? "yt-dlp " + caps.ytdlp : ""),
             h("span", { style: { display: "flex", gap: "8px" } },
-              active
-                ? h("button", { type: "button", className: "dshm-btn", disabled: starting, onClick: () => void cancel() }, starting ? t("import.cancelling") : t("import.cancel"))
-                : h("button", { type: "button", className: "dshm-btn", onClick: requestClose }, t("import.close")),
-              !active && h("button", {
+              anyActive && activeJobs.length > 1 && h("button", {
+                type: "button", className: "dshm-btn", disabled: starting, onClick: () => void cancelAll(),
+              }, t("import.cancelAll")),
+              h("button", { type: "button", className: "dshm-btn", onClick: requestClose }, t("import.close")),
+              h("button", {
                 type: "button",
                 className: "dshm-btn",
                 disabled: !canStart,
                 onClick: () => void start(),
-              }, starting ? t("import.starting") : t("import.start"))),
-          )));
+              }, starting ? t("import.starting") : t("import.start")))),
+        ));
     }
 
     /** MV 海报墙：视频用封面卡片，音频继续用表格。 */
@@ -5562,7 +5648,44 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       // 手动输入目录路径（原生选择器之外的兜底；Windows 可用 D:\Music 之类路径）
       const [dirInputOpen, setDirInputOpen] = useState(false);
       const [importOpen, setImportOpen] = useState(false);
+      const [importJobsActive, setImportJobsActive] = useState(0);
       const [rowMenu, setRowMenu] = useState(null);
+
+      // 后台导入：视图挂载时找回宿主里仍在跑的任务；有任务时轮询，归零后刷新列表。
+      React.useEffect(() => {
+        let disposed = false;
+        void api("/api/import").then((status) => {
+          if (disposed) return;
+          const active = (Array.isArray(status.jobs) ? status.jobs : []).filter((job) => IMPORT_ACTIVE_PHASES.has(job.phase)).length;
+          if (active > 0) setImportJobsActive(active);
+        }).catch(() => {});
+        return () => { disposed = true; };
+      }, []);
+      React.useEffect(() => {
+        if (importJobsActive <= 0) return undefined;
+        let disposed = false;
+        let inFlight = false;
+        const timer = setInterval(async () => {
+          if (inFlight) return;
+          inFlight = true;
+          try {
+            const status = await api("/api/import");
+            if (disposed) return;
+            const active = (Array.isArray(status.jobs) ? status.jobs : []).filter((job) => IMPORT_ACTIVE_PHASES.has(job.phase)).length;
+            if (active === 0) {
+              setImportJobsActive(0);
+              void player.refresh();
+            } else {
+              setImportJobsActive(active);
+            }
+          } catch {
+            // 后台轮询失败不打断播放；下一拍再试。
+          } finally {
+            inFlight = false;
+          }
+        }, 2000);
+        return () => { disposed = true; clearInterval(timer); };
+      }, [importJobsActive]);
       const [dirInputValue, setDirInputValue] = useState("");
 
       // 底部条专辑封面：无内嵌封面时回退音符图标（补全封面变化也要重试）
@@ -5902,7 +6025,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           "aria-label": t("action.import"),
           disabled: busy,
           onClick: () => setImportOpen(true),
-        }, ICONS.importLink), t("action.import"), "bottom"),
+        }, ICONS.importLink, importJobsActive > 0 && h("span", { className: "dshm-importBadge", "aria-hidden": "true" }, String(importJobsActive))), t("action.import"), "bottom"),
         withTipWrapped(h("button", {
           type: "button",
           className: "dshm-btn",
@@ -6632,7 +6755,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
             h("img", { className: "dshm-lightboxImg", src: playerCoverSrc, alt: "" }),
           ),
         matchOverlay,
-        h(ImportDialog, { open: importOpen, dir: state.dir, t, onClose: () => setImportOpen(false), onDone: () => player.refresh() }),
+        h(ImportDialog, { open: importOpen, dir: state.dir, t, onClose: () => setImportOpen(false), onDone: () => player.refresh(), onActiveChange: setImportJobsActive }),
       );
     }
 

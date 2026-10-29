@@ -165,7 +165,7 @@ interface MvJob {
 
 /** 从视频链接导入的类型：音频（mp3）或视频（mp4，作为 MV 曲目）。 */
 type ImportKind = 'audio' | 'video';
-type ImportPhase = 'starting' | 'metadata' | 'download' | 'finalize' | 'done' | 'error' | 'cancelled';
+type ImportPhase = 'queued' | 'starting' | 'metadata' | 'download' | 'finalize' | 'done' | 'error' | 'cancelled';
 
 interface ImportInfo {
   title: string;
@@ -236,6 +236,8 @@ interface ImportProbe {
 /** 下发给页面的任务快照（白名单投影，不含本地路径）。 */
 interface ImportSnapshot {
   id: string;
+  /** 用户提交的公开链接；用于排队/失败时辨认任务（validateImportUrl 已拒绝凭据）。 */
+  url: string;
   kind: ImportKind;
   height: number | null;
   phase: ImportPhase;
@@ -494,6 +496,10 @@ const IMPORT_METADATA_TIMEOUT_MS = 60 * 1000;
 const IMPORT_MAX_FILESIZE = '2G';
 /** 处理完成后保留任务快照的时长（页面刷新后还能看到结果）。 */
 const IMPORT_JOB_TTL_MS = 60 * 60 * 1000;
+/** 同时运行的 yt-dlp 数；其余任务排队。3 个足以跑满带宽，又不会把磁盘/CPU 打满。 */
+const IMPORT_CONCURRENCY = 3;
+/** 一次提交的链接上限，防止误粘整页文本把队列塞爆。 */
+const IMPORT_MAX_BATCH = 20;
 const IMPORT_TMP_PREFIX = '.dshm-import-';
 
 /** 探测 yt-dlp：显式环境变量优先（测试/自定义安装），其次 Homebrew / 系统 / PATH。 */
@@ -2796,7 +2802,9 @@ function createHost(ctx) {
   /** Scanned library cache; invalidated whenever the directory changes. */
   let library: LibraryResult | null = null;
   /** 当前 / 最近一次链接导入任务；同一时间只允许一个在跑。 */
-  let importJob: ImportJob | null = null;
+  const importJobs = new Map<string, ImportJob>();
+  const importQueue: ImportJob[] = [];
+  let importRunning = 0;
   /** yt-dlp 的 --version 结果按二进制路径缓存（轮询端点不能每次起子进程）。 */
   const ytdlpVersionCache = new Map<string, string | null>();
   /** 扫码登录的待确认二维码（key → 创建时间）；只在宿主内存里。 */
@@ -3465,6 +3473,7 @@ function createHost(ctx) {
   function importSnapshot(job: ImportJob): ImportSnapshot {
     return {
       id: job.id,
+      url: job.url,
       kind: job.kind,
       height: job.height,
       phase: job.phase,
@@ -3484,21 +3493,63 @@ function createHost(ctx) {
   }
 
   function importIsActive(job: ImportJob): boolean {
-    return job.phase === 'starting' || job.phase === 'metadata' || job.phase === 'download' || job.phase === 'finalize';
+    return job.phase === 'queued' || job.phase === 'starting' || job.phase === 'metadata' || job.phase === 'download' || job.phase === 'finalize';
+  }
+
+  function pruneImportJobs() {
+    const now = Date.now();
+    for (const [id, job] of importJobs) {
+      if (job.finishedAt !== null && now - job.finishedAt > IMPORT_JOB_TTL_MS) importJobs.delete(id);
+    }
   }
 
   function importStatusPayload(id: string | null) {
-    if (importJob !== null && importJob.finishedAt !== null
-      && Date.now() - importJob.finishedAt > IMPORT_JOB_TTL_MS) {
-      importJob = null;
-    }
-    if (typeof id === 'string' && id.length > 0 && (importJob === null || importJob.id !== id)) {
-      throw statusError(404, '导入任务不存在或已过期');
+    pruneImportJobs();
+    const all = [...importJobs.values()].sort((a, b) => a.startedAt - b.startedAt);
+    let job: ImportJob | null = null;
+    if (typeof id === 'string' && id.length > 0) {
+      job = importJobs.get(id) ?? null;
+      if (job === null) throw statusError(404, '导入任务不存在或已过期');
+    } else {
+      job = [...all].reverse().find((item) => importIsActive(item)) ?? all.at(-1) ?? null;
     }
     return {
       ...importCapabilityPayload(),
-      job: importJob === null ? null : importSnapshot(importJob),
+      jobs: all.map((item) => importSnapshot(item)),
+      job: job === null ? null : importSnapshot(job),
     };
+  }
+
+  /** 队列泵：最多 IMPORT_CONCURRENCY 个 runImport，完成一个补一个。 */
+  function pumpImportQueue() {
+    while (importRunning < IMPORT_CONCURRENCY) {
+      const job = importQueue.shift();
+      if (job === undefined) break;
+      if (job.cancelled || job.phase !== 'queued') continue;
+      const yt = ytdlpCapability();
+      const ffmpeg = findFfmpeg();
+      if (yt.bin === null || ffmpeg === null) {
+        job.phase = 'error';
+        job.error = yt.bin === null ? 'yt-dlp 未安装' : 'ffmpeg 未安装';
+        job.finishedAt = Date.now();
+        continue;
+      }
+      job.phase = 'starting';
+      job.progress = 1;
+      importRunning += 1;
+      void runImport(job, yt.bin, ffmpeg).catch((error: unknown) => {
+        if (job.cancelled) {
+          job.phase = 'cancelled';
+        } else {
+          job.phase = 'error';
+          job.error = importFailureMessage(reasonOf(error), job.dir);
+        }
+        job.finishedAt = Date.now();
+      }).finally(() => {
+        importRunning = Math.max(0, importRunning - 1);
+        pumpImportQueue();
+      });
+    }
   }
 
   async function cleanupImportTemp(job: ImportJob) {
@@ -3875,8 +3926,16 @@ function createHost(ctx) {
     }
   }
 
-  function startImport(rawUrl: unknown, rawKind: unknown, rawHeight: unknown = null): ImportJob {
-    const url = validateImportUrl(rawUrl);
+  function startImports(rawUrls: unknown, rawKind: unknown, rawHeight: unknown = null): ImportJob[] {
+    const list = Array.isArray(rawUrls) ? rawUrls : [rawUrls];
+    if (list.length === 0) throw statusError(400, '至少提供一个链接');
+    if (list.length > IMPORT_MAX_BATCH) throw statusError(400, '一次最多导入 ' + IMPORT_MAX_BATCH + ' 个链接');
+    const urls: string[] = [];
+    for (const raw of list) {
+      const url = validateImportUrl(raw);
+      if (!urls.includes(url)) urls.push(url);
+    }
+    if (urls.length === 0) throw statusError(400, '至少提供一个链接');
     const kind: ImportKind | null = rawKind === 'audio' ? 'audio' : rawKind === 'video' ? 'video' : null;
     if (kind === null) throw statusError(400, '下载类型必须是 audio 或 video');
     let height: number | null = null;
@@ -3886,67 +3945,84 @@ function createHost(ctx) {
       height = parsed;
     }
     if (currentDir === null) throw statusError(409, '尚未选择音乐目录');
+    const dir = currentDir;
     const yt = ytdlpCapability();
     if (yt.bin === null) throw statusError(503, 'yt-dlp 未安装：请先安装 yt-dlp（例如 brew install yt-dlp）');
-    const ffmpeg = findFfmpeg();
-    if (ffmpeg === null) throw statusError(503, 'ffmpeg 未安装：请先安装 ffmpeg（例如 brew install ffmpeg）');
-    if (importJob !== null && importIsActive(importJob)) throw statusError(409, '已有导入任务正在进行');
-    const job: ImportJob = {
-      id: randomUUID(),
-      kind,
-      height,
-      url,
-      phase: 'starting',
-      progress: 1,
-      title: null,
-      artist: null,
-      file: null,
-      trackId: null,
-      tagged: false,
-      warning: null,
-      error: null,
-      speed: null,
-      eta: null,
-      startedAt: Date.now(),
-      finishedAt: null,
-      child: null,
-      cancelled: false,
-      timedOut: false,
-      dir: currentDir,
-      tmpBase: path.join(currentDir, IMPORT_TMP_PREFIX + randomUUID()),
-    };
-    importJob = job;
-    try { console.info('[dsh-music-player] 导入开始：' + kind + ' · ' + new URL(url).hostname + ' · ' + job.id); } catch { /* 日志不能影响导入 */ }
-    void runImport(job, yt.bin, ffmpeg).catch((error: unknown) => {
-      if (job.cancelled) {
-        job.phase = 'cancelled';
-      } else {
-        job.phase = 'error';
-        job.error = importFailureMessage(reasonOf(error), job.dir);
-      }
-      job.finishedAt = Date.now();
+    if (findFfmpeg() === null) throw statusError(503, 'ffmpeg 未安装：请先安装 ffmpeg（例如 brew install ffmpeg）');
+
+    // 先校验完整个批次再建任务：非法链接不会留下“半批已开始”的状态。
+    const jobs = urls.map((url) => {
+      const job: ImportJob = {
+        id: randomUUID(),
+        kind,
+        height,
+        url,
+        phase: 'queued',
+        progress: 0,
+        title: null,
+        artist: null,
+        file: null,
+        trackId: null,
+        tagged: false,
+        warning: null,
+        error: null,
+        speed: null,
+        eta: null,
+        startedAt: Date.now(),
+        finishedAt: null,
+        child: null,
+        cancelled: false,
+        timedOut: false,
+        dir,
+        tmpBase: path.join(dir, IMPORT_TMP_PREFIX + randomUUID()),
+      };
+      importJobs.set(job.id, job);
+      importQueue.push(job);
+      try { console.info('[dsh-music-player] 导入入队：' + kind + ' · ' + new URL(url).hostname + ' · ' + job.id); } catch { /* 日志不能影响导入 */ }
+      return job;
     });
-    return job;
+    pumpImportQueue();
+    return jobs;
   }
 
   function cancelImportJob(id: unknown): ImportJob {
     const wanted = typeof id === 'string' ? id : '';
-    if (importJob === null || (wanted.length > 0 && importJob.id !== wanted)) {
-      throw statusError(404, '导入任务不存在或已过期');
+    const job = importJobs.get(wanted);
+    if (job === undefined) throw statusError(404, '导入任务不存在或已过期');
+    if (job.phase === 'queued') {
+      const at = importQueue.indexOf(job);
+      if (at >= 0) importQueue.splice(at, 1);
     }
-    if (importIsActive(importJob)) {
-      importJob.cancelled = true;
-      importJob.phase = 'cancelled';
-      importJob.finishedAt = Date.now();
-      if (importJob.child !== null) {
+    if (importIsActive(job)) {
+      job.cancelled = true;
+      job.phase = 'cancelled';
+      job.finishedAt = Date.now();
+      if (job.child !== null) {
         try {
-          importJob.child.kill('SIGKILL');
+          job.child.kill('SIGKILL');
         } catch {
           // 已经退出
         }
       }
     }
-    return importJob;
+    return job;
+  }
+
+  function cancelAllImports(): ImportJob[] {
+    const jobs = [...importJobs.values()];
+    for (const job of jobs) {
+      if (importIsActive(job)) {
+        const at = importQueue.indexOf(job);
+        if (at >= 0) importQueue.splice(at, 1);
+        job.cancelled = true;
+        job.phase = 'cancelled';
+        job.finishedAt = Date.now();
+        if (job.child !== null) {
+          try { job.child.kill('SIGKILL'); } catch { /* 已经退出 */ }
+        }
+      }
+    }
+    return jobs;
   }
 
   async function dispatch(req, res) {
@@ -4025,14 +4101,20 @@ function createHost(ctx) {
         return;
       }
       const body = await readJson(req);
-      const job = startImport(body.url, body.kind, body.height);
-      sendJson(res, 200, importStatusPayload(job.id));
+      const jobs = startImports(Array.isArray(body.urls) ? body.urls : body.url, body.kind, body.height);
+      // POST 只回本批新建的任务；GET 才回完整任务列表，便于客户端区分“刚提交的”与“已有的”。
+      sendJson(res, 200, { ...importStatusPayload(jobs[0].id), jobs: jobs.map((job) => importSnapshot(job)) });
       return;
     }
 
     if (pathname === '/api/dsh-music/import-cancel' && req.method === 'POST') {
       await ready;
       const body = await readJson(req);
+      if (body.all === true) {
+        cancelAllImports();
+        sendJson(res, 200, importStatusPayload(null));
+        return;
+      }
       const job = cancelImportJob(body.id);
       sendJson(res, 200, importStatusPayload(job.id));
       return;
@@ -4519,18 +4601,20 @@ function createHost(ctx) {
     stopRgMeasure('插件已停用');
     stopWaveform('插件已停用');
     // 导入的 yt-dlp 也可能在写 .part；停用/热重载后不能留孤儿进程。
-    if (importJob !== null) {
-      importJob.cancelled = true;
-      if (importJob.child !== null) {
+    for (const job of importJobs.values()) {
+      job.cancelled = true;
+      if (job.child !== null) {
         try {
-          importJob.child.kill('SIGKILL');
+          job.child.kill('SIGKILL');
         } catch {
           // 已退出
         }
       }
-      void cleanupImportTemp(importJob);
-      importJob = null;
+      void cleanupImportTemp(job);
     }
+    importJobs.clear();
+    importQueue.length = 0;
+    importRunning = 0;
     // 标签 worker 也必须随实例销毁：热重载/停用后不能留着旧线程。
     failAllTagJobs('插件已停用');
     if (tagWorker !== null) {

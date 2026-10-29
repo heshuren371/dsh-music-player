@@ -152,6 +152,9 @@ const tracks = [
 const library = { dir: '/music', tracks, scanning: false, scanParsed: tracks.length, scanTotal: tracks.length, truncated: false, skippedPackages: 0, scannedAt: 1 };
 const calls = [];
 const importPosts = [];
+const importCancelCalls = [];
+let importJobsState = [];
+let importJobSeq = 0;
 /** 模拟「宿主进程仍是旧版入口」：/api/dsh-music/* 一律 404，只有旧前缀会回话。 */
 let legacyOnly = false;
 const mockFetch = async (url, init) => {
@@ -182,16 +185,31 @@ const mockFetch = async (url, init) => {
     }
     return new dom.window.Response(JSON.stringify({ bilibili: { loggedIn: false } }), { headers: { 'content-type': 'application/json' } });
   }
+  if (suffix.includes('/api/dsh-music/import-cancel')) {
+    const body = JSON.parse(String(init?.body ?? '{}'));
+    importCancelCalls.push(body);
+    if (body.all === true) {
+      importJobsState = importJobsState.map((job) => ['done', 'error', 'cancelled'].includes(job.phase) ? job : { ...job, phase: 'cancelled', finishedAt: Date.now() });
+    } else {
+      importJobsState = importJobsState.map((job) => job.id === body.id ? { ...job, phase: 'cancelled', finishedAt: Date.now() } : job);
+    }
+    return new dom.window.Response(JSON.stringify({ available: true, ytdlp: 'test', ffmpeg: true, hosts: ['youtube.com'], jobs: importJobsState, job: importJobsState.find((job) => job.id === body.id) ?? importJobsState.at(-1) ?? null }), { headers: { 'content-type': 'application/json' } });
+  }
   if (suffix.includes('/api/dsh-music/import')) {
     const method = (init?.method ?? 'GET').toUpperCase();
     if (method === 'POST') {
-      importPosts.push(JSON.parse(String(init?.body ?? '{}')));
-      return new dom.window.Response(JSON.stringify({
-        available: true, ytdlp: 'test', ffmpeg: true, hosts: ['youtube.com'],
-        job: { id: 'j1', kind: 'audio', phase: 'download', progress: 12, title: 'UI Song', artist: 'UI Artist', file: null, trackId: null, tagged: false, warning: null, error: null, speed: '1x', eta: '00:01', startedAt: 1, finishedAt: null },
-      }), { headers: { 'content-type': 'application/json' } });
+      const body = JSON.parse(String(init?.body ?? '{}'));
+      importPosts.push(body);
+      const urls = Array.isArray(body.urls) ? body.urls : [body.url];
+      const created = urls.map((url) => ({
+        id: 'j' + (importJobSeq += 1), url, kind: body.kind, phase: 'download', progress: 12,
+        title: 'UI Song', artist: 'UI Artist', file: null, trackId: null, tagged: false,
+        warning: null, error: null, speed: '1x', eta: '00:01', startedAt: Date.now(), finishedAt: null,
+      }));
+      importJobsState = [...importJobsState, ...created];
+      return new dom.window.Response(JSON.stringify({ available: true, ytdlp: 'test', ffmpeg: true, hosts: ['youtube.com'], jobs: created, job: created[0] }), { headers: { 'content-type': 'application/json' } });
     }
-    return new dom.window.Response(JSON.stringify({ available: true, ytdlp: 'test', ffmpeg: true, hosts: ['youtube.com'], job: null }), { headers: { 'content-type': 'application/json' } });
+    return new dom.window.Response(JSON.stringify({ available: true, ytdlp: 'test', ffmpeg: true, hosts: ['youtube.com'], jobs: importJobsState, job: importJobsState.at(-1) ?? null }), { headers: { 'content-type': 'application/json' } });
   }
   // MV 出画方式：直出（视频轨会先问这里）
   if (suffix.includes('/api/dsh-music/mv')) return new dom.window.Response(JSON.stringify({ mode: 'direct', state: 'ready', progress: 1, url: '/api/dsh-music/stream?p=v.mp4' }), { headers: { 'content-type': 'application/json' } });
@@ -528,7 +546,7 @@ check('the fallback keeps the UI alive (no error bar)', container.querySelector(
         const startButton = Array.from(dialog2.querySelectorAll('.dshm-dialogFoot .dshm-btn')).at(-1);
         await act(async () => { startButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
         await settle(120);
-        check('start posts url and kind to the import endpoint', importPosts.length === 1 && importPosts[0].url === 'https://www.youtube.com/watch?v=ui' && importPosts[0].kind === 'audio', JSON.stringify(importPosts));
+        check('start posts a url batch and kind to the import endpoint', importPosts.length === 1 && importPosts[0].urls?.[0] === 'https://www.youtube.com/watch?v=ui' && importPosts[0].kind === 'audio', JSON.stringify(importPosts));
         check('running job renders progress and metadata in the dialog', dialog2.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow') === '12' && String(dialog2.textContent).includes('UI Song'), String(dialog2.textContent).slice(0, 160));
       } else {
         check('start posts url and kind to the import endpoint', false, 'input missing');
@@ -578,6 +596,45 @@ check('the fallback keeps the UI alive (no error bar)', container.querySelector(
   await act(async () => { dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
   await settle(80);
   check('closing the import dialog after a queued video request still works', container.querySelector('.dshm-importDialog') === null);
+}
+
+// ── 批量导入 / 关闭后后台继续 ──────────────────────────────────────────────
+{
+  importJobsState = [];
+  importCancelCalls.length = 0;
+  const before = importPosts.length;
+  const importButton = container.querySelector('button[aria-label="action.import"]');
+  await act(async () => { importButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(80);
+  const dialog = container.querySelector('.dshm-importDialog');
+  const input = dialog.querySelector('.dshm-importInput');
+  await act(async () => {
+    const props = reactProps(input);
+    props.onChange({ target: { value: 'https://www.youtube.com/watch?v=batch-a\nhttps://www.youtube.com/watch?v=batch-b' } });
+  });
+  await settle(40);
+  const start = Array.from(dialog.querySelectorAll('.dshm-dialogFoot .dshm-btn')).at(-1);
+  await act(async () => { start.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(300);
+  const posted = importPosts.at(-1);
+  check('a multi-line paste starts one batch', importPosts.length === before + 1 && posted?.urls?.length === 2, JSON.stringify(posted));
+  check('each link gets its own job row', dialog.querySelectorAll('.dshm-importJob').length === 2, String(dialog.querySelectorAll('.dshm-importJob').length));
+  check('the toolbar badge shows two jobs in flight', container.querySelector('.dshm-importBadge')?.textContent === '2', container.querySelector('.dshm-importBadge')?.textContent ?? 'missing');
+  const close = Array.from(dialog.querySelectorAll('.dshm-dialogFoot .dshm-btn')).find((button) => button.textContent === 'import.close');
+  await act(async () => { close.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(80);
+  check('closing the dialog leaves running imports alone', importCancelCalls.length === 0 && container.querySelector('.dshm-importDialog') === null, JSON.stringify(importCancelCalls));
+  await act(async () => { importButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(120);
+  const reopened = container.querySelector('.dshm-importDialog');
+  check('reopening shows the background jobs', reopened !== null && reopened.querySelectorAll('.dshm-importJob').length === 2, String(reopened?.querySelectorAll('.dshm-importJob').length));
+  check('the dialog states that closing keeps downloading', String(reopened?.querySelector('.dshm-importFootHint')?.textContent).includes('import.backgroundHint'), reopened?.querySelector('.dshm-importFootHint')?.textContent ?? 'missing');
+  await act(async () => { dom.window.document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+  await settle(60);
+  const libraryCallsBefore = calls.filter((url) => url.includes('/library') || url.includes('/refresh')).length;
+  importJobsState = importJobsState.map((job) => ({ ...job, phase: 'done', progress: 100, file: 'done.mp3' }));
+  await settle(2300);
+  check('background completion clears the badge and refreshes the library', container.querySelector('.dshm-importBadge') === null && calls.filter((url) => url.includes('/library') || url.includes('/refresh')).length > libraryCallsBefore, calls.filter((url) => url.includes('/library') || url.includes('/refresh')).length + ' library calls');
 }
 
 // ── 侧边栏视图 / 收藏 / 最近添加 / 行菜单 ──────────────────────────────────

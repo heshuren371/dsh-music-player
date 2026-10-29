@@ -195,17 +195,29 @@ console.log('download: 100.0%|1.0MiB/s|00:00');
       skip('video import (libx264 fixture unavailable)');
     }
 
-    // 忙 / 取消：慢速 fake 把下载卡住，第二次导入必须 409，取消后进入 cancelled。
+    // 并行 / 取消：慢速 fake 让两个下载同时挂着；第二个必须被接受，取消一个不拖死另一个。
     process.env.FAKE_SLOW_MS = '2000';
     const slow = await post({ url: 'https://www.youtube.com/watch?v=slow', kind: 'audio' });
-    const busy = await post({ url: 'https://www.youtube.com/watch?v=slow2', kind: 'audio' });
-    check('a second import is refused while one is running', busy.status === 409, 'status=' + busy.status);
+    const second = await post({ url: 'https://www.youtube.com/watch?v=slow2', kind: 'audio' });
+    check('a second import starts in parallel', second.status === 200 && second.body?.job?.id !== slow.body?.job?.id, 'status=' + second.status + ' ids=' + slow.body?.job?.id + ',' + second.body?.job?.id);
+    const active = await json(base + '/api/import');
+    const activeIds = (active.body?.jobs ?? []).filter((job) => ['queued', 'starting', 'metadata', 'download', 'finalize'].includes(job.phase)).map((job) => job.id);
+    check('both running jobs are visible in the status list', activeIds.includes(slow.body.job.id) && activeIds.includes(second.body.job.id), JSON.stringify(activeIds));
+    const secondPhase = (active.body?.jobs ?? []).find((job) => job.id === second.body.job.id)?.phase;
+    check('the second job is actually running, not queued behind the first', secondPhase !== 'queued', String(secondPhase));
     const cancelled = await json(base + '/api/import-cancel', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: slow.body.job.id }) });
     check('cancel reports cancelled', cancelled.status === 200 && cancelled.body?.job?.phase === 'cancelled', JSON.stringify(cancelled.body?.job));
+    const survivor = await waitJob(second.body.job.id);
+    check('cancelling one import does not stop the other', survivor?.phase === 'done', JSON.stringify(survivor));
     await waitJob(slow.body.job.id);
+    // 批量提交：一次 POST 的 urls 全部建任务并并行跑完。
     process.env.FAKE_SLOW_MS = '0';
+    const batch = await post({ urls: ['https://www.youtube.com/watch?v=batch1', 'https://www.youtube.com/watch?v=batch2'], kind: 'audio' });
+    check('a batch creates one job per link', batch.status === 200 && batch.body?.jobs?.length === 2, JSON.stringify(batch.body?.jobs?.map((job) => job.id)));
+    const batchDone = await Promise.all((batch.body?.jobs ?? []).map((job) => waitJob(job.id)));
+    check('all batch jobs finish', batchDone.length === 2 && batchDone.every((job) => job?.phase === 'done'), JSON.stringify(batchDone.map((job) => job?.phase)));
     await new Promise((resolve) => setTimeout(resolve, 200));
-    check('cancelled import leaves no temp files', (await fs.readdir(music)).every((name) => !name.startsWith('.dshm-import-')), (await fs.readdir(music)).join(', '));
+    check('parallel imports leave no temp files', (await fs.readdir(music)).every((name) => !name.startsWith('.dshm-import-')), (await fs.readdir(music)).join(', '));
 
     // ── B 站扫码登录：mock 官方接口，绝不登录真实账号 ─────────────────────────
     {

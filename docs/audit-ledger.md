@@ -2683,3 +2683,15 @@ view-persistence A5 仍通过。对照：去掉 mediaFilter 过滤 → MV 网格
 插件图标；收起时整栏不渲染、不占宽度，点击 header 图标才恢复完整侧栏（当前 section/mediaFilter
 不变）。侧栏品牌行只做标识，不再放收起按钮或 56px rail。按钮带 `aria-expanded` / `aria-controls`，
 导航项有 aria-label，提示中英双语。client-shell 覆盖 header 图标收起/恢复；36 套全绿。
+
+## 5.68 第 58 轮 —— 链接导入后台化 / 3 并发
+
+基线：宿主只有一个 `importJob`，第二个任务 409；客户端单输入框、单个进度条，关闭弹层会取消。
+改动：宿主改为 `Map` + 队列，3 个 worker（`IMPORT_CONCURRENCY`），POST 接受 `urls` 批量并只回本批
+新建任务，GET 回完整 `jobs`，支持 `{all:true}` 取消；任务快照带公开 URL。客户端改多行 textarea，
+任务列表逐条进度/取消，关闭弹层不再取消，主视图轮询进行中任务、在导入按钮显示数量、归零后刷新。
+文档同步 `docs/import.md`。
+
+门禁：test-import 覆盖“第二任务并行接受 / 批量 2 条 / 取消一个不影响另一个 / 临时文件清理”；
+client-shell 覆盖多行批量、关闭不取消、重开恢复任务、角标与后台完成后刷新。36 套全绿。
+对照：把 `IMPORT_CONCURRENCY` 改成 1 → 第二任务进入 queued，并行断言红；恢复后全绿。
