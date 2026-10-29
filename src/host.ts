@@ -810,26 +810,50 @@ function mvOutputFor(key) {
   return path.join(mvCacheDir(), key + '.mp4');
 }
 
+/** MP4/Chromium 可直接搬运的音频编码：full/fast 档优先 copy，省一次音频重编码。 */
+const MV_MP4_AUDIO_COPY = new Set(['aac', 'mp3', 'alac']);
+
 /**
- * ffmpeg 参数。三个档位是按「成功率」递进的：
+ * 快速档的缩放：最长边超过 1080P 才缩，绝不放大。
+ * 4K/1440P 源是转码慢的主因；缩到 1080P 后 ultrafast 的实测吞吐提升约 3.5×。
+ */
+function mvScaleFilter(track) {
+  if (typeof track.width !== 'number' || typeof track.height !== 'number') return null;
+  if (Math.max(track.width, track.height) <= 1920) return null;
+  return track.width >= track.height ? 'scale=1920:-2' : 'scale=-2:1920';
+}
+
+/**
+ * ffmpeg 参数。档位按「成功率」递进：
  *  copy  = 音视频原样搬进 MP4（最快，但源里只要有 MP4 装不下的编码就会失败，
  *          实测 AVI 里的 PCM 音频就会让 -c copy 直接报错）；
  *  audio = 视频原样 + 音频转 AAC（绝大多数情况够用，视频零损失）；
  *  full  = 视频重编码成 H.264（HEVC 这类没有解码器的编码只能走这条）。
  */
-function mvFfmpegArgs(track, attempt, output) {
+export function mvFfmpegArgs(track, attempt, output) {
   const args = ['-hide_banner', '-nostdin', '-y', '-i', track.path, '-map', '0:v:0?', '-map', '0:a:0?', '-sn', '-dn'];
   if (attempt === 'copy') {
     args.push('-c', 'copy');
   } else if (attempt === 'audio') {
     args.push('-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k');
   } else {
-    args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k');
+    // fast：速度优先（ultrafast + 1080P 上限 + 可搬运音频 copy）。
+    // full：兼容兜底（veryfast + 原分辨率 + AAC 重编码）。
+    const fast = attempt === 'fast';
+    const scale = fast ? mvScaleFilter(track) : null;
+    if (scale !== null) args.push('-vf', scale);
+    args.push('-c:v', 'libx264', '-preset', fast ? 'ultrafast' : 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p');
+    if (fast && typeof track.audioCodec === 'string' && MV_MP4_AUDIO_COPY.has(track.audioCodec)) {
+      args.push('-c:a', 'copy');
+    } else {
+      args.push('-c:a', 'aac', '-b:a', '192k');
+    }
   }
   // 输出文件名带 .part（写完才原子改名），ffmpeg 没法从后缀猜格式，必须显式 -f mp4。
   args.push('-f', 'mp4', '-movflags', '+faststart', '-progress', 'pipe:1', '-nostats', output);
   return args;
 }
+
 
 /**
  * 单档 ffmpeg 的超时。没有它，卡住的转码会让任务永远停在 `preparing`：客户端只会一直
@@ -918,8 +942,8 @@ async function mvPrepare(track, mode, lengthSeconds, retry = false) {
   // 档位：音轨已知解不了时**从 `audio` 起**——`copy` 档把原音轨原样搬进 MP4，Chromium
   // 照样解不了，等于白跑一遍（而且产物会被当成 ready 缓存下来）。
   const attempts = mode === 'remux'
-    ? (audioNeedsTranscode(track) ? ['audio', 'full'] : ['copy', 'audio', 'full'])
-    : ['full'];
+    ? (audioNeedsTranscode(track) ? ['audio', 'fast', 'full'] : ['copy', 'audio', 'fast', 'full'])
+    : ['fast', 'full'];
   void (async () => {
     for (const attempt of attempts) {
       if (job.cancelled) return;
@@ -4242,14 +4266,18 @@ function createHost(ctx) {
       const output = await uniqueTargetPath(dir, base + ' (MV).mp4');
       // 与 mvPrepare 同一套档位纪律：音轨已知解不了时从 `audio` 起。
       const attempts = mode === 'remux'
-        ? (audioNeedsTranscode(target0) ? ['audio', 'full'] : ['copy', 'audio', 'full'])
-        : ['full'];
+        ? (audioNeedsTranscode(target0) ? ['audio', 'fast', 'full'] : ['copy', 'audio', 'fast', 'full'])
+        : ['fast', 'full'];
       let converted = false;
       let lastLog = '';
+      const conversionJob: MvJob = { state: 'preparing', progress: 0, error: null, child: null, log: '', attempt: null, finishedAt: null, cancelled: false, timedOut: false };
       for (const attempt of attempts) {
-        const result = spawnSync(ffmpeg, mvFfmpegArgs(target0, attempt, output), { encoding: 'utf8', timeout: 30 * 60 * 1000, maxBuffer: 1 << 24 });
-        if (result.status === 0) { converted = true; break; }
-        lastLog = String(result.stderr ?? '').trim().split('\n').slice(-1)[0] ?? '';
+        // 异步 spawn：以前用 spawnSync，整段转码会把整个宿主事件循环钉住，页面其他请求
+        // （封面、库轮询、播放流）一起卡住。这里复用 mvRunAttempt，进度/超时也统一。
+        const code = await mvRunAttempt(ffmpeg, target0, attempt, output, conversionJob, target0.duration);
+        if (code === 0) { converted = true; break; }
+        lastLog = conversionJob.log.trim().split('\n').filter((line) => !/^\[(copy|audio|fast|full) exited/.test(line.trim())).slice(-1)[0] ?? '';
+        if (conversionJob.timedOut) break;
         try {
           // 失败档留下的半成品**在用户的音乐目录里**（不是缓存目录）：授权面就必须是它
           // （拿缓存目录去授权只会 403，然后被这个 catch 吞掉 —— 半成品会留在库里被扫成曲目）。

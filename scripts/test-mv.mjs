@@ -1,6 +1,7 @@
 // MV（音乐视频）支持回归：扫描视频文件 → 判定出画方式 → ffmpeg 转封装 → 缓存文件 Range 服务。
 // 没有 ffmpeg 的机器上，前半段（扫描 + 判定 + 参数）仍然全跑，转封装部分改用占位文件验证失败路径。
 import { createServer } from 'node:http';
+import { mvFfmpegArgs } from '../lib/host.js';
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -60,6 +61,14 @@ const base = 'http://127.0.0.1:' + server.address().port + '/dsh-music';
 const json = async (url, options) => { const r = await fetch(url, options); return { status: r.status, body: await r.json().catch(() => null) }; };
 let failures = 0;
 const check = (label, ok, detail) => { if (!ok) failures += 1; console.log((ok ? 'PASS ' : 'FAIL ') + label + (detail === undefined ? '' : ' | ' + detail)); };
+
+// 转码参数：fast 档必须 ultrafast + 1080P 上限 + 可搬运音频 copy；full 档保留兼容兜底。
+const fastArgs = mvFfmpegArgs({ path: '/tmp/x', width: 3840, height: 2160, audioCodec: 'aac' }, 'fast', '/tmp/out.mp4');
+const fallbackArgs = mvFfmpegArgs({ path: '/tmp/x', width: 3840, height: 2160, audioCodec: 'aac' }, 'full', '/tmp/out.mp4');
+check('fast transcode uses ultrafast, scales long edge to 1080P and copies AAC', fastArgs.includes('ultrafast') && fastArgs.includes('scale=1920:-2') && fastArgs.includes('copy'), fastArgs.join(' '));
+check('full fallback keeps veryfast at original resolution and re-encodes audio', fallbackArgs.includes('veryfast') && !fallbackArgs.includes('scale=1920:-2') && fallbackArgs.includes('aac'), fallbackArgs.join(' '));
+
+
 
 await json(base + '/api/dir', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dir: music }) });
 let library = null;

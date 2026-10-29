@@ -2639,3 +2639,21 @@ oldId→newId，删除成功移除收藏，避免收藏视图凭空少歌。
 门禁：client-shell 覆盖视图计数/MV 过滤/行星标/收藏视图/空态/添加排序；match-client 覆盖
 星标与重命名迁移；test-mv 覆盖 `addedAt` 下发。36 套全绿；对照：去掉视图过滤 → MV 视图红；
 去掉收藏迁移 → 重命名断言红；把 added 排序映射去掉 → 排序断言红。
+
+## 5.64 第 54 轮 —— MV 转码加速
+
+基线：full 档 `libx264 veryfast crf23`，原分辨率，音频一律 AAC；`mvconvert` 用 `spawnSync`，
+整段转码会阻塞宿主事件循环。
+
+实测（本机 M5，10s 4K HEVC 源）：veryfast 原分辨率 3.10s / 17M；ultrafast 原分辨率 1.47s / 66M；
+ultrafast + 最长边 1080P 0.87s / 12M（约 3.5×）。1080p 20s 源 1.52s → 0.64s。
+VideoToolbox `h264_videotoolbox` 在 720P/1080P/4K 均慢于软件 ultrafast（0.75/2.26/4.19s），
+且硬件解码辅助无收益，因此不采用，避免为“看起来更专业”牺牲速度。
+
+改动：full 档拆为 `fast`（ultrafast + 最长边 1080P + AAC/MP3/ALAC copy）与 `full`（veryfast
+原分辨率 + AAC 兜底）；转码改为 fast→full 递进。`mvconvert` 改用异步 `mvRunAttempt`，转码期间
+宿主仍能响应封面/库轮询/媒体流请求。准备层显示“极速转码：ultrafast，最长边最高 1080P”，
+不把画质取舍藏起来。
+
+门禁：test-mv 新增 fast/full 参数断言；全量 36 套通过。对照：禁用 fast 特征 → fast 参数断言红；
+恢复后全绿。

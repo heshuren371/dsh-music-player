@@ -706,6 +706,7 @@ window.__ModuleLoader__.load({
       "mv.remuxing": "正在准备 MV（换封装）…",
       "mv.transcoding": "正在准备 MV（转码）…",
       "mv.failed": "这个 MV 播不了",
+      "mv.fastHint": "极速转码：ultrafast，最长边最高 1080P，优先速度",
       "mv.noFfmpeg": "需要转封装才能播放：装一个 ffmpeg（brew install ffmpeg）再试",
       "mv.retry": "重试",
       "confirm.convert": "（其中 {0} 个 MV 会顺带转成 MP4，重编码那档会掉一点画质）",
@@ -859,6 +860,7 @@ window.__ModuleLoader__.load({
       "mv.remuxing": "Preparing the music video (remux)…",
       "mv.transcoding": "Preparing the music video (transcoding)…",
       "mv.failed": "This music video cannot be played",
+      "mv.fastHint": "Fast transcode: ultrafast, capped at 1080P on the long edge",
       "mv.noFfmpeg": "Remuxing is required: install ffmpeg (brew install ffmpeg) and retry",
       "mv.retry": "Retry",
       "confirm.convert": " ({0} MV(s) will also be converted to MP4; re-encoding loses a little quality)",
@@ -5967,6 +5969,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
                         mvState.state !== "failed" && h("span", { className: "dshm-mvPrepBar" },
                           h("i", { style: { width: Math.round((mvState.progress ?? 0) * 100) + "%" } })),
                         mvState.state !== "failed" && h("span", { className: "dshm-mvPrepPct" }, Math.round((mvState.progress ?? 0) * 100) + "%"),
+                        mvState.state !== "failed" && mvState.mode === "transcode" && h("span", { className: "dshm-mvPrepHint" }, t("mv.fastHint")),
                         mvState.state === "failed" && mvState.error === "ffmpeg-not-found"
                           ? h("span", { className: "dshm-mvPrepHint" }, t("mv.noFfmpeg"))
                           : mvState.state === "failed"
