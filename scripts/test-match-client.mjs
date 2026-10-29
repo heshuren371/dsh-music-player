@@ -206,10 +206,10 @@ check('five rows rendered with a cover cell', rows().length === 5 && rows()[0].q
 check('DRM-skipped package count is shown', container.querySelector('.dshm-header .dshm-stats')?.textContent.includes('1 drm skipped'), container.querySelector('.dshm-header .dshm-stats')?.textContent);
 
 // ── Per-row apply (writes file) ──────────────────────────────────────────────
-const favoriteBeforeApply = rows()[0].querySelector('.dshm-fav');
-await act(async () => { favoriteBeforeApply.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+check('list rows no longer carry per-row favorite buttons', container.querySelector('.dshm-row .dshm-fav') === null);
+window.__dshMusicPlayer.toggleFavorite('a.mp3');
 await settle(40);
-check('row star adds the track to favorites', window.__dshMusicPlayer.getState().favorites.has('a.mp3'), JSON.stringify([...window.__dshMusicPlayer.getState().favorites]));
+check('favorites can still be set while applying', window.__dshMusicPlayer.getState().favorites.has('a.mp3'), JSON.stringify([...window.__dshMusicPlayer.getState().favorites]));
 await act(async () => { rows()[0].querySelector('.dshm-match').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
 await settle(80);
 check('match request fired with the stable id', matchCalls.length === 1 && matchCalls[0].includes('p=a.mp3'), matchCalls[0]);

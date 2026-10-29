@@ -944,9 +944,6 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-viewChip:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
 .dshm-viewChip--active{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-state-business-primary)}
 .dshm-viewCount{opacity:.65;font-size:10px;font-variant-numeric:tabular-nums}
-.dshm-fav{cursor:pointer;width:22px;height:22px;color:var(--dsw-alias-label-tertiary);background:transparent;border:0;border-radius:6px;justify-content:center;align-items:center;display:inline-flex}
-.dshm-fav:hover{color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-interactive-bg-hover)}
-.dshm-fav--on{color:var(--dsw-alias-state-business-primary)}
 .dshm-colArtist{width:26%}
 .dshm-row{cursor:default;transition:background-color .12s var(--ds-ease-in-out)}
 .dshm-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
@@ -1174,7 +1171,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-root button:focus-visible,.dshm-root input:focus-visible,.dshm-root [role="button"]:focus-visible{outline:none;box-shadow:0 0 0 3px color-mix(in srgb, var(--dsw-alias-state-business-primary) 55%, transparent)}
 .dshm-rowCover{width:28px;height:28px;border:1px solid var(--dsw-alias-border-l2);border-radius:5px;object-fit:cover;background:var(--dsw-alias-bg-layer-2);vertical-align:middle}
 .dshm-rowNote{width:28px;height:28px;color:var(--dsw-alias-label-caption);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:5px;justify-content:center;align-items:center;vertical-align:middle;display:inline-flex}
-.dshm-table td.dshm-colActions,.dshm-table th.dshm-colActions{width:84px;text-align:center;padding:0;text-overflow:clip}
+.dshm-table td.dshm-colActions,.dshm-table th.dshm-colActions{width:60px;text-align:center;padding:0;text-overflow:clip}
 .dshm-match{cursor:pointer;width:22px;height:22px;color:var(--dsw-alias-label-tertiary);border:0;background:transparent;border-radius:6px;justify-content:center;align-items:center;padding:0;display:inline-flex;font-size:12px;line-height:1}
 .dshm-match:hover{color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-interactive-bg-hover)}
 .dshm-match--done{color:var(--dsw-alias-state-business-primary)}
@@ -4883,7 +4880,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
     });
 
     /** Track list. Memoised so the playback clock never re-renders the rows. */
-    const TrackTable = React.memo(function TrackTable({ rows, current, sortKey, sortDir, player, t, meta, effective, coverFor, activeRowRef, playing, favorites }) {
+    const TrackTable = React.memo(function TrackTable({ rows, current, sortKey, sortDir, player, t, meta, effective, coverFor, activeRowRef, playing }) {
       const sortHeader = (key, labelKey, className?: string) => h("th", {
         className: (className ?? "") + " dshm-sortable" + (sortKey === key ? " dshm-sorted" : ""),
         onClick: () => player.toggleSort(key),
@@ -4928,17 +4925,6 @@ body:has(.dshm-root) [data-width-handle]{display:none}
               h("td", { className: "dshm-colAdded" }, formatAddedAt(track.addedAt)),
               h("td", { className: "dshm-colDuration" }, formatTime(track.duration)),
               h("td", { className: "dshm-colActions" },
-                withTipWrapped(h("button", {
-                  type: "button",
-                  className: "dshm-fav" + (favorites.has(track.id) ? " dshm-fav--on" : ""),
-                  "aria-label": favorites.has(track.id) ? t("player.unfavorite") : t("player.favorite"),
-                  "aria-pressed": favorites.has(track.id),
-                  onClick: (event) => {
-                    event.stopPropagation();
-                    player.toggleFavorite(track.id);
-                  },
-                }, favorites.has(track.id) ? ICONS.starFill : ICONS.star),
-                  favorites.has(track.id) ? t("player.unfavorite") : t("player.favorite")),
                 withTipWrapped(h("button", {
                   type: "button",
                   className: "dshm-match" + (matched ? " dshm-match--done" : ""),
@@ -5873,7 +5859,6 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           coverFor: player.coverFor,
           activeRowRef,
           playing: state.playing,
-          favorites,
         });
       }
 

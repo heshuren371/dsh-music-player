@@ -591,10 +591,10 @@ check('the fallback keeps the UI alive (no error bar)', container.querySelector(
   await act(async () => { chip('view.mv').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   await settle(50);
   check('MV view shows only video tracks', container.querySelectorAll('.dshm-row').length === 1 && String(container.querySelector('.dshm-row')?.textContent).includes('Movie Song'), container.querySelectorAll('.dshm-row').length + ' rows');
-  const star = container.querySelector('.dshm-row .dshm-fav');
-  await act(async () => { star.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  check('list rows no longer carry per-row favorite buttons', container.querySelector('.dshm-row .dshm-fav') === null);
+  api.toggleFavorite('v.mp4');
   await settle(40);
-  check('row star favorites the track without playing it', api.getState().favorites.has('v.mp4') && star.getAttribute('aria-pressed') === 'true', JSON.stringify([...api.getState().favorites]));
+  check('favorites can still be set from the full player API', api.getState().favorites.has('v.mp4'), JSON.stringify([...api.getState().favorites]));
   await act(async () => { chip('view.favorites').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   await settle(40);
   check('favorites view shows the starred track', container.querySelectorAll('.dshm-row').length === 1 && String(container.querySelector('.dshm-row')?.textContent).includes('Movie Song'));
@@ -608,8 +608,7 @@ check('the fallback keeps the UI alive (no error bar)', container.querySelector(
   api.toggleSort('added');
   await settle(50);
   check('added descending puts the newest file first', String(container.querySelector('.dshm-row')?.textContent).includes('Movie Song') && api.getState().sortDir === 'desc', String(container.querySelector('.dshm-row')?.textContent).slice(0, 40) + ' dir=' + api.getState().sortDir);
-  const newestStar = container.querySelector('.dshm-row .dshm-fav');
-  await act(async () => { newestStar.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  api.toggleFavorite('v.mp4');
   await settle(40);
   await act(async () => { chip('view.favorites').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   await settle(40);
