@@ -585,16 +585,15 @@ check('the fallback keeps the UI alive (no error bar)', container.querySelector(
   const api = window.__dshMusicPlayer;
   for (const id of [...api.getState().favorites]) api.toggleFavorite(id);
   await settle(40);
-  const sideToggle = container.querySelector('.dshm-sideToggle');
-  const sidebarElement = container.querySelector('.dshm-sidebar');
-  check('the collapse control lives inside the sidebar', sideToggle !== null && sideToggle.closest('.dshm-sidebar') === sidebarElement && sideToggle.getAttribute('aria-expanded') === 'true' && container.querySelector('.dshm-sideLogoBtn') === null);
-  await act(async () => { sideToggle.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  const headerToggle = container.querySelector('.dshm-headerToggle');
+  const headerFirst = container.querySelector('.dshm-header')?.firstElementChild;
+  check('the plugin icon sits at the far left of the header and controls the sidebar', headerToggle !== null && headerFirst?.querySelector('.dshm-headerToggle') === headerToggle && headerToggle.getAttribute('aria-expanded') === 'true' && container.querySelector('.dshm-sidebar') !== null);
+  await act(async () => { headerToggle.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   await settle(40);
-  const logoButton = container.querySelector('.dshm-sideLogoBtn');
-  check('collapsing turns the brand mark into the expand control', sidebarElement.classList.contains('dshm-sidebar--collapsed') && logoButton !== null && logoButton.closest('.dshm-sidebar') === sidebarElement && logoButton.getAttribute('aria-expanded') === 'false' && container.querySelector('.dshm-sideToggle') === null);
-  await act(async () => { logoButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  check('collapsing removes the sidebar and leaves no rail', container.querySelector('.dshm-sidebar') === null && headerToggle.getAttribute('aria-expanded') === 'false' && container.querySelector('.dshm-header') !== null);
+  await act(async () => { headerToggle.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   await settle(40);
-  check('clicking the brand mark expands the full sidebar', !sidebarElement.classList.contains('dshm-sidebar--collapsed') && container.querySelector('.dshm-sideToggle') !== null && container.querySelector('.dshm-sideLogoBtn') === null);
+  check('clicking the header plugin icon restores the full sidebar', container.querySelector('.dshm-sidebar') !== null && headerToggle.getAttribute('aria-expanded') === 'true');
   const nav = (label) => Array.from(container.querySelectorAll('.dshm-navItem')).find((button) => button.textContent.includes(label));
   check('sidebar navigation exposes library, favorites and recent with counts',
     container.querySelectorAll('.dshm-navItem').length === 5

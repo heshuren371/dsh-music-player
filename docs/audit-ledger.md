@@ -2679,7 +2679,7 @@ view-persistence A5 仍通过。对照：去掉 mediaFilter 过滤 → MV 网格
 
 ## 5.67 第 57 轮 —— 侧边栏收起
 
-收起按钮放在侧栏品牌行，与 DSH 一致；`sidebarOpen` 放 player store 并持久化到本机 localStorage。
-收起后保留 56px 图标栏（品牌 logo + 导航图标），不整栏消失；品牌 logo 本身就是展开按钮，
-没有独立的 ☰，恢复时保留当前 section/mediaFilter。按钮带 `aria-expanded` / `aria-controls`，导航项有 aria-label
-与原生 title，提示中英双语。client-shell 覆盖收起/恢复；36 套全绿。
+`sidebarOpen` 放 player store 并持久化到本机 localStorage。展开/收起开关是 header 最左侧的
+插件图标；收起时整栏不渲染、不占宽度，点击 header 图标才恢复完整侧栏（当前 section/mediaFilter
+不变）。侧栏品牌行只做标识，不再放收起按钮或 56px rail。按钮带 `aria-expanded` / `aria-controls`，
+导航项有 aria-label，提示中英双语。client-shell 覆盖 header 图标收起/恢复；36 套全绿。
