@@ -2588,7 +2588,20 @@ iTunes 请求。
 在成功/失败/取消后清理；同一时间一个任务，2 GiB / 20 分钟上限；停用/热重载杀掉子进程。页面
 快照不含本地路径，错误文本移除目录；不提供登录、cookie、付费墙或 DRM 绕过。
 
-门禁：`test-import.mjs` 注册进 `run-all`，35 条断言（纯函数 + 假 yt-dlp 端到端：音频/视频、
+门禁：`test-import.mjs` 注册进 `run-all`，36 条断言（纯函数 + 假 yt-dlp 端到端：音频/视频、
 标签、封面、取消、忙、缺工具、非白名单）；`test-client-shell` 增加导入入口/字段/焦点/Escape/
 关闭与 start 接线。负向对照：去白名单 → 2 条红；拆封面读取 → 封面 404 红。真实网络只验证
 YouTube CC 测试视频的元数据；B 站 extractor 存在但未下载未知版权内容。
+
+## 5.61 第 51 轮 —— YouTube 403 诊断：多来源 yt-dlp 冲突
+
+症状：下载用户提供的油管 MV 时报 `ERROR: unable to download video data: HTTP Error 403: Forbidden`。
+用同一套参数下载公开短测试视频（`jNQXAC9IVRw`）成功，说明参数与宿主链路正常。
+
+定位：`/opt/homebrew/bin/yt-dlp` 是一个 pip 生成的旧 console script（2026.07.04），Homebrew
+已装 2026.10.26 但因文件冲突没有链接成功；`brew upgrade yt-dlp` 升级了 Cellar，命令仍走旧脚本。
+处理：`brew link --overwrite yt-dlp`，`yt-dlp --version` 变为 2026.10.26；同参数下载短测试视频成功。
+
+代码：下载/元数据失败若命中 403/Forbidden，错误改为可行动说明（确认公开与授权、升级 yt-dlp、
+需要登录/会员/地区权限时本功能不绕过），不再只抛 yt-dlp 原文。新增 1 条断言（36 条）。
+诚实说明：未拿到用户的具体 MV 链接，无法确认该视频是版本问题还是权限/地区限制；升级后需重试。

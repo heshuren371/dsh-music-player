@@ -589,6 +589,17 @@ export function importErrorText(stderr, dir) {
     .trim() || '下载失败';
 }
 
+/**
+ * 下载失败的展示文本。403 单独给出可行动的说明：它通常不是「代码坏了」，
+ * 而是平台风控、内容需要登录/会员/地区权限，或 yt-dlp 过旧。这里不提供任何绕过。
+ */
+export function importFailureMessage(stderr, dir) {
+  if (/HTTP Error 403|Forbidden/iu.test(String(stderr ?? ''))) {
+    return '平台拒绝了媒体流（HTTP 403）：请确认链接公开且你有权下载，并升级 yt-dlp（brew upgrade yt-dlp）。若仍失败，通常是需要登录、会员或地区限制；本功能不提供登录/付费墙/DRM 绕过。';
+  }
+  return importErrorText(stderr, dir);
+}
+
 /** 缩略图扩展名 → 可写入标签的 mime；其他格式不写进文件。 */
 function importCoverMime(ext) {
   if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
@@ -3411,7 +3422,7 @@ function createHost(ctx) {
       if (job.cancelled) return;
       if (meta.spawnError !== null) throw new Error('无法启动 yt-dlp：' + meta.spawnError);
       if (meta.timedOut) throw new Error('读取链接信息超时');
-      if (meta.code !== 0) throw new Error(importErrorText(meta.stderr, job.dir));
+      if (meta.code !== 0) throw new Error(importFailureMessage(meta.stderr, job.dir));
       let parsed: unknown;
       try {
         parsed = JSON.parse(meta.stdout);
@@ -3440,7 +3451,7 @@ function createHost(ctx) {
       if (job.cancelled) return;
       if (download.spawnError !== null) throw new Error('无法启动 yt-dlp：' + download.spawnError);
       if (download.timedOut) throw new Error('下载超时');
-      if (download.code !== 0) throw new Error(importErrorText(download.stderr, job.dir));
+      if (download.code !== 0) throw new Error(importFailureMessage(download.stderr, job.dir));
 
       job.phase = 'finalize';
       job.progress = 90;

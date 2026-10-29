@@ -60,7 +60,7 @@ export DSH_MUSIC_FFMPEG=/path/to/ffmpeg
 | `yt-dlp 未安装` | 按上面的 brew 命令安装，或设置 `DSH_MUSIC_YTDLP` |
 | `ffmpeg 未安装` | 音频转 MP3、视频合并、封面转 jpg 都需要它 |
 | 链接被拒 | 只支持公开平台白名单与 https；短链先展开成 `https://` |
-| 403 / 需要登录 | 该内容不是公开可下载资源；本功能不提供登录通道 |
+| 403 / Forbidden | 先升级 yt-dlp（`brew upgrade yt-dlp`）并确认 `yt-dlp --version` 是期望版本（多来源安装可用 `brew link --overwrite yt-dlp`）；若仍失败，多为需要登录/会员/地区限制，本功能不绕过 |
 | 下载完成但标签未写入 | 容器/编码不支持标签；文件保留，warning 会说明原因 |
 | 列表暂时没出现 | 等下一次扫描完成，或点刷新按钮 |
 

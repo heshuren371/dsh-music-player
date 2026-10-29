@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-  buildYtdlpArgs, importErrorText, importFileName, parseImportProgress, parseYtdlpInfo,
+  buildYtdlpArgs, importErrorText, importFailureMessage, importFileName, parseImportProgress, parseYtdlpInfo,
   sanitizeImportName, validateImportUrl,
 } from '../lib/host.js';
 
@@ -59,6 +59,7 @@ check('args pin config/playlist/thumbnail/ffmpeg and end with the URL',
   && audioArgs.includes('--convert-thumbnails') && audioArgs.includes('--ffmpeg-location') && audioArgs.at(-1) === 'https://youtu.be/x',
   audioArgs.join(' '));
 check('error text strips the local directory', !importErrorText('ERROR: failed in /tmp/music/x\n', '/tmp/music').includes('/tmp/music'), importErrorText('ERROR: failed in /tmp/music/x', '/tmp/music'));
+check('403 becomes an actionable message (no login bypass claim)', /403/u.test(importFailureMessage('ERROR: unable to download video data: HTTP Error 403: Forbidden', '/tmp/music')) && /yt-dlp/u.test(importFailureMessage('HTTP Error 403: Forbidden', '/tmp/music')) && /不提供/u.test(importFailureMessage('HTTP Error 403: Forbidden', '/tmp/music')), importFailureMessage('HTTP Error 403: Forbidden', '/tmp/music'));
 
 // ── 端到端：假 yt-dlp + 真 ffmpeg + 真 tag writer ───────────────────────────
 const FFMPEG = ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/opt/local/bin/ffmpeg', '/usr/bin/ffmpeg'].find((p) => existsSync(p)) ?? null;
