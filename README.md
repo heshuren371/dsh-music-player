@@ -38,7 +38,7 @@
 dsh plugin --profile web add github:heshuren371/dsh-music-player
 ```
 
-重启 `dsh web` 并刷新页面，会话顶部标签环出现「音乐」即安装成功。锁版本请加 `#v0.8.5` 之类的后缀。
+重启 `dsh web` 并刷新页面，会话顶部标签环出现「音乐」即安装成功。锁版本请加 `#v0.9.0` 之类的后缀。
 
 卸载不会动你的音乐文件：
 
