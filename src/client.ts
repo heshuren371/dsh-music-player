@@ -164,6 +164,8 @@ interface PlayerState {
   section: LibrarySection;
   /** 目的地的类型过滤：全部 / 音频 / MV。 */
   mediaFilter: MediaFilter;
+  /** 侧边栏展开状态；持久化，切走视图再回来保持。 */
+  sidebarOpen: boolean;
   /** 收藏 id 集合（相对路径 id）；只存本机 localStorage。 */
   favorites: Set<string>;
   scanning: boolean;
@@ -305,6 +307,7 @@ interface DshTranslator {
 interface MusicPlayerApi {
   setView(view: LibraryView): void;
   setMediaFilter(media: MediaFilter): void;
+  toggleSidebar(): void;
   toggleFavorite(id: string): void;
   t?: DshTranslator;
   getState(): PlayerState;
@@ -578,6 +581,8 @@ window.__ModuleLoader__.load({
       "nav.library": "资料库",
       "nav.mine": "我的",
       "action.more": "更多操作",
+      "sidebar.collapse": "收起侧边栏",
+      "sidebar.expand": "展开侧边栏",
       "col.added": "添加",
       "empty.view": "这个视图还没有内容",
       "empty.viewHint": "切换视图，或在行内点星标收藏",
@@ -737,6 +742,8 @@ window.__ModuleLoader__.load({
       "nav.library": "Library",
       "nav.mine": "Mine",
       "action.more": "More actions",
+      "sidebar.collapse": "Collapse sidebar",
+      "sidebar.expand": "Expand sidebar",
       "col.added": "Added",
       "empty.view": "Nothing in this view yet",
       "empty.viewHint": "Switch views, or star tracks from the list",
@@ -960,6 +967,9 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-viewCount{opacity:.65;font-size:10px;font-variant-numeric:tabular-nums}
 .dshm-shell{min-height:0;flex:1;display:flex;overflow:hidden}
 .dshm-main{min-width:0;min-height:0;flex:1;flex-direction:column;display:flex;overflow:hidden}
+.dshm-sideToggle{border:0;width:24px;height:24px;color:var(--dsw-alias-label-tertiary);background:transparent;border-radius:6px;flex:none;align-items:center;justify-content:center;padding:0;display:inline-flex;cursor:pointer}
+.dshm-sideToggle:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.dshm-sideToggleGlyph{font-size:16px;line-height:1}
 .dshm-sidebar{width:196px;flex:none;border-right:1px solid var(--dsw-alias-border-l1);background:color-mix(in srgb, var(--dsw-alias-bg-layer-2) 72%, transparent);flex-direction:column;gap:2px;padding:10px 8px;display:flex;overflow:auto}
 .dshm-sideBrand{color:var(--dsw-alias-label-primary);align-items:center;gap:8px;padding:2px 8px 12px;font-size:13px;font-weight:600;display:flex}
 .dshm-sideLogo{color:var(--dsw-alias-state-business-primary);align-items:center;display:inline-flex}
@@ -1401,6 +1411,13 @@ body:has(.dshm-root) [data-width-handle]{display:none}
     function saveMediaFilter(media: MediaFilter) {
       try { localStorage.setItem(MEDIA_KEY, media); } catch { /* 隐私模式 */ }
     }
+    const SIDEBAR_KEY = "dsh-music:sidebar";
+    function loadSidebarOpen() {
+      try { return localStorage.getItem(SIDEBAR_KEY) !== "0"; } catch { return true; }
+    }
+    function saveSidebarOpen(open) {
+      try { localStorage.setItem(SIDEBAR_KEY, open ? "1" : "0"); } catch { /* 隐私模式 */ }
+    }
     function loadFavorites(): Set<string> {
       try {
         const raw = JSON.parse(localStorage.getItem(FAV_KEY) ?? "[]");
@@ -1836,6 +1853,11 @@ body:has(.dshm-root) [data-width-handle]{display:none}
           if (core.state.mediaFilter === media) return;
           core.set({ mediaFilter: media });
           saveMediaFilter(media);
+        },
+        toggleSidebar: () => {
+          const open = !core.state.sidebarOpen;
+          core.set({ sidebarOpen: open });
+          saveSidebarOpen(open);
         },
         toggleFavorite: (id) => {
           if (typeof id !== "string" || id.length === 0) return;
@@ -3904,6 +3926,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         sortDir: prefs.sortDir === "desc" ? "desc" : "asc",
         section: loadSection(),
         mediaFilter: loadMediaFilter(),
+        sidebarOpen: loadSidebarOpen(),
         favorites: loadFavorites(),
         /** 待确认删除的曲目下标（-1 = 无）。替代 window.confirm 的应用内确认。 */
         pendingDelete: -1,
@@ -5776,6 +5799,15 @@ body:has(.dshm-root) [data-width-handle]{display:none}
       });
 
       const header = h("div", { className: "dshm-header" },
+        withTipWrapped(h("button", {
+          type: "button",
+          className: "dshm-sideToggle",
+          "aria-label": state.sidebarOpen ? t("sidebar.collapse") : t("sidebar.expand"),
+          "aria-expanded": state.sidebarOpen,
+          "aria-controls": "dshm-sidebar",
+          onClick: () => player.toggleSidebar(),
+        }, h("span", { className: "dshm-sideToggleGlyph", "aria-hidden": "true" }, state.sidebarOpen ? "‹" : "☰")),
+          state.sidebarOpen ? t("sidebar.collapse") : t("sidebar.expand")),
         h("span", { className: "dshm-title" }, state.section === "favorites"
           ? t("view.favorites")
           : state.section === "recent"
@@ -5942,7 +5974,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         h("span", { className: "dshm-navGlyph" }, glyph),
         h("span", { className: "dshm-navLabel" }, label),
         h("span", { className: "dshm-navCount" }, String(count)));
-      const sidebar = h("aside", { className: "dshm-sidebar", "aria-label": t("nav.library") },
+      const sidebar = h("aside", { id: "dshm-sidebar", className: "dshm-sidebar", "aria-label": t("nav.library") },
         h("div", { className: "dshm-sideBrand" }, h("span", { className: "dshm-sideLogo" }, ICONS.note), t("view.music")),
         h("div", { className: "dshm-sideHeading" }, t("nav.library")),
         navItem("all", t("view.allSongs"), counts.all, ICONS.note),
@@ -6563,7 +6595,7 @@ body:has(.dshm-root) [data-width-handle]{display:none}
         // MV 媒体元素的隐藏停靠位：弹层收起时把 <video> 停在这里继续放声音
         h("div", { className: "dshm-mvPark", ref: mvParkRef, "aria-hidden": "true" }),
         h("div", { className: "dshm-shell" },
-          sidebar,
+          state.sidebarOpen && sidebar,
           h("div", { className: "dshm-main" },
             header,
             dirEditor,

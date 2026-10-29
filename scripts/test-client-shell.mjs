@@ -585,6 +585,14 @@ check('the fallback keeps the UI alive (no error bar)', container.querySelector(
   const api = window.__dshMusicPlayer;
   for (const id of [...api.getState().favorites]) api.toggleFavorite(id);
   await settle(40);
+  const sideToggle = container.querySelector('.dshm-sideToggle');
+  check('sidebar has a collapse control', sideToggle !== null && sideToggle.getAttribute('aria-expanded') === 'true' && container.querySelector('.dshm-sidebar') !== null);
+  await act(async () => { sideToggle.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(40);
+  check('collapsing hides the sidebar and keeps the reopen control', container.querySelector('.dshm-sidebar') === null && sideToggle.getAttribute('aria-expanded') === 'false');
+  await act(async () => { sideToggle.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(40);
+  check('expanding restores the sidebar', container.querySelector('.dshm-sidebar') !== null && sideToggle.getAttribute('aria-expanded') === 'true');
   const nav = (label) => Array.from(container.querySelectorAll('.dshm-navItem')).find((button) => button.textContent.includes(label));
   check('sidebar navigation exposes library, favorites and recent with counts',
     container.querySelectorAll('.dshm-navItem').length === 5

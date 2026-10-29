@@ -2676,3 +2676,9 @@ README 同步布局描述。
 
 门禁：36 套全绿；client-shell 覆盖侧栏/网格/类型过滤/行菜单；match/delete/cover 测试改为菜单路径；
 view-persistence A5 仍通过。对照：去掉 mediaFilter 过滤 → MV 网格断言红；恢复全绿。
+
+## 5.67 第 57 轮 —— 侧边栏收起
+
+header 左侧增加侧边栏开关，`sidebarOpen` 放 player store 并持久化到本机 localStorage；收起时
+卸载 aside、按钮改为展开图标，恢复时保留当前 section/mediaFilter。按钮带 `aria-expanded` /
+`aria-controls`，提示中英双语。client-shell 覆盖收起/恢复；36 套全绿。
