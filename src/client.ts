@@ -238,6 +238,8 @@ interface PlayerState {
   playerPhase: "closed" | "open" | "closing";
   /** MV 就地放大：同 playerPhase，跨视图卸载保留。 */
   mvBig: boolean;
+  /** 网页全屏（铺满浏览器视口，不进入系统全屏）；MV 专用。 */
+  webFullscreen: boolean;
   /** 封面放大预览：同 playerPhase，跨视图卸载保留。 */
   zoomOpen: boolean;
 }
@@ -339,6 +341,9 @@ interface MusicPlayerApi {
   closePlayer(): void;
   /** MV 就地放大开关（跨视图卸载保留）。 */
   toggleMvBig(): void;
+  /** 网页全屏（铺满视口，不进入系统全屏）。 */
+  toggleWebFullscreen(): void;
+  setWebFullscreen(open: boolean): void;
   /** 封面放大预览开关（跨视图卸载保留）。 */
   setZoomOpen(open: boolean): void;
   next(): void;
@@ -720,6 +725,10 @@ window.__ModuleLoader__.load({
       "rg.measuring": (done, total) => total > 0 ? `正在测量响度… ${done}/${total}` : "正在测量响度…",
       "player.open": "打开播放器",
       "player.close": "收起播放器",
+      "player.webFullscreen": "网页全屏",
+      "player.exitWebFullscreen": "退出网页全屏",
+      "player.fullscreen": "全屏",
+      "player.exitFullscreen": "退出全屏",
       "player.queue": "接下来播放",
       "player.favorite": "收藏",
       "player.unfavorite": "取消收藏",
@@ -888,6 +897,10 @@ window.__ModuleLoader__.load({
       "rg.measuring": (done, total) => total > 0 ? `Measuring loudness… ${done}/${total}` : "Measuring loudness…",
       "player.open": "Open player",
       "player.close": "Collapse player",
+      "player.webFullscreen": "Web fullscreen",
+      "player.exitWebFullscreen": "Exit web fullscreen",
+      "player.fullscreen": "Fullscreen",
+      "player.exitFullscreen": "Exit fullscreen",
       "player.queue": "Continue Playing",
       "player.favorite": "Favorite",
       "player.unfavorite": "Remove favorite",
@@ -1082,7 +1095,33 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-player--mvbig .dshm-playerRight{display:none}
 .dshm-player--mvbig .dshm-playerStage{--dshm-art:min(98%,1240px)}
 .dshm-player--mvbig .dshm-mvStage{aspect-ratio:16/9;max-height:82vh;background:#000}
-.dshm-player--mvbig .dshm-playerMeta,.dshm-player--mvbig .dshm-progress,.dshm-player--mvbig .dshm-playerTransport{width:min(92%,1040px)}
+
+.dshm-playerControls{width:100%;min-width:0;flex-direction:column;align-items:center;gap:16px;display:flex}
+/* 网页全屏：铺满浏览器视口，不进入系统全屏 */
+.dshm-player--theater{position:fixed;inset:0;width:100vw;height:100vh;z-index:var(--dshm-z-lightbox);background:#000}
+/* 原生全屏：fullscreen 元素自己填满屏幕 */
+.dshm-player--nativefull:fullscreen{width:100%;height:100%;background:#000}
+.dshm-player--immersive{background:#000}
+.dshm-player--immersive .dshm-playerArt-bg,.dshm-player--immersive .dshm-playerScrim{display:none}
+.dshm-player--immersive .dshm-playerBody{position:absolute;inset:0;display:block;padding:0}
+.dshm-player--immersive .dshm-playerStage{position:absolute;inset:0;width:100%;height:100%;justify-content:center;gap:0}
+.dshm-player--immersive .dshm-mvStage{width:100%;height:100%;max-height:none;aspect-ratio:auto;border-radius:0;box-shadow:none;cursor:default}
+.dshm-player--immersive .dshm-playerRight{display:none}
+.dshm-player--immersive .dshm-playerTop{position:absolute;inset:0 0 auto;z-index:3;padding:12px 20px;color:#fff;background:linear-gradient(rgba(0,0,0,.68),transparent);transition:opacity .2s var(--dshm-ease)}
+.dshm-player--immersive .dshm-playerControls{position:absolute;left:0;right:0;bottom:0;z-index:3;width:100%;padding:52px 40px 18px;gap:12px;background:linear-gradient(transparent,rgba(0,0,0,.88));transition:opacity .2s var(--dshm-ease)}
+.dshm-player--immersive .dshm-playerMeta,.dshm-player--immersive .dshm-progress,.dshm-player--immersive .dshm-playerTransport{width:min(94%,1100px)}
+.dshm-player--immersive .dshm-playerTitle{color:#fff}
+.dshm-player--immersive .dshm-playerArtist{color:rgba(255,255,255,.72)}
+.dshm-player--immersive .dshm-playerRound{color:#fff;border-color:rgba(255,255,255,.3);background:rgba(0,0,0,.35)}
+.dshm-player--immersive .dshm-playerRound:hover:not(:disabled){color:#fff;background:rgba(255,255,255,.18)}
+.dshm-player--immersive .dshm-playerTransportBtn{color:#fff}
+.dshm-player--immersive .dshm-playerTransportBtn:hover:not(:disabled){background:rgba(255,255,255,.16)}
+.dshm-player--immersive .dshm-playerTransportBtn--play{color:#111;background:#fff}
+.dshm-player--immersive .dshm-playerTransportBtn--on{color:#fff;background:rgba(255,255,255,.18)}
+.dshm-player--immersive .dshm-playerVolume{color:#fff}
+.dshm-player--idle{cursor:none}
+.dshm-player--idle .dshm-playerTop,.dshm-player--idle .dshm-playerControls{opacity:0;pointer-events:none}
+@media (max-width:760px){.dshm-player--immersive .dshm-playerControls{padding:46px 16px 12px}.dshm-player--immersive .dshm-playerTop{padding:8px 12px}}
 .dshm-mvStage{position:relative;width:100%;aspect-ratio:1;background:#000;border-radius:10px;overflow:hidden;box-shadow:0 26px 60px rgba(0,0,0,.45)}
 .dshm-mvPrep{position:absolute;inset:0;z-index:2;flex-direction:column;justify-content:center;align-items:center;gap:10px;padding:0 18px;color:#fff;text-align:center;background:rgba(0,0,0,.62);display:flex}
 .dshm-mvPrepText{font-size:13px;font-weight:500}
@@ -1352,6 +1391,17 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
         16, h("span", { className: "dshm-glyph" }, "⋯")),
       star: h("svg", { width: 18, height: 18, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", strokeWidth: 1.3, strokeLinejoin: "round" }, h("path", { d: "M8 1.9l1.85 3.9 4.3.55-3.15 2.95.8 4.25L8 11.5l-3.8 2.05.8-4.25L1.85 6.35l4.3-.55z" })),
       starFill: h("svg", { width: 18, height: 18, viewBox: "0 0 16 16", fill: "currentColor" }, h("path", { d: "M8 1.9l1.85 3.9 4.3.55-3.15 2.95.8 4.25L8 11.5l-3.8 2.05.8-4.25L1.85 6.35l4.3-.55z" })),
+      // 网页全屏 / 原生全屏（插件自绘；DSH 图标集没有这一组）
+      theater: h("svg", { width: 17, height: 17, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", strokeWidth: 1.3 },
+        h("rect", { x: 1.5, y: 3, width: 13, height: 10, rx: 1.6 }),
+        h("path", { d: "M5 6.2h6v3.6H5z", fill: "currentColor", stroke: "none" })),
+      theaterExit: h("svg", { width: 17, height: 17, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", strokeWidth: 1.3 },
+        h("rect", { x: 1.5, y: 3, width: 13, height: 10, rx: 1.6 }),
+        h("path", { d: "M3.8 5.8h8.4v4.4H3.8z" })),
+      fullscreen: h("svg", { width: 17, height: 17, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", strokeWidth: 1.4, strokeLinecap: "round", strokeLinejoin: "round" },
+        h("path", { d: "M6 2H2v4M10 2h4v4M14 10v4h-4M6 14H2v-4" })),
+      fullscreenExit: h("svg", { width: 17, height: 17, viewBox: "0 0 16 16", fill: "none", stroke: "currentColor", strokeWidth: 1.4, strokeLinecap: "round", strokeLinejoin: "round" },
+        h("path", { d: "M2 6h4V2M14 6h-4V2M10 14v-4h4M6 14v-4H2" })),
     };
 
     /**
@@ -2029,7 +2079,7 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
         /** 收起全屏播放器：closing 播完退出动画再置 closed（定时器归 player）。 */
         closePlayer: () => {
           if (core.state.playerPhase !== "open" || core.playerCloseTimer !== null) return;
-          core.set({ playerPhase: "closing" });
+          core.set({ playerPhase: "closing", webFullscreen: false });
           core.playerCloseTimer = setTimeout(() => {
             core.playerCloseTimer = null;
             // ⚠️ 这里**禁止**用 `disposed` 早退（第 16 轮回归）：halt() 已经把句柄
@@ -2043,6 +2093,8 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
           }, 200);
         },
         toggleMvBig: () => core.set({ mvBig: !core.state.mvBig }),
+        toggleWebFullscreen: () => core.set({ webFullscreen: !core.state.webFullscreen }),
+        setWebFullscreen: (open) => core.set({ webFullscreen: open === true }),
         setZoomOpen: (open) => core.set({ zoomOpen: open === true }),
         /**
          * activation 租约：**取号**。设备与 player 实例都是页级的，而「哪一代还有权操作
@@ -2132,6 +2184,7 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
             match: null,
             playerPhase: "closed",
             mvBig: false,
+            webFullscreen: false,
             zoomOpen: false,
           });
           if ("mediaSession" in navigator) {
@@ -3960,6 +4013,7 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
          */
         playerPhase: "closed",
         mvBig: false,
+        webFullscreen: false,
         zoomOpen: false,
       };
       audio.volume = state.volume;
@@ -5707,11 +5761,86 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
       /** 封面放大预览（只给音频封面）与 MV 就地放大：同样放进 player store 跨卸载保留。 */
       const zoomOpen = state.zoomOpen;
       const mvBig = state.mvBig;
+      const webFullscreen = state.webFullscreen;
       /** MV 画面槽（媒体元素会被搬进来）与隐藏停靠位（弹层关着时停在这儿）。 */
       const mvStageRef = useRef(null);
       const mvParkRef = useRef(null);
+      const playerRef = useRef(null);
+      const [nativeFullscreen, setNativeFullscreen] = React.useState(false);
+      const [controlsIdle, setControlsIdle] = React.useState(false);
+      const immersive = webFullscreen || nativeFullscreen;
       const isVideo = currentTrack !== undefined && currentTrack.kind === "video";
       const mvState = state.mv;
+
+      const exitNativeFullscreen = () => {
+        const exit = document.exitFullscreen;
+        if (typeof exit !== "function") return;
+        const result = exit.call(document) as Promise<void> | undefined;
+        if (result !== undefined && typeof result.catch === "function") result.catch(() => {});
+      };
+      const toggleWebFullscreen = () => {
+        if (nativeFullscreen) exitNativeFullscreen();
+        player.toggleWebFullscreen();
+      };
+      const toggleNativeFullscreen = () => {
+        if (nativeFullscreen) {
+          exitNativeFullscreen();
+          return;
+        }
+        if (player.getState().webFullscreen) player.setWebFullscreen(false);
+        const element = playerRef.current as HTMLElement | null;
+        if (element === null || typeof element.requestFullscreen !== "function") return;
+        const result = element.requestFullscreen();
+        if (result !== undefined && typeof result.catch === "function") result.catch(() => {});
+      };
+      const closeFullPlayer = () => {
+        if (document.fullscreenElement != null) exitNativeFullscreen();
+        player.closePlayer();
+      };
+
+      // 原生全屏由浏览器驱动：按钮、F、浏览器自己的 Esc 都走同一个 fullscreenchange。
+      React.useEffect(() => {
+        const onChange = () => setNativeFullscreen(document.fullscreenElement === playerRef.current);
+        document.addEventListener("fullscreenchange", onChange);
+        return () => {
+          document.removeEventListener("fullscreenchange", onChange);
+          if (document.fullscreenElement === playerRef.current) exitNativeFullscreen();
+        };
+      }, []);
+      // 收起播放器时不要把人留在系统全屏里。
+      React.useEffect(() => {
+        if (!playerOpen && document.fullscreenElement === playerRef.current) exitNativeFullscreen();
+      }, [playerOpen]);
+      // 播放器里从 MV 切到纯音频：退出两种全屏，别让音频铺满屏幕。
+      React.useEffect(() => {
+        if (isVideo) return;
+        if (player.getState().webFullscreen) player.setWebFullscreen(false);
+        if (nativeFullscreen) exitNativeFullscreen();
+      }, [isVideo, nativeFullscreen]);
+      // 沉浸模式播放时 2.6s 无操作淡出控制层；暂停/移动/按键立即唤醒。
+      React.useEffect(() => {
+        if (!immersive || !state.playing) {
+          setControlsIdle(false);
+          return undefined;
+        }
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const wake = () => {
+          setControlsIdle(false);
+          if (timer !== null) clearTimeout(timer);
+          timer = setTimeout(() => setControlsIdle(true), 2600);
+        };
+        wake();
+        const element = playerRef.current as HTMLElement | null;
+        element?.addEventListener("pointermove", wake);
+        element?.addEventListener("pointerdown", wake);
+        element?.addEventListener("keydown", wake);
+        return () => {
+          if (timer !== null) clearTimeout(timer);
+          element?.removeEventListener("pointermove", wake);
+          element?.removeEventListener("pointerdown", wake);
+          element?.removeEventListener("keydown", wake);
+        };
+      }, [immersive, state.playing]);
       useEffect(() => () => {
         // 视图卸载（切回对话/关标签）：把媒体元素搬回 body 停靠位，别让它离开文档。
         const media = player.media();
@@ -5744,9 +5873,11 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
             // 现场读 store 而不是闭包捕获：这个 effect 只在 playerOpen 变化时重挂，
             // 捕获 mvBig / zoomOpen 会读到旧值，Esc 的手感就取决于上一次渲染。
             const live = player.getState();
+            if (document.fullscreenElement != null) { exitNativeFullscreen(); return; }
+            if (live.webFullscreen) { player.setWebFullscreen(false); return; }
             if (live.mvBig) { player.toggleMvBig(); return; }    // Esc：先还原 MV 大小
             if (live.zoomOpen) { player.setZoomOpen(false); return; } // 再关封面预览，最后才关播放器
-            player.closePlayer();
+            closeFullPlayer();
             return;
           }
           // 输入框里的按键归输入框（搜索框等），不是全局播放快捷键。
@@ -5757,6 +5888,16 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
           const editable = target !== null && typeof target === "object" && target.isContentEditable === true;
           if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || editable) return;
           if (player.getState().playerPhase === "closed") return;
+          if (isVideo && (event.key === "f" || event.key === "F")) {
+            event.preventDefault();
+            toggleNativeFullscreen();
+            return;
+          }
+          if (isVideo && (event.key === "t" || event.key === "T")) {
+            event.preventDefault();
+            toggleWebFullscreen();
+            return;
+          }
           if (event.key === " " || event.code === "Space") {
             // 焦点在按钮/链接上时空格是"点击它"，不能抢。
             if (tag === "BUTTON" || tag === "A") return;
@@ -5787,7 +5928,7 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
         };
         window.addEventListener("keydown", onKeyDown);
         return () => window.removeEventListener("keydown", onKeyDown);
-      }, [playerOpen]);
+      }, [playerOpen, isVideo, nativeFullscreen]);
       // 删除确认条在主视图里；弹层开着会把它盖住，所以进入确认态就自动收起弹层
       useEffect(() => {
         if (state.pendingDelete >= 0) player.closePlayer();
@@ -6233,10 +6374,15 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
       }, icon), label);
 
       const fullPlayer = playerOpen && h("div", {
+        ref: playerRef,
         // closing 阶段保留挂载 200ms 播退出动画，期间不接受交互
         className: "dshm-player"
           + (playerPhase === "closing" ? " dshm-player--closing" : "")
-          + (mvBig && isVideo ? " dshm-player--mvbig" : ""),
+          + (mvBig && isVideo && !immersive ? " dshm-player--mvbig" : "")
+          + (webFullscreen ? " dshm-player--theater" : "")
+          + (nativeFullscreen ? " dshm-player--nativefull" : "")
+          + (immersive ? " dshm-player--immersive" : "")
+          + (controlsIdle ? " dshm-player--idle" : ""),
         // 点空白处收起「⋯」菜单（菜单与 ⋯ 按钮自己 stopPropagation）
         onClick: () => setQueueMenu(null),
       },
@@ -6249,12 +6395,20 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
           withTipWrapped(h("button", {
             type: "button",
             className: "dshm-playerRound",
-            "aria-label": t("player.close"),
+            "aria-label": immersive
+              ? (nativeFullscreen ? t("player.exitFullscreen") : t("player.exitWebFullscreen"))
+              : t("player.close"),
             onClick: (event) => {
               event.stopPropagation();
-              player.closePlayer();
+              if (immersive) {
+                if (nativeFullscreen) exitNativeFullscreen();
+                if (webFullscreen) player.setWebFullscreen(false);
+                return;
+              }
+              closeFullPlayer();
             },
-          }, ICONS.chevronDown), t("player.close"), "bottom"),
+          }, immersive ? ICONS.fullscreenExit : ICONS.chevronDown),
+            immersive ? (nativeFullscreen ? t("player.exitFullscreen") : t("player.exitWebFullscreen")) : t("player.close"), "bottom"),
           // 参考 macOS Music：右上角是「喇叭图标 + 长条滑杆」
           h("div", { className: "dshm-playerVolume" },
             withTipWrapped(h("button", {
@@ -6278,6 +6432,26 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
             }), t("action.volume") + " " + volumePct + "%", "bottom"),
             rgButton("bottom"),
             eqButton("bottom"),
+            isVideo && withTipWrapped(h("button", {
+              type: "button",
+              className: "dshm-playerRound" + (webFullscreen ? " dshm-playerRound--on" : ""),
+              "aria-label": webFullscreen ? t("player.exitWebFullscreen") : t("player.webFullscreen"),
+              "aria-pressed": webFullscreen,
+              onClick: (event) => {
+                event.stopPropagation();
+                toggleWebFullscreen();
+              },
+            }, webFullscreen ? ICONS.theaterExit : ICONS.theater), webFullscreen ? t("player.exitWebFullscreen") : t("player.webFullscreen"), "bottom"),
+            isVideo && withTipWrapped(h("button", {
+              type: "button",
+              className: "dshm-playerRound" + (nativeFullscreen ? " dshm-playerRound--on" : ""),
+              "aria-label": nativeFullscreen ? t("player.exitFullscreen") : t("player.fullscreen"),
+              "aria-pressed": nativeFullscreen,
+              onClick: (event) => {
+                event.stopPropagation();
+                toggleNativeFullscreen();
+              },
+            }, nativeFullscreen ? ICONS.fullscreenExit : ICONS.fullscreen), nativeFullscreen ? t("player.exitFullscreen") : t("player.fullscreen"), "bottom"),
           ),
         ),
         h("div", { className: "dshm-playerBody" },
@@ -6288,11 +6462,17 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
             isVideo
               // 点画面 = 就地放大/还原（不另开预览层：视频留在原位，只是铺得更大）
               ? h("div", {
-                  className: "dshm-mvStage dshm-zoomable",
+                  className: "dshm-mvStage" + (immersive ? "" : " dshm-zoomable"),
                   ref: mvStageRef,
-                  onClick: (event) => { event.stopPropagation(); player.toggleMvBig(); },
-                  // 双击进系统全屏（原生 requestFullscreen，插件不自己造全屏）
-                  onDoubleClick: (event) => { event.stopPropagation(); const m = player.media(); if (m?.requestFullscreen !== undefined) void m.requestFullscreen(); },
+                  // 普通态点画面铺大；全屏态点画面是播放/暂停（和 YouTube 一致）。
+                  onClick: (event) => {
+                    event.stopPropagation();
+                    if (immersive) player.toggle(); else player.toggleMvBig();
+                  },
+                  onDoubleClick: (event) => {
+                    event.stopPropagation();
+                    if (!immersive) toggleNativeFullscreen();
+                  },
                 },
                   mvState !== null && mvState !== undefined && mvState.state !== "ready"
                     ? h("div", { className: "dshm-mvPrep" },
@@ -6334,6 +6514,7 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
                   onError: () => setCoverFailed(true),
                 })
               : h("div", { className: "dshm-playerArtFallback" }, ICONS.note),
+            h("div", { className: "dshm-playerControls" },
             h("div", { className: "dshm-playerMeta" },
               h("div", { className: "dshm-playerMetaText" },
                 // 歌名/歌手同样走右→左跑马灯（放得下就不动）
@@ -6400,6 +6581,7 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
                   state.mode === "one" ? " dshm-playerTransportBtn--on" : "",
                 ),
               ),
+            ),
             ),
           ),
           h("div", { className: "dshm-playerRight" },

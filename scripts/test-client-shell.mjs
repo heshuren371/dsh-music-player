@@ -490,6 +490,50 @@ check('clicking the MV surface enlarges the video in place', container.querySele
 await act(async () => { container.querySelector('.dshm-mvStage').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
 await settle(60);
 check('clicking it again restores the normal layout', container.querySelector('.dshm-player--mvbig') === null);
+
+// ── MV 网页全屏 / 原生全屏 ─────────────────────────────────────────────────
+{
+  const mvPlayer = container.querySelector('.dshm-player');
+  const webButton = mvPlayer?.querySelector('button[aria-label="player.webFullscreen"]');
+  check('MV full player exposes a web-fullscreen control', webButton !== null && mvPlayer?.querySelector('.dshm-playerControls') !== null);
+  await act(async () => { webButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(60);
+  check('web fullscreen fills the viewport and keeps custom controls', container.querySelector('.dshm-player--theater') !== null && container.querySelector('.dshm-player--immersive') !== null && container.querySelector('.dshm-playerControls .dshm-playerTransport') !== null);
+  await act(async () => { container.querySelector('button[aria-label="player.exitWebFullscreen"]').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(60);
+  check('exiting web fullscreen restores the player layout', container.querySelector('.dshm-player--theater') === null && container.querySelector('.dshm-player') !== null);
+  await act(async () => { container.querySelector('button[aria-label="player.webFullscreen"]').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(40);
+  await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
+  await settle(60);
+  check('Escape exits web fullscreen before closing the player', container.querySelector('.dshm-player--theater') === null && container.querySelector('.dshm-player') !== null);
+  await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 't', bubbles: true })); });
+  await settle(40);
+  check('T toggles web fullscreen', container.querySelector('.dshm-player--theater') !== null);
+  await act(async () => { dom.window.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 't', bubbles: true })); });
+  await settle(40);
+  check('T exits web fullscreen', container.querySelector('.dshm-player--theater') === null);
+
+  const target = container.querySelector('.dshm-player');
+  const priorFullscreen = Object.getOwnPropertyDescriptor(dom.window.document, 'fullscreenElement');
+  const priorExit = Object.getOwnPropertyDescriptor(dom.window.document, 'exitFullscreen');
+  const setFullscreen = (element) => {
+    Object.defineProperty(dom.window.document, 'fullscreenElement', { configurable: true, get: () => element });
+    dom.window.document.dispatchEvent(new dom.window.Event('fullscreenchange'));
+  };
+  Object.defineProperty(target, 'requestFullscreen', { configurable: true, value: async () => setFullscreen(target) });
+  Object.defineProperty(dom.window.document, 'exitFullscreen', { configurable: true, value: async () => setFullscreen(null) });
+  await act(async () => { target.querySelector('button[aria-label="player.fullscreen"]').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(60);
+  check('native fullscreen requests the whole player element', target.classList.contains('dshm-player--nativefull') && target.querySelector('button[aria-label="player.exitFullscreen"]') !== null);
+  await act(async () => { target.querySelector('button[aria-label="player.exitFullscreen"]').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
+  await settle(60);
+  check('exiting native fullscreen clears the immersive class', !target.classList.contains('dshm-player--nativefull') && target.querySelector('button[aria-label="player.fullscreen"]') !== null);
+  if (priorFullscreen === undefined) delete dom.window.document.fullscreenElement;
+  else Object.defineProperty(dom.window.document, 'fullscreenElement', priorFullscreen);
+  if (priorExit === undefined) delete dom.window.document.exitFullscreen;
+  else Object.defineProperty(dom.window.document, 'exitFullscreen', priorExit);
+}
 await act(async () => { container.querySelector('.dshm-playerTop .dshm-playerRound').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
 await settle(260);
 

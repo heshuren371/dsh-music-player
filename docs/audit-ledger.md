@@ -2695,3 +2695,14 @@ view-persistence A5 仍通过。对照：去掉 mediaFilter 过滤 → MV 网格
 门禁：test-import 覆盖“第二任务并行接受 / 批量 2 条 / 取消一个不影响另一个 / 临时文件清理”；
 client-shell 覆盖多行批量、关闭不取消、重开恢复任务、角标与后台完成后刷新。36 套全绿。
 对照：把 `IMPORT_CONCURRENCY` 改成 1 → 第二任务进入 queued，并行断言红；恢复后全绿。
+
+## 5.69 第 59 轮 —— MV 网页全屏 / 原生全屏
+
+宽屏模式保留（点画面铺大）。新增两个互斥的全屏档：网页全屏把 `.dshm-player` 固定到视口
+（`--theater`，z-index 灯箱层，不进入系统全屏）；原生全屏对整个播放器容器
+`requestFullscreen()`（不是只对 `<video>`），因此自定义控制条仍可用。两档共用沉浸布局：
+视频铺满、隐藏队列/封面背景、底部渐变控制层、2.6s 无操作淡出、`F` 原生 / `T` 网页 /
+Esc 优先退全屏、切到纯音频自动退出。左上角在沉浸态先退全屏，不直接关播放器。
+
+门禁：client-shell 覆盖网页全屏进入/退出/Escape/T 键、原生全屏 fake Fullscreen API
+进入/退出、关闭语义；36 套全绿。对照：去掉 `dshm-player--theater` class → 网页全屏断言红。
