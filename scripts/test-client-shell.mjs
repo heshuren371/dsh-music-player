@@ -151,6 +151,7 @@ const tracks = [
 ];
 const library = { dir: '/music', tracks, scanning: false, scanParsed: tracks.length, scanTotal: tracks.length, truncated: false, skippedPackages: 0, scannedAt: 1 };
 const calls = [];
+const videoCapsPosts = [];
 const importPosts = [];
 const importCancelCalls = [];
 let importJobsState = [];
@@ -163,6 +164,11 @@ const mockFetch = async (url, init) => {
   if (legacyOnly && target.startsWith('/api/dsh-music/')) return new dom.window.Response('not found', { status: 404 });
   const suffix = target.replace('/dsh-music/api', '/api/dsh-music');
   if (suffix.includes('/api/dsh-music/session')) return new dom.window.Response(JSON.stringify({ systemArtBase: SYSTEM_ART_BASE }), { headers: { 'content-type': 'application/json' } });
+  if (suffix.includes('/api/dsh-music/caps')) {
+    const body = JSON.parse(String(init?.body ?? '{}'));
+    videoCapsPosts.push(body);
+    return new dom.window.Response(JSON.stringify({ hevc: body.hevc === true, av1: body.av1 === true }), { headers: { 'content-type': 'application/json' } });
+  }
   if (suffix.includes('/api/dsh-music/library') || suffix.includes('/api/dsh-music/refresh')) return new dom.window.Response(JSON.stringify(library), { headers: { 'content-type': 'application/json' } });
   if (suffix.includes('/api/dsh-music/cover')) return new dom.window.Response('', { status: 404 });
   if (suffix.includes('/api/dsh-music/import-probe')) {
@@ -268,6 +274,7 @@ await settle(300);
 
 check('platform seed @deepseek-ai/dsh-client-ui-primitives is required once', TooltipRequests === 1, 'calls=' + TooltipRequests);
 check('request URL base moved under /api (desktop only forwards /api/*)', calls.some((u) => u.startsWith('/api/dsh-music/library')), calls.join(','));
+check('the client reports its real video decoder capabilities', videoCapsPosts.length >= 1 && typeof videoCapsPosts[0].hevc === 'boolean' && typeof videoCapsPosts[0].av1 === 'boolean', JSON.stringify(videoCapsPosts));
 
 // ── 官方图标（0.1.7+ 的 Regular 命名） ──────────────────────────────────────
 const iconNames = new Set(Array.from(container.querySelectorAll('[data-icon]')).map((el) => el.getAttribute('data-icon')));

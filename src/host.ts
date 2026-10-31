@@ -833,26 +833,30 @@ function mvScaleFilter(track) {
  * ffmpeg 参数。档位按「成功率」递进：
  *  copy  = 音视频原样搬进 MP4（最快，但源里只要有 MP4 装不下的编码就会失败，
  *          实测 AVI 里的 PCM 音频就会让 -c copy 直接报错）；
- *  audio = 视频原样 + 音频转 AAC（绝大多数情况够用，视频零损失）；
- *  full  = 视频重编码成 H.264（HEVC 这类没有解码器的编码只能走这条）。
+ *  audio = 视频原样 + 音频转 AAC（视频零损失）；
+ *  fast  = 视频 ultrafast + 1080P 上限，音频优先 copy；
+ *  full  = 视频 veryfast 原分辨率，音频仍优先 copy（质量兜底）；
+ *  safe  = 最后兜底：视频原分辨率 + 音频 AAC 256k（音频 copy 不兼容时才走）。
  */
 export function mvFfmpegArgs(track, attempt, output) {
   const args = ['-hide_banner', '-nostdin', '-y', '-i', track.path, '-map', '0:v:0?', '-map', '0:a:0?', '-sn', '-dn'];
   if (attempt === 'copy') {
     args.push('-c', 'copy');
   } else if (attempt === 'audio') {
-    args.push('-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k');
+    args.push('-c:v', 'copy', '-c:a', 'aac', '-b:a', '256k');
   } else {
-    // fast：速度优先（ultrafast + 1080P 上限 + 可搬运音频 copy）。
-    // full：兼容兜底（veryfast + 原分辨率 + AAC 重编码）。
+    // fast：速度优先（ultrafast + 1080P 上限 + 音频优先 copy）。
+    // full：质量兜底（veryfast + 原分辨率 + 音频优先 copy）。
+    // safe：兼容兜底（veryfast + 原分辨率 + AAC 256k）。
     const fast = attempt === 'fast';
     const scale = fast ? mvScaleFilter(track) : null;
     if (scale !== null) args.push('-vf', scale);
     args.push('-c:v', 'libx264', '-preset', fast ? 'ultrafast' : 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p');
-    if (fast && typeof track.audioCodec === 'string' && MV_MP4_AUDIO_COPY.has(track.audioCodec)) {
+    if ((attempt === 'fast' || attempt === 'full')
+      && typeof track.audioCodec === 'string' && MV_MP4_AUDIO_COPY.has(track.audioCodec)) {
       args.push('-c:a', 'copy');
     } else {
-      args.push('-c:a', 'aac', '-b:a', '192k');
+      args.push('-c:a', 'aac', '-b:a', '256k');
     }
   }
   // 输出文件名带 .part（写完才原子改名），ffmpeg 没法从后缀猜格式，必须显式 -f mp4。
@@ -948,8 +952,8 @@ async function mvPrepare(track, mode, lengthSeconds, retry = false) {
   // 档位：音轨已知解不了时**从 `audio` 起**——`copy` 档把原音轨原样搬进 MP4，Chromium
   // 照样解不了，等于白跑一遍（而且产物会被当成 ready 缓存下来）。
   const attempts = mode === 'remux'
-    ? (audioNeedsTranscode(track) ? ['audio', 'fast', 'full'] : ['copy', 'audio', 'fast', 'full'])
-    : ['fast', 'full'];
+    ? (audioNeedsTranscode(track) ? ['audio', 'fast', 'full', 'safe'] : ['copy', 'audio', 'fast', 'full', 'safe'])
+    : ['fast', 'full', 'safe'];
   void (async () => {
     for (const attempt of attempts) {
       if (job.cancelled) return;
@@ -4348,8 +4352,8 @@ function createHost(ctx) {
       const output = await uniqueTargetPath(dir, base + ' (MV).mp4');
       // 与 mvPrepare 同一套档位纪律：音轨已知解不了时从 `audio` 起。
       const attempts = mode === 'remux'
-        ? (audioNeedsTranscode(target0) ? ['audio', 'fast', 'full'] : ['copy', 'audio', 'fast', 'full'])
-        : ['fast', 'full'];
+        ? (audioNeedsTranscode(target0) ? ['audio', 'fast', 'full', 'safe'] : ['copy', 'audio', 'fast', 'full', 'safe'])
+        : ['fast', 'full', 'safe'];
       let converted = false;
       let lastLog = '';
       const conversionJob: MvJob = { state: 'preparing', progress: 0, error: null, child: null, log: '', attempt: null, finishedAt: null, cancelled: false, timedOut: false };

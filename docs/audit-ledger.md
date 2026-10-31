@@ -2706,3 +2706,16 @@ Esc 优先退全屏、切到纯音频自动退出。左上角在沉浸态先退�
 
 门禁：client-shell 覆盖网页全屏进入/退出/Escape/T 键、原生全屏 fake Fullscreen API
 进入/退出、关闭语义；36 套全绿。对照：去掉 `dshm-player--theater` class → 网页全屏断言红。
+
+## 5.70 第 60 轮 —— 原生解码上报 / 音频优先 copy
+
+客户端此前从不调用 `/api/caps`，宿主 `mvClientCaps` 永远是 `hevc:false`，本可直出的 HEVC MV
+也被转码。现在加载时探测 MSE / `canPlayType` 并上报 HEVC/AV1；宿主已有 `mvPlan` 的 direct
+分支，因此浏览器支持时不再转码。检测失败按 false，宁转码不黑屏。
+
+转码链的 full 档原先无条件把音频转 AAC 192k；现在 fast/full 都优先 `-c:a copy`
+（AAC/MP3/ALAC），只有 copy 不兼容时才落 `safe` 档 AAC 256k。音频质量不再因“兜底”被无谓重编码。
+
+门禁：client-shell 校验 `/caps` 上报；test-mv 校验 fast/full copy、safe 256k 与 caps→direct；
+test-mv 既有 caps 直出测试保持。36 套全绿。
+对照：去掉 /caps 上报 → 客户端上报断言红；去掉 full copy → test-mv 参数断言红；恢复后全绿。

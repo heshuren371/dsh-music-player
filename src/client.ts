@@ -1526,6 +1526,29 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
       return minutes + ":" + String(seconds).padStart(2, "0");
     }
 
+    /**
+     * 浏览器实际解码能力。宿主默认 hevc=false，不上报就会把本可直出的 HEVC 转码；
+     * 这里用 MSE / canPlayType 探测，加载时 POST /caps。探测失败按 false，宁转勿黑屏。
+     */
+    function detectVideoCaps() {
+      const video = document.createElement("video");
+      const can = (type) => {
+        try {
+          const mse = (window as unknown as { MediaSource?: { isTypeSupported?: (value: string) => boolean } }).MediaSource;
+          if (mse !== undefined && typeof mse.isTypeSupported === "function" && mse.isTypeSupported(type)) return true;
+        } catch { /* 没有 MSE：继续问元素 */ }
+        try {
+          return video.canPlayType(type) !== "";
+        } catch {
+          return false;
+        }
+      };
+      return {
+        hevc: can('video/mp4; codecs="hvc1.1.6.L93.B0"') || can('video/mp4; codecs="hev1.1.6.L93.B0"'),
+        av1: can('video/mp4; codecs="av01.0.05M.08"') || can('video/webm; codecs="av01.0.05M.08"'),
+      };
+    }
+
     async function api(path: string, options?: RequestInit) {
       // 调用点写的是宿主端点名（/api/library…），基址本身已经带了 /api，
       // 这里把重复的 /api 段折叠掉，避免出现 /api/dsh-music/api/library。
@@ -3284,6 +3307,11 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
     const load = async () => {
       core.set({ loading: true, error: null });
       try {
+        await api("/api/caps", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(detectVideoCaps()),
+        }).catch(() => { /* 旧宿主没有 /caps：按宿主默认能力走 */ });
         applyLibrary(await api("/api/library"));
       } catch (error) {
         core.set({ error: error instanceof Error ? error.message : String(error) });

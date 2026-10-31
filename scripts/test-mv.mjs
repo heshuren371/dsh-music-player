@@ -65,8 +65,10 @@ const check = (label, ok, detail) => { if (!ok) failures += 1; console.log((ok ?
 // 转码参数：fast 档必须 ultrafast + 1080P 上限 + 可搬运音频 copy；full 档保留兼容兜底。
 const fastArgs = mvFfmpegArgs({ path: '/tmp/x', width: 3840, height: 2160, audioCodec: 'aac' }, 'fast', '/tmp/out.mp4');
 const fallbackArgs = mvFfmpegArgs({ path: '/tmp/x', width: 3840, height: 2160, audioCodec: 'aac' }, 'full', '/tmp/out.mp4');
+const safeArgs = mvFfmpegArgs({ path: '/tmp/x', width: 3840, height: 2160, audioCodec: 'aac' }, 'safe', '/tmp/out.mp4');
 check('fast transcode uses ultrafast, scales long edge to 1080P and copies AAC', fastArgs.includes('ultrafast') && fastArgs.includes('scale=1920:-2') && fastArgs.includes('copy'), fastArgs.join(' '));
-check('full fallback keeps veryfast at original resolution and re-encodes audio', fallbackArgs.includes('veryfast') && !fallbackArgs.includes('scale=1920:-2') && fallbackArgs.includes('aac'), fallbackArgs.join(' '));
+check('full fallback keeps veryfast/original resolution and still copies AAC', fallbackArgs.includes('veryfast') && !fallbackArgs.includes('scale=1920:-2') && fallbackArgs.includes('copy'), fallbackArgs.join(' '));
+check('safe fallback re-encodes audio only when copy is unavailable, at 256k', safeArgs.includes('veryfast') && safeArgs.includes('aac') && safeArgs.includes('256k') && !safeArgs.includes('copy'), safeArgs.join(' '));
 
 
 
