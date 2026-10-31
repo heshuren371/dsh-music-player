@@ -506,6 +506,7 @@ check('clicking it again restores the normal layout', container.querySelector('.
   await act(async () => { webButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   await settle(60);
   check('web fullscreen fills the viewport and keeps custom controls', container.querySelector('.dshm-player--theater') !== null && container.querySelector('.dshm-player--immersive') !== null && container.querySelector('.dshm-playerControls .dshm-playerTransport') !== null);
+  check('theater CSS outranks the base player position and z-index', /\.dshm-player\.dshm-player--theater\{[^}]*position:fixed[^}]*z-index:var\(--dshm-z-lightbox\)/.test(pluginCss), 'theater specificity');
   await act(async () => { container.querySelector('button[aria-label="player.exitWebFullscreen"]').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); });
   await settle(60);
   check('exiting web fullscreen restores the player layout', container.querySelector('.dshm-player--theater') === null && container.querySelector('.dshm-player') !== null);

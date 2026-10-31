@@ -2710,7 +2710,7 @@ Esc 优先退全屏、切到纯音频自动退出。左上角在沉浸态先退�
 ## 5.70 第 60 轮 —— 原生解码上报 / 音频优先 copy
 
 客户端此前从不调用 `/api/caps`，宿主 `mvClientCaps` 永远是 `hevc:false`，本可直出的 HEVC MV
-也被转码。现在加载时探测 MSE / `canPlayType` 并上报 HEVC/AV1；宿主已有 `mvPlan` 的 direct
+也被转码。现在加载时只探测 `<video>` 的 `canPlayType`（MSE 支持不等于直出）并上报 HEVC/AV1；宿主已有 `mvPlan` 的 direct
 分支，因此浏览器支持时不再转码。检测失败按 false，宁转码不黑屏。
 
 转码链的 full 档原先无条件把音频转 AAC 192k；现在 fast/full 都优先 `-c:a copy`
@@ -2719,3 +2719,18 @@ Esc 优先退全屏、切到纯音频自动退出。左上角在沉浸态先退�
 门禁：client-shell 校验 `/caps` 上报；test-mv 校验 fast/full copy、safe 256k 与 caps→direct；
 test-mv 既有 caps 直出测试保持。36 套全绿。
 对照：去掉 /caps 上报 → 客户端上报断言红；去掉 full copy → test-mv 参数断言红；恢复后全绿。
+
+## 5.71 第 61 轮 —— 代码审查清理
+
+审查发现并修复：
+- `.dshm-player--theater` 被后面的同优先级 `.dshm-player{position:absolute}` 覆盖，网页全屏实际没有 fixed；
+  改为 `.dshm-player.dshm-player--theater` 并补原生 `:fullscreen` 的 fixed/inset。补静态级联断言。
+- `safe` 档在音频不可 copy 时与 `full` 参数完全相同；改为只在 AAC/MP3/ALAC 可 copy 时追 safe，
+  并抽共享 `mvAttempts()` 消除两处数组漂移。
+- caps 探测去掉 MSE OR：MSE 支持不等于 `<video>` 直出支持，只上报 canPlayType。
+- web 全屏状态收回 MusicView 局部；`createPlayer` 从 841 行回到 836，审计阈值由 845 收紧到 836。
+- 全屏 API 补 WebKit 前缀与同步异常兜底；全屏时键盘唤醒控制层；补回 wide 模式控制宽度规则；
+  修正交叉淡化“默认关闭”的死注释。
+- 源码无 `console.log/debug` 死日志、无未引用导出；`console.info/error` 均为运行诊断保留。
+
+门禁：36 套全绿；review 子代理指出的 CSS 级联盲点、safe 重复、caps 过度乐观均已加断言。

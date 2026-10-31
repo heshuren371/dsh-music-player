@@ -43,7 +43,7 @@ D0b 断言「`?crossfade=0` 仍可回到旧路径」；RG / 均衡器 / CORS 等
 | `媒体事件随元素迁移` | D12–D13：交换后活动元素仍驱动 timeupdate/ended | 39 | AGENTS |
 | `过渡窗口交互` | D14–D15：窗口内 seek 与 pause 落在活动元素上 | 39 | AGENTS |
 | `现场版与封面兜底` | `test-match.mjs`：live 查询保留标记、现场候选优先、无封面专辑兜底；三组对照全红 | 48 | AGENTS |
-| `createPlayer 体积棘轮` | `src/client.ts` 的 `createPlayer` 行数 ≤845（只许变小）；对照：加 6 行 → 红 | 42 | AGENTS I-22 |
+| `createPlayer 体积棘轮` | `src/client.ts` 的 `createPlayer` 行数 ≤836（只许变小）；对照：加 6 行 → 红 | 42 | AGENTS I-22 |
 | `静音与 CSS 优先级` | D21 喇叭静音（设定值保留/输出归零/再点恢复/拖条解除）；client CSS 无 `!important`（静态） | 40 | AGENTS |
 | `列表与反馈体验` | 行键盘播放、搜索空态+清除、错误关闭、缓冲反馈（D20） | 40 | AGENTS |
 | `弹层与键盘契约` | 弹层 dialog 语义/焦点锁/滚动锁/Escape + 确认条 Escape + D16–D19 键盘 | 39 | AGENTS |

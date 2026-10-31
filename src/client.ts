@@ -238,8 +238,6 @@ interface PlayerState {
   playerPhase: "closed" | "open" | "closing";
   /** MV 就地放大：同 playerPhase，跨视图卸载保留。 */
   mvBig: boolean;
-  /** 网页全屏（铺满浏览器视口，不进入系统全屏）；MV 专用。 */
-  webFullscreen: boolean;
   /** 封面放大预览：同 playerPhase，跨视图卸载保留。 */
   zoomOpen: boolean;
 }
@@ -341,9 +339,6 @@ interface MusicPlayerApi {
   closePlayer(): void;
   /** MV 就地放大开关（跨视图卸载保留）。 */
   toggleMvBig(): void;
-  /** 网页全屏（铺满视口，不进入系统全屏）。 */
-  toggleWebFullscreen(): void;
-  setWebFullscreen(open: boolean): void;
   /** 封面放大预览开关（跨视图卸载保留）。 */
   setZoomOpen(open: boolean): void;
   next(): void;
@@ -1094,13 +1089,14 @@ body:has(.dshm-root) [data-width-handle]{display:none}
 .dshm-player--mvbig .dshm-playerBody{grid-template-columns:minmax(0,1fr);padding:0 26px 22px}
 .dshm-player--mvbig .dshm-playerRight{display:none}
 .dshm-player--mvbig .dshm-playerStage{--dshm-art:min(98%,1240px)}
+.dshm-player--mvbig .dshm-playerMeta,.dshm-player--mvbig .dshm-progress,.dshm-player--mvbig .dshm-playerTransport{width:min(92%,1040px)}
 .dshm-player--mvbig .dshm-mvStage{aspect-ratio:16/9;max-height:82vh;background:#000}
 
 .dshm-playerControls{width:100%;min-width:0;flex-direction:column;align-items:center;gap:16px;display:flex}
 /* 网页全屏：铺满浏览器视口，不进入系统全屏 */
-.dshm-player--theater{position:fixed;inset:0;width:100vw;height:100vh;z-index:var(--dshm-z-lightbox);background:#000}
+.dshm-player.dshm-player--theater{position:fixed;inset:0;width:100vw;height:100vh;z-index:var(--dshm-z-lightbox);background:#000}
 /* 原生全屏：fullscreen 元素自己填满屏幕 */
-.dshm-player--nativefull:fullscreen{width:100%;height:100%;background:#000}
+.dshm-player.dshm-player--nativefull:fullscreen,.dshm-player.dshm-player--nativefull:-webkit-full-screen{position:fixed;inset:0;width:100%;height:100%;z-index:var(--dshm-z-lightbox);background:#000}
 .dshm-player--immersive{background:#000}
 .dshm-player--immersive .dshm-playerArt-bg,.dshm-player--immersive .dshm-playerScrim{display:none}
 .dshm-player--immersive .dshm-playerBody{position:absolute;inset:0;display:block;padding:0}
@@ -1528,15 +1524,12 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
 
     /**
      * 浏览器实际解码能力。宿主默认 hevc=false，不上报就会把本可直出的 HEVC 转码；
-     * 这里用 MSE / canPlayType 探测，加载时 POST /caps。探测失败按 false，宁转勿黑屏。
+     * 这里只问 `<video>` 的 canPlayType（MSE 支持不等于直出支持），加载时 POST /caps。
+     * 探测失败按 false，宁转勿黑屏。
      */
     function detectVideoCaps() {
       const video = document.createElement("video");
       const can = (type) => {
-        try {
-          const mse = (window as unknown as { MediaSource?: { isTypeSupported?: (value: string) => boolean } }).MediaSource;
-          if (mse !== undefined && typeof mse.isTypeSupported === "function" && mse.isTypeSupported(type)) return true;
-        } catch { /* 没有 MSE：继续问元素 */ }
         try {
           return video.canPlayType(type) !== "";
         } catch {
@@ -2102,7 +2095,7 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
         /** 收起全屏播放器：closing 播完退出动画再置 closed（定时器归 player）。 */
         closePlayer: () => {
           if (core.state.playerPhase !== "open" || core.playerCloseTimer !== null) return;
-          core.set({ playerPhase: "closing", webFullscreen: false });
+          core.set({ playerPhase: "closing" });
           core.playerCloseTimer = setTimeout(() => {
             core.playerCloseTimer = null;
             // ⚠️ 这里**禁止**用 `disposed` 早退（第 16 轮回归）：halt() 已经把句柄
@@ -2116,8 +2109,6 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
           }, 200);
         },
         toggleMvBig: () => core.set({ mvBig: !core.state.mvBig }),
-        toggleWebFullscreen: () => core.set({ webFullscreen: !core.state.webFullscreen }),
-        setWebFullscreen: (open) => core.set({ webFullscreen: open === true }),
         setZoomOpen: (open) => core.set({ zoomOpen: open === true }),
         /**
          * activation 租约：**取号**。设备与 player 实例都是页级的，而「哪一代还有权操作
@@ -2207,7 +2198,6 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
             match: null,
             playerPhase: "closed",
             mvBig: false,
-            webFullscreen: false,
             zoomOpen: false,
           });
           if ("mediaSession" in navigator) {
@@ -3963,7 +3953,6 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
       /** 防削波（fooyin 的 PreventClipping）：默认**恒开**。增益可能把峰值推过满刻度。 */
       const RG_PREVENT_CLIPPING = true;
 
-
       const prefs = loadPrefs();
       let state: PlayerState = {
         dir: null,
@@ -4041,7 +4030,6 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
          */
         playerPhase: "closed",
         mvBig: false,
-        webFullscreen: false,
         zoomOpen: false,
       };
       audio.volume = state.volume;
@@ -4163,7 +4151,6 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
       const runtime = createRuntime(runtimeCore);
       const { stopAudio, ensureStreamBase, streamUrl, logSeek, logAttach, seekAudio, applyLibrary, load, bindElement, targetVolume, rgForTrack, nextTrackForPrefetch, scheduleRgPoll, prepareVideo, stopWasmVideo, prefetchWaveform, playIndex, effective, coverFor, visibleRows, next, prev, onTimeupdate, coverUrl, onPlay, onPause, onPageHide, onEnded, onLoadedMetadata, onWaiting, onResumed, onError } = runtime;
 
-
       /**
        * 断开一个本代接进设备的节点（音源 / 电平）。释放路径要容忍三件事：空值、
        * 已经断开、以及测试夹具里没有 `disconnect` 的假节点。
@@ -4194,7 +4181,6 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
        */
       /** 日志里不得出现能力 token（§2.9 凭据不进日志）。 */
 
-
       /**
        * 「一拖就回 0 秒」的可观测判据自愈（第 13 轮）。
        *
@@ -4214,7 +4200,6 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
       const UNSEEKABLE_HEAL_WINDOW_MS = 20000;
       /** 换源后延迟一点再判：`seekable` 在 loadedmetadata 当场可能还没填好。 */
       /** 挂非 token 源时记一行 —— Desktop 上这就是「之后拖不动」的前兆，正常路径不刷屏。 */
-
 
       /** Remember the resume position. localStorage writes are synchronous, so
        *  timeupdate only persists every ~5s; pause/pagehide flush exactly. */
@@ -4423,9 +4408,9 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
       /** 当前生效的 RG 线性增益（1 = 不动）。回退路径要把它折进元素音量。 */
       let rgLinear = 1;
       /**
-       * 预取 + 交叉淡化（消除切歌过渡缝）。**默认关闭**：300ms 淡出是设备瞬态的保险，
-       * 要先确认「噪声已修复」再默认开启（§2.18 / §2.21）。开启：`?crossfade=1`
-       * 或 `window.__dshMusicCrossfade = true`。
+       * 预取 + 交叉淡化（消除切歌过渡缝）。**默认开启**：噪声与平台/其它来源有关，
+       * 不属于本插件的设备重协商（§2.18 / §2.21）。
+       * 显式关闭：`?crossfade=0` 或 `window.__dshMusicCrossfade = false`。
        */
       const crossfadeOn = (() => {
         try {
@@ -5789,7 +5774,7 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
       /** 封面放大预览（只给音频封面）与 MV 就地放大：同样放进 player store 跨卸载保留。 */
       const zoomOpen = state.zoomOpen;
       const mvBig = state.mvBig;
-      const webFullscreen = state.webFullscreen;
+      const [webFullscreen, setWebFullscreen] = React.useState(false);
       /** MV 画面槽（媒体元素会被搬进来）与隐藏停靠位（弹层关着时停在这儿）。 */
       const mvStageRef = useRef(null);
       const mvParkRef = useRef(null);
@@ -5800,51 +5785,66 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
       const isVideo = currentTrack !== undefined && currentTrack.kind === "video";
       const mvState = state.mv;
 
+      /** Safari/旧 Electron 用 webkit 前缀；标准 API 优先。 */
+      const fullscreenElement = () => {
+        const doc = document as unknown as { fullscreenElement?: Element | null; webkitFullscreenElement?: Element | null };
+        return doc.fullscreenElement ?? doc.webkitFullscreenElement ?? null;
+      };
       const exitNativeFullscreen = () => {
-        const exit = document.exitFullscreen;
+        const doc = document as unknown as { exitFullscreen?: () => Promise<void>; webkitExitFullscreen?: () => void };
+        const exit = typeof doc.exitFullscreen === "function" ? doc.exitFullscreen : doc.webkitExitFullscreen;
         if (typeof exit !== "function") return;
-        const result = exit.call(document) as Promise<void> | undefined;
-        if (result !== undefined && typeof result.catch === "function") result.catch(() => {});
+        try {
+          const result = exit.call(document) as Promise<void> | void;
+          if (result !== undefined && typeof result.catch === "function") result.catch(() => {});
+        } catch { /* 不是全屏态 / 权限已撤销：没有可退的 */ }
       };
       const toggleWebFullscreen = () => {
         if (nativeFullscreen) exitNativeFullscreen();
-        player.toggleWebFullscreen();
+        setWebFullscreen((previous) => !previous);
       };
       const toggleNativeFullscreen = () => {
         if (nativeFullscreen) {
           exitNativeFullscreen();
           return;
         }
-        if (player.getState().webFullscreen) player.setWebFullscreen(false);
+        if (webFullscreen) setWebFullscreen(false);
         const element = playerRef.current as HTMLElement | null;
-        if (element === null || typeof element.requestFullscreen !== "function") return;
-        const result = element.requestFullscreen();
-        if (result !== undefined && typeof result.catch === "function") result.catch(() => {});
+        if (element === null) return;
+        const request = element.requestFullscreen
+          ?? (element as unknown as { webkitRequestFullscreen?: () => Promise<void> | void }).webkitRequestFullscreen;
+        if (typeof request !== "function") return;
+        try {
+          const result = request.call(element) as Promise<void> | void;
+          if (result !== undefined && typeof result.catch === "function") result.catch(() => {});
+        } catch { /* 用户手势/策略拒绝：保持窗口态 */ }
       };
       const closeFullPlayer = () => {
-        if (document.fullscreenElement != null) exitNativeFullscreen();
+        if (fullscreenElement() != null) exitNativeFullscreen();
         player.closePlayer();
       };
 
       // 原生全屏由浏览器驱动：按钮、F、浏览器自己的 Esc 都走同一个 fullscreenchange。
       React.useEffect(() => {
-        const onChange = () => setNativeFullscreen(document.fullscreenElement === playerRef.current);
+        const onChange = () => setNativeFullscreen(fullscreenElement() === playerRef.current);
         document.addEventListener("fullscreenchange", onChange);
+        document.addEventListener("webkitfullscreenchange", onChange);
         return () => {
           document.removeEventListener("fullscreenchange", onChange);
-          if (document.fullscreenElement === playerRef.current) exitNativeFullscreen();
+          document.removeEventListener("webkitfullscreenchange", onChange);
+          if (fullscreenElement() === playerRef.current) exitNativeFullscreen();
         };
       }, []);
       // 收起播放器时不要把人留在系统全屏里。
       React.useEffect(() => {
-        if (!playerOpen && document.fullscreenElement === playerRef.current) exitNativeFullscreen();
+        if (!playerOpen && fullscreenElement() === playerRef.current) exitNativeFullscreen();
       }, [playerOpen]);
       // 播放器里从 MV 切到纯音频：退出两种全屏，别让音频铺满屏幕。
       React.useEffect(() => {
-        if (isVideo) return;
-        if (player.getState().webFullscreen) player.setWebFullscreen(false);
+        if (playerOpen && isVideo) return;
+        setWebFullscreen(false);
         if (nativeFullscreen) exitNativeFullscreen();
-      }, [isVideo, nativeFullscreen]);
+      }, [playerOpen, isVideo, nativeFullscreen]);
       // 沉浸模式播放时 2.6s 无操作淡出控制层；暂停/移动/按键立即唤醒。
       React.useEffect(() => {
         if (!immersive || !state.playing) {
@@ -5859,14 +5859,15 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
         };
         wake();
         const element = playerRef.current as HTMLElement | null;
+        const wakeKey = (event) => { if (event.key !== "Escape") wake(); };
         element?.addEventListener("pointermove", wake);
         element?.addEventListener("pointerdown", wake);
-        element?.addEventListener("keydown", wake);
+        window.addEventListener("keydown", wakeKey);
         return () => {
           if (timer !== null) clearTimeout(timer);
           element?.removeEventListener("pointermove", wake);
           element?.removeEventListener("pointerdown", wake);
-          element?.removeEventListener("keydown", wake);
+          window.removeEventListener("keydown", wakeKey);
         };
       }, [immersive, state.playing]);
       useEffect(() => () => {
@@ -5901,8 +5902,8 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
             // 现场读 store 而不是闭包捕获：这个 effect 只在 playerOpen 变化时重挂，
             // 捕获 mvBig / zoomOpen 会读到旧值，Esc 的手感就取决于上一次渲染。
             const live = player.getState();
-            if (document.fullscreenElement != null) { exitNativeFullscreen(); return; }
-            if (live.webFullscreen) { player.setWebFullscreen(false); return; }
+            if (fullscreenElement() != null) { exitNativeFullscreen(); return; }
+            if (webFullscreen) { setWebFullscreen(false); return; }
             if (live.mvBig) { player.toggleMvBig(); return; }    // Esc：先还原 MV 大小
             if (live.zoomOpen) { player.setZoomOpen(false); return; } // 再关封面预览，最后才关播放器
             closeFullPlayer();
@@ -5956,7 +5957,7 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
         };
         window.addEventListener("keydown", onKeyDown);
         return () => window.removeEventListener("keydown", onKeyDown);
-      }, [playerOpen, isVideo, nativeFullscreen]);
+      }, [playerOpen, isVideo, nativeFullscreen, webFullscreen]);
       // 删除确认条在主视图里；弹层开着会把它盖住，所以进入确认态就自动收起弹层
       useEffect(() => {
         if (state.pendingDelete >= 0) player.closePlayer();
@@ -6430,7 +6431,7 @@ textarea.dshm-importInput{height:auto;min-height:60px;padding:8px 10px;resize:ve
               event.stopPropagation();
               if (immersive) {
                 if (nativeFullscreen) exitNativeFullscreen();
-                if (webFullscreen) player.setWebFullscreen(false);
+                if (webFullscreen) setWebFullscreen(false);
                 return;
               }
               closeFullPlayer();
